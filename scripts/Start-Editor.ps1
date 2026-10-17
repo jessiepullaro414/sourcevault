@@ -32,7 +32,7 @@ try {
     $start = [System.Diagnostics.ProcessStartInfo]::new($exe)
     $start.UseShellExecute = $false
     $start.WorkingDirectory = $publishFolder
-    $start.ArgumentList.Add('--synthetic-preview')
+    $start.Arguments = '--synthetic-preview' # constant; ArgumentList is unavailable in Windows PowerShell 5.1
     $start.Environment['DOTNET_ROOT'] = Split-Path -Parent $DotnetPath
     $start.Environment['DOTNET_ROOT_X64'] = Split-Path -Parent $DotnetPath
     [System.Diagnostics.Process]::Start($start) | Out-Null
