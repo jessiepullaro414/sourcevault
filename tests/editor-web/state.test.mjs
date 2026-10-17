@@ -57,3 +57,24 @@ test('unknown IDs and non-text edits fail; reset restores bundled defaults and d
   assert.deepEqual(s.metadata, { locked: false, dirtyCount: 0, revisionCount: 0 });
   assert.deepEqual(s.openIds, ['pipeline', 'types']);
 });
+test('session expiry in the mock locks the preview, keeps drafts, and unlock starts a new mock session', () => {
+  let t = 0; const s = new PreviewSession({ now: () => t });
+  s.edit('pipeline', 'draft'); t += 5 * 60 * 1000;
+  assert.throws(() => s.save('pipeline', 0), /SessionExpired/);
+  assert.equal(s.locked, true); assert.equal(s.file('pipeline').text, 'draft');
+  assert.equal(s.file('pipeline').revision, 0); assert.equal(s.dirty('pipeline'), true);
+  s.unlock(); assert.equal(s.locked, false);
+  assert.equal(s.save('pipeline', 0), 1);
+});
+test('keepAlive renews idle expiry but not the 30-minute absolute limit', () => {
+  let t = 0; const s = new PreviewSession({ now: () => t });
+  for (let i = 0; i < 29; i++) { t += 60 * 1000; s.keepAlive(); }
+  assert.equal(s.locked, false);
+  t += 60 * 1000; assert.throws(() => s.keepAlive(), /SessionExpired/); assert.equal(s.locked, true);
+});
+test('lock ends the mock session and unlock reopens open documents in a fresh one', () => {
+  let t = 0; const s = new PreviewSession({ now: () => t });
+  s.open('readme'); s.edit('readme', 'kept across lock'); s.lock(); t += 10 * 60 * 1000; s.unlock();
+  assert.equal(s.locked, false); assert.equal(s.file('readme').text, 'kept across lock');
+  assert.equal(s.save('readme', 0), 1);
+});
