@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -5,6 +6,9 @@ using System.Text.Json;
 namespace SourceVault.Storage;
 
 public sealed record ProjectInfo(Guid ProjectId, string Name, StoreSnapshot Snapshot);
+
+/// <summary>A project or file name is already taken (case-insensitive). Carries no name.</summary>
+public sealed class NameExistsException() : Exception("Name already exists.");
 
 public enum CatalogFailure { Layout, Index, Project }
 
@@ -30,6 +34,9 @@ public sealed class ProjectCatalog
     private static readonly UTF8Encoding Utf8 = new(false, true);
     private readonly string vaultRoot;
     private readonly IKeyProtector protector;
+    // Store instances are kept so their authenticated-manifest caches stay warm across requests.
+    private readonly ConcurrentDictionary<Guid, RevisionStore> stores = new();
+    private readonly object createGate = new();
 
     public ProjectCatalog(string vaultRoot, IKeyProtector protector)
     {
@@ -64,7 +71,7 @@ public sealed class ProjectCatalog
         var result = new List<ProjectInfo>();
         foreach (var (id, name) in entries)
         {
-            try { result.Add(new(id, name, new RevisionStore(ProjectPath(id), id, protector).List())); }
+            try { result.Add(new(id, name, Store(id).List())); }
             catch (Exception e) when (e is not OutOfMemoryException) { throw new VaultCatalogException(CatalogFailure.Project); }
         }
         return result;
@@ -77,27 +84,36 @@ public sealed class ProjectCatalog
     public ProjectInfo CreateProject(string name)
     {
         ValidateProjectName(name);
+        lock (createGate) return CreateProjectLocked(name);
+    }
+
+    private ProjectInfo CreateProjectLocked(string name)
+    {
         var entries = ReadIndexEntries();
         if (entries is null)
         {
-            var index = new RevisionStore(IndexPath, IndexStoreId, protector);
+            var index = Store(IndexStoreId);
             var empty = index.Initialize();
             index.Commit(empty.SnapshotId, IndexDocument, SerializeIndex([]));
             entries = [];
         }
         if (entries.Count >= MaximumProjects) throw new InvalidDataException("Project count exceeded.");
-        if (entries.Any(e => StringComparer.OrdinalIgnoreCase.Equals(e.Name, name))) throw new ArgumentException("Project name already exists.");
+        if (entries.Any(e => StringComparer.OrdinalIgnoreCase.Equals(e.Name, name))) throw new NameExistsException();
         var id = Guid.NewGuid();
         Directory.CreateDirectory(ProjectsPath);
-        var snapshot = new RevisionStore(ProjectPath(id), id, protector).Initialize();
-        var indexStore = new RevisionStore(IndexPath, IndexStoreId, protector);
+        var snapshot = Store(id).Initialize();
+        var indexStore = Store(IndexStoreId);
         var current = indexStore.List();
         indexStore.Commit(current.SnapshotId, IndexDocument, SerializeIndex(entries.Append((id, name)).ToList()));
         return new(id, name, snapshot);
     }
 
     /// <summary>The store of a project that <see cref="OpenAndVerify"/> returned.</summary>
-    public RevisionStore OpenProject(Guid projectId) => new(ProjectPath(projectId), projectId, protector);
+    public RevisionStore OpenProject(Guid projectId) => Store(projectId);
+
+    private RevisionStore Store(Guid id) => stores.GetOrAdd(id, key => key == IndexStoreId
+        ? new RevisionStore(IndexPath, IndexStoreId, protector)
+        : new RevisionStore(ProjectPath(key), key, protector));
 
     private List<(Guid ProjectId, string Name)>? ReadIndexEntries()
     {
@@ -110,7 +126,7 @@ public sealed class ProjectCatalog
         byte[]? content = null;
         try
         {
-            var index = new RevisionStore(IndexPath, IndexStoreId, protector);
+            var index = Store(IndexStoreId);
             var snapshot = index.List();
             if (snapshot.Files.Count != 1 || snapshot.Files[0].LogicalName != IndexDocument) throw new InvalidDataException();
             content = index.Open(snapshot.SnapshotId, snapshot.Files[0].FileId);

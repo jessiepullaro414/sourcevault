@@ -234,6 +234,18 @@ public sealed class RevisionStore
         return Convert.FromHexString(text);
     }
 
+    /// <summary>Whether <paramref name="name"/> is accepted as a logical file name. For callers validating input up front.</summary>
+    public static bool IsValidLogicalName(string name)
+    {
+        try { ValidateName(name); return true; } catch (ArgumentException) { return false; }
+    }
+
+    /// <summary>Whether <paramref name="content"/> is accepted as a document: strict UTF-8, at most 256 KiB.</summary>
+    public static bool IsValidContent(ReadOnlySpan<byte> content)
+    {
+        try { ValidateContent(content); return true; } catch (Exception e) when (e is ArgumentException or InvalidDataException) { return false; }
+    }
+
     private static void ValidateContent(ReadOnlySpan<byte> value)
     {
         if (value.Length > MaximumDocumentBytes) throw new ArgumentException("Document limit exceeded.");

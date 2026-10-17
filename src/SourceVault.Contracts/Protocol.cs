@@ -47,6 +47,36 @@ public static class FrameCodec
         }
     }
 
+    /// <summary>
+    /// For long-lived connections: waits up to <paramref name="idleTimeout"/> for a frame to begin, then requires the
+    /// rest of the frame within <see cref="ProtocolLimits.FrameDeadline"/>. Returns null on a clean close between frames.
+    /// </summary>
+    public static async Task<byte[]?> ReadAfterIdleAsync(Stream stream, TimeSpan idleTimeout, CancellationToken cancellationToken = default)
+    {
+        var header = new byte[4];
+        using (var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            idle.CancelAfter(idleTimeout);
+            if (await stream.ReadAsync(header.AsMemory(0, 1), idle.Token).ConfigureAwait(false) == 0) return null;
+        }
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(ProtocolLimits.FrameDeadline);
+        await stream.ReadExactlyAsync(header.AsMemory(1), deadline.Token).ConfigureAwait(false);
+        uint length = BinaryPrimitives.ReadUInt32LittleEndian(header);
+        if (length is 0 or > ProtocolLimits.MaxFrameBytes) throw new ProtocolException("LimitExceeded");
+        var payload = new byte[(int)length];
+        try
+        {
+            await stream.ReadExactlyAsync(payload, deadline.Token).ConfigureAwait(false);
+            return payload;
+        }
+        catch
+        {
+            CryptographicOperations.ZeroMemory(payload);
+            throw;
+        }
+    }
+
     public static async Task WriteAsync(Stream stream, ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken = default)
     {
@@ -62,24 +92,63 @@ public static class FrameCodec
     }
 }
 
+/// <summary>A protocol version and its exact operation catalog.</summary>
+public sealed class ProtocolCatalog
+{
+    public int Version { get; }
+    public IReadOnlySet<string> Operations { get; }
+    private ProtocolCatalog(int version, params string[] operations) =>
+        (Version, Operations) = (version, new HashSet<string>(operations, StringComparer.Ordinal));
+
+    public static readonly ProtocolCatalog V1 = new(1,
+        "BeginSession", "ListProjects", "ListFiles", "OpenDocument", "ApplyEdits",
+        "CloseDocument", "RequestBuild", "GetBuildStatus", "EndSession");
+
+    /// <summary>contracts/protocol-v2.md: sessions not bound to a project, project/file creation, no CloseDocument.</summary>
+    public static readonly ProtocolCatalog V2 = new(2,
+        "BeginSession", "ListProjects", "CreateProject", "ListFiles", "OpenDocument", "CreateFile",
+        "ApplyEdits", "EndSession", "RequestBuild", "GetBuildStatus");
+}
+
+/// <summary>
+/// A parsed request that keeps the parsed document over the caller's frame buffer instead of copying it, so
+/// request content exists only in that buffer, which the caller zeroes after disposing this object.
+/// </summary>
+public sealed class ParsedRequest : IDisposable
+{
+    private readonly JsonDocument document;
+    internal ParsedRequest(JsonDocument document, Guid requestId, string operation, JsonElement body) =>
+        (this.document, RequestId, Operation, Body) = (document, requestId, operation, body);
+    public Guid RequestId { get; }
+    public string Operation { get; }
+    public JsonElement Body { get; }
+    public void Dispose() => document.Dispose();
+}
+
 public static class ProtocolParser
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
-    private static readonly HashSet<string> Operations = new(StringComparer.Ordinal)
-    {
-        "BeginSession", "ListProjects", "ListFiles", "OpenDocument", "ApplyEdits",
-        "CloseDocument", "RequestBuild", "GetBuildStatus", "EndSession"
-    };
 
     public static RequestEnvelope ParseRequest(ReadOnlySpan<byte> json)
     {
+        using var parsed = Parse(json.ToArray(), ProtocolCatalog.V1);
+        return new RequestEnvelope(ProtocolCatalog.V1.Version, parsed.RequestId, parsed.Operation, parsed.Body.Clone());
+    }
+
+    /// <summary>Strict parse against <paramref name="catalog"/> without copying the frame. Dispose before zeroing it.</summary>
+    public static ParsedRequest ParseRequest(ReadOnlyMemory<byte> frame, ProtocolCatalog catalog) => Parse(frame, catalog);
+
+    private static ParsedRequest Parse(ReadOnlyMemory<byte> frame, ProtocolCatalog catalog)
+    {
+        var json = frame.Span;
         if (json.Length is 0 or > ProtocolLimits.MaxFrameBytes)
             throw new ProtocolException("LimitExceeded");
+        JsonDocument? document = null;
         try
         {
             _ = StrictUtf8.GetCharCount(json);
             RejectDuplicateProperties(json);
-            using var document = JsonDocument.Parse(json.ToArray(), new JsonDocumentOptions
+            document = JsonDocument.Parse(frame, new JsonDocumentOptions
             {
                 AllowTrailingCommas = false,
                 CommentHandling = JsonCommentHandling.Disallow,
@@ -98,7 +167,7 @@ public static class ProtocolParser
             if (fields != 4 || !root.TryGetProperty("version", out var version) ||
                 version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int versionNumber))
                 throw new ProtocolException("InvalidRequest");
-            if (versionNumber != ProtocolLimits.Version)
+            if (versionNumber != catalog.Version)
                 throw new ProtocolException("UnsupportedVersion");
             if (!root.TryGetProperty("requestId", out var id) || id.ValueKind != JsonValueKind.String ||
                 !TryParseId(id.GetString(), out Guid requestId))
@@ -106,15 +175,18 @@ public static class ProtocolParser
             if (!root.TryGetProperty("operation", out var operation) ||
                 operation.ValueKind != JsonValueKind.String || operation.GetString() is not string operationName)
                 throw new ProtocolException("InvalidRequest");
-            if (!Operations.Contains(operationName))
+            if (!catalog.Operations.Contains(operationName))
                 throw new ProtocolException("UnsupportedOperation");
             if (!root.TryGetProperty("body", out var body) || body.ValueKind != JsonValueKind.Object)
                 throw new ProtocolException("InvalidRequest");
-            return new RequestEnvelope(versionNumber, requestId, operationName, body.Clone());
+            var parsed = new ParsedRequest(document, requestId, operationName, body);
+            document = null; // owned by the result
+            return parsed;
         }
         catch (JsonException) { throw new ProtocolException("InvalidRequest"); }
         catch (DecoderFallbackException) { throw new ProtocolException("InvalidRequest"); }
         catch (InvalidOperationException) { throw new ProtocolException("InvalidRequest"); }
+        finally { document?.Dispose(); }
     }
 
     public static bool TryParseId(string? text, out Guid id) =>

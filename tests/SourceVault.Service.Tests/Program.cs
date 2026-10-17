@@ -66,7 +66,7 @@ using (var lifecycle = new ServiceLifecycle(s => { lock (statuses) statuses.Add(
     Check(task.Wait(TimeSpan.FromSeconds(5)));
     Check(resource.Disposed);
     Check(statuses.Select(s => s.State).SequenceEqual(new[] { ServiceState.StartPending, ServiceState.Running, ServiceState.StopPending, ServiceState.Stopped }));
-    Check(statuses[0].AcceptedControls == 0 && statuses[1].AcceptedControls == 5 && statuses[2].AcceptedControls == 0);
+    Check(statuses[0].AcceptedControls == 0 && statuses[1].AcceptedControls == 0x85 && statuses[2].AcceptedControls == 0);
     Check(statuses[0].Checkpoint == 1 && statuses[1].Checkpoint == 0 && statuses[3].WaitHint == 0);
     Check(statuses[3].ExitCode == 0);
     lifecycle.RequestStop(); Check(statuses.Count == 4);
@@ -99,7 +99,7 @@ using (var lifecycle = new ServiceLifecycle(s => statuses.Add(s)))
     Check(statuses.Select(s => s.State).SequenceEqual(new[] { ServiceState.StartPending, ServiceState.Stopped }));
     Check(statuses[^1].ExitCode == 1066 && statuses[^1].ServiceSpecificExitCode == 10);
 }
-Console.WriteLine($"serviceTests=passed; assertions={count}; tpmTouched=false; scmTouched=false; sourceEndpoints=disabled");
+Console.WriteLine($"serviceTests=passed; assertions={count}; tpmTouched=false; scmTouched=false; endpoints=pipe-v2 (see Endpoints.Tests)");
 sealed class FakeResource : IDisposable
 {
     internal bool Disposed { get; private set; }

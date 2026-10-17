@@ -3,7 +3,8 @@
 # The service's TPM key stays in the NT SERVICE\SourceVault profile; this script does not delete keys.
 param(
     [string]$InstallRoot = (Join-Path $env:ProgramFiles 'SourceVault'),
-    [switch]$RemoveVaultRoot # also remove C:\ProgramData\SourceVault, only if the vault folder is empty
+    [switch]$RemoveVaultRoot, # also remove C:\ProgramData\SourceVault, only if the vault folder is empty
+    [switch]$RemoveOperatorsGroup # also delete the local group SourceVault Operators
 )
 $ErrorActionPreference = 'Stop'
 $serviceName = 'SourceVault'
@@ -35,4 +36,8 @@ if ($RemoveVaultRoot -and (Test-Path -LiteralPath $vaultParent)) {
     Remove-Item -LiteralPath $vaultParent -Recurse -Force
     Write-Output "Removed empty $vaultParent."
 } elseif (Test-Path -LiteralPath $vaultParent) { Write-Output "Kept $vaultParent (use -RemoveVaultRoot to remove it when empty)." }
+if ($RemoveOperatorsGroup -and (Get-LocalGroup -Name 'SourceVault Operators' -ErrorAction SilentlyContinue)) {
+    Remove-LocalGroup -Name 'SourceVault Operators'
+    Write-Output 'Removed local group SourceVault Operators.'
+}
 Write-Output 'The service TPM key (if provisioned) remains in the NT SERVICE\SourceVault profile.'

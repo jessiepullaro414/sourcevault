@@ -23,5 +23,7 @@ internal sealed class StartupRefusedException(uint code) : Exception
     internal const uint VaultRootUntrusted = 10;
     internal const uint CatalogUntrusted = 11; // unexpected entries in the vault root, or the project index failed
     internal const uint ProjectUntrusted = 12; // a project store failed authentication
+    internal const uint OperatorsGroupMissing = 13; // local group "SourceVault Operators" does not exist
+    internal const uint PipeUnavailable = 14; // the pipe could not be created, e.g. its name was already taken
     internal uint Code { get; } = code;
 }

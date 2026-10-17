@@ -1,5 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
-  <ItemGroup><ProjectReference Include="../SourceVault.Windows/SourceVault.Windows.csproj" /></ItemGroup>
-  <ItemGroup><InternalsVisibleTo Include="SourceVault.Service.Tests" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SourceVault.Windows/SourceVault.Windows.csproj" />
+    <ProjectReference Include="../SourceVault.Contracts/SourceVault.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Service.Tests" /><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
 </Project>

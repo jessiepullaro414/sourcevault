@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using SourceVault.Storage;
 using SourceVault.Windows;
 
@@ -37,9 +38,9 @@ internal sealed class ScmHost
             }
             using var instance = new ServiceLifecycle(Report);
             lifecycle = instance;
-            // RUNNING only after identity, config, vault root, key and every project have been verified.
-            // No pipe, document or build endpoint exists here yet.
-            instance.Run(() => OpenVerifiedVault().Key);
+            // RUNNING only after identity, config, vault root, key and every project have been verified and the
+            // pipe is listening. No build endpoint exists.
+            instance.Run(StartEndpoints);
         }
         catch { failure = 3; }
         finally { lifecycle = null; }
@@ -55,6 +56,47 @@ internal sealed class ScmHost
         2 when args[1] == "create-synthetic-project" => StartMode.CreateSyntheticProject,
         _ => StartMode.Invalid,
     };
+
+    internal const string OperatorsGroupName = "SourceVault Operators";
+    private volatile VaultPipeServer? server;
+
+    private IDisposable StartEndpoints()
+    {
+        var (key, catalog, projects) = OpenVerifiedVault();
+        try
+        {
+            SecurityIdentifier operators;
+            try { operators = (SecurityIdentifier)new NTAccount(OperatorsGroupName).Translate(typeof(SecurityIdentifier)); }
+            catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.OperatorsGroupMissing); }
+            using var self = WindowsIdentity.GetCurrent();
+            var pipeServer = new VaultPipeServer(VaultPipe.ProductionName, self.User!,
+                new PipePeerPolicy(operators, InstalledClients()), new VaultProtocol(catalog, projects));
+            try { pipeServer.Start(); }
+            catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+            {
+                pipeServer.Dispose();
+                throw new StartupRefusedException(StartupRefusedException.PipeUnavailable); // e.g. name already taken
+            }
+            server = pipeServer;
+            return new Owned(() => { server = null; pipeServer.Dispose(); key.Dispose(); });
+        }
+        catch { key.Dispose(); throw; }
+    }
+
+    // Exact executables allowed to connect: apphost .exe files under the admin-owned install root. Never the
+    // shared runtime's dotnet.exe, which would let any DLL connect.
+    internal static IEnumerable<string> InstalledClients()
+    {
+        var installRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
+        yield return Path.Combine(installRoot, "client", "SourceVault.LabClient.exe");
+        yield return Path.Combine(installRoot, "editor", "SourceVault.Editor.exe");
+    }
+
+    private sealed class Owned(Action dispose) : IDisposable
+    {
+        private int disposed;
+        public void Dispose() { if (Interlocked.Exchange(ref disposed, 1) == 0) dispose(); }
+    }
 
     // Identity, config, trusted vault root, existing key, then every project authenticated. The caller owns the key.
     private static (TpmKeyProtector Key, ProjectCatalog Catalog, IReadOnlyList<ProjectInfo> Projects) OpenVerifiedVault()
@@ -135,6 +177,14 @@ internal sealed class ScmHost
         {
             if (control is 1 or 5) { lifecycle?.RequestStop(); return 0; }
             if (control == 4) return 0; // Interrogate: status unchanged; no redundant SetServiceStatus call.
+            if (control == 14) // SERVICE_CONTROL_SESSIONCHANGE
+            {
+                // WTS_CONSOLE_DISCONNECT, WTS_REMOTE_DISCONNECT, WTS_SESSION_LOGOFF, WTS_SESSION_LOCK end vault sessions.
+                // eventData is WTSSESSION_NOTIFICATION { DWORD cbSize; DWORD dwSessionId; }.
+                if (eventType is 2 or 4 or 6 or 7 && eventData != IntPtr.Zero)
+                    server?.EndWindowsSession(unchecked((uint)Marshal.ReadInt32(eventData, 4)));
+                return 0;
+            }
             return 120; // ERROR_CALL_NOT_IMPLEMENTED.
         }
         catch { failure = 3; return 1064; }

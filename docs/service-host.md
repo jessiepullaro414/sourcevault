@@ -101,3 +101,16 @@ Owner-run lab, 2026-10-17:
 | `New-SyntheticProject.ps1` | Created a three-file synthetic project under `NT SERVICESourceVault` with its TPM key, and re-verified the vault (1 project folder). |
 | `Test-ServiceLab.ps1` with the project | RUNNING in 1.3 s with the index and project authenticated at startup; clean stop, exit 0. |
 | `Test-VaultTamper.ps1` | A stray file in the vault root was refused with 1066/11; one flipped bit in the project manifest was refused with 1066/12; the restored vault reached RUNNING. The vault was restored byte-for-byte (SHA-256 verified). |
+
+## Pipe endpoints (protocol v2)
+
+Once startup verification passes, the service listens on `\.\pipe\SourceVault.v1` and serves [protocol v2](../contracts/protocol-v2.md). RUNNING now means both "verified" and "listening". Startup additionally refuses with 1066/13 if the *SourceVault Operators* group is missing, and with 1066/14 if the pipe cannot be created.
+
+The service accepts `SERVICE_CONTROL_SESSIONCHANGE` (accepted controls `0x85` while running). Lock, logoff and disconnect close that Windows session's vault connections.
+
+Two production details differ from the IPC spike, both found while building on this machine:
+
+- **Users cannot open service processes** (verified: an unelevated user is denied even limited query on LocalSystem, LocalService and NetworkService processes). Clients therefore identify the server by the **pipe's owner SID**, not by its process token.
+- **Service accounts get no access to user processes** (verified: user process DACLs grant only the user, SYSTEM, and limited query to the logon SID). Installed clients therefore grant the service `PROCESS_QUERY_LIMITED_INFORMATION` on themselves so that their executable path can be read.
+
+Tested in process (`tests/SourceVault.Endpoints.Tests`, 12 cases) with a real local pipe, synthetic vault and test key. Not yet exercised on the installed service with a separate client; the lab client is the next step.

@@ -1,6 +1,8 @@
 #Requires -RunAsAdministrator
 # LAB ONLY. Normal start/stop check: the service must reach RUNNING only after opening its own TPM key as
 # NT SERVICE\SourceVault, then stop cleanly. Run again after a reboot to check the key survives restarts.
+# -LeaveRunning skips the stop, e.g. to run Test-PipeAccess.ps1 from a normal window; stop later with: sc.exe stop SourceVault
+param([switch]$LeaveRunning)
 $ErrorActionPreference = 'Stop'
 $serviceName = 'SourceVault'
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -20,6 +22,8 @@ if ($service.Status -ne 'Running') {
     $reason = if ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 10) { 'vault root missing or untrusted; run New-VaultRoot.ps1 or the service''s vault-root-check' }
         elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 11) { 'unexpected entry in the vault, or the project index failed authentication' }
         elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 12) { 'a project failed authentication' }
+        elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 13) { 'local group SourceVault Operators is missing; run New-OperatorsGroup.ps1' }
+        elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 14) { 'the pipe could not be created (name already taken?)' }
         elseif ($state.ExitCode -eq 1064) { 'key, config or identity check failed' } else { 'see exit code' }
     Write-Output "FAIL: service did not reach RUNNING (state $($service.Status), Win32 exit $($state.ExitCode)/$($state.ServiceSpecificExitCode): $reason)."
     exit 1
@@ -28,6 +32,13 @@ $processId = $state.ProcessId
 $owner = Invoke-CimMethod -InputObject (Get-CimInstance Win32_Process -Filter "ProcessId=$processId") -MethodName GetOwner
 $identityOk = $owner.Domain -eq 'NT SERVICE' -and $owner.User -eq 'SourceVault'
 Write-Output ("{0}: RUNNING after {1:N1}s; process {2} runs as {3}\{4}" -f ($(if ($identityOk) { 'PASS' } else { 'FAIL' })), ((Get-Date) - $started).TotalSeconds, $processId, $owner.Domain, $owner.User)
+# Listing pipe names does not connect to them.
+$pipeOk = [bool]([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -like '*\SourceVault.v1' })
+Write-Output ("{0}: pipe \\.\pipe\SourceVault.v1 {1}" -f ($(if ($pipeOk) { 'PASS' } else { 'FAIL' })), ($(if ($pipeOk) { 'is listening' } else { 'not found' })))
+if ($LeaveRunning) {
+    Write-Output 'Left RUNNING. Now run scripts\lab\Test-PipeAccess.ps1 from a normal window, then: sc.exe stop SourceVault'
+    if ($identityOk -and $pipeOk) { exit 0 } else { exit 1 }
+}
 
 $stopping = Get-Date
 & sc.exe stop $serviceName | Out-Null
@@ -38,4 +49,4 @@ Write-Output ("{0}: stop ended in state {1} after {2:N1}s, Win32 exit {3}" -f ($
 Start-Sleep -Seconds 1
 $orphan = Get-Process -Id $processId -ErrorAction SilentlyContinue
 Write-Output ("{0}: service process {1} after stop" -f ($(if ($orphan) { 'FAIL' } else { 'PASS' })), ($(if ($orphan) { 'still running' } else { 'exited' })))
-if ($identityOk -and $stopOk -and !$orphan) { exit 0 } else { exit 1 }
+if ($identityOk -and $pipeOk -and $stopOk -and !$orphan) { exit 0 } else { exit 1 }

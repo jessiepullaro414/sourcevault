@@ -57,7 +57,7 @@ internal sealed class ServiceLifecycle : IDisposable
     private void Publish(ServiceState next, uint exit, uint specific = 0)
     {
         state = next;
-        report(new(next, next == ServiceState.Running ? 5u : 0u, exit,
+        report(new(next, next == ServiceState.Running ? 0x85u : 0u, exit,
             next is ServiceState.StartPending or ServiceState.StopPending ? 1u : 0u,
             next is ServiceState.StartPending or ServiceState.StopPending ? 15000u : 0u, specific));
     }

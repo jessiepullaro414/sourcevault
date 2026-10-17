@@ -237,6 +237,7 @@ Test("catalog: create, reopen, names only inside encrypted index, unwrap budget 
     var fresh = new ProjectCatalog(t.Vault, counting);
     IReadOnlyList<ProjectInfo> projects = [];
     Assert(Unwraps(() => projects = fresh.OpenAndVerify()) == 2 + 2);
+    Assert(Unwraps(() => fresh.OpenAndVerify()) == 1); // warm stores; only the index document is decrypted again
     Assert(projects.Select(p => p.Name).SequenceEqual(new[] { "Alpha", "Beta" }));
     Assert(projects[0].Snapshot.Files.Count == 1 && projects[1].Snapshot.Files.Count == 0);
     Assert(Encoding.UTF8.GetString(fresh.OpenProject(t.A.ProjectId).Open(projects[0].Snapshot.SnapshotId, projects[0].Snapshot.Files[0].FileId)) == "synthetic-alpha-main");
@@ -251,7 +252,8 @@ Test("catalog: create, reopen, names only inside encrypted index, unwrap budget 
 Test("catalog: duplicate and invalid project names rejected", () =>
 {
     var t = TwoProjects(); var c = new ProjectCatalog(t.Vault, counting);
-    foreach (var bad in new[] { "alpha", "", " lead", "trail ", "tab\tname", new string('n', 65), "\ud800" })
+    Reject<NameExistsException>(() => c.CreateProject("alpha"));
+    foreach (var bad in new[] { "", " lead", "trail ", "tab\tname", new string('n', 65), "\ud800" })
         Reject<ArgumentException>(() => c.CreateProject(bad));
     Assert(c.OpenAndVerify().Count == 2);
 });

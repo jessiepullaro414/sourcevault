@@ -15,6 +15,8 @@ They change machine state: a Windows service, a folder under Program Files, and 
 | 5 | `New-VaultRoot.ps1` | **administrator** | Creates the fixed vault root `C:\ProgramData\SourceVault\vault`, using the exact protected ACL the installed service reports (`vault-root-sddl`). The `SourceVault` parent folder is protected too: SYSTEM and Administrators get full control, and the service gets read/traverse on that folder only. The script then runs the service's read-only `vault-root-check`. It refuses if `C:\ProgramData\SourceVault` already exists, and creates no store or files. |
 | 6 | `New-SyntheticProject.ps1` | **administrator** | Runs `sc start SourceVault create-synthetic-project` once. As the service account, the service verifies the vault, creates project "Synthetic demo N" with three fixed fictional files encrypted under its TPM key, re-verifies, and stops. |
 | 7 | `Test-VaultTamper.ps1` | **administrator** | Fail-closed drill, synthetic vaults only. A stray file in the vault root must refuse startup with 1066/11. One flipped bit in a project's live manifest must refuse with 1066/12. The original bytes are restored and checked by SHA-256, and the restored vault must reach RUNNING. |
+| 8 | `New-OperatorsGroup.ps1` | **administrator** | Creates the local group *SourceVault Operators* if it is missing and adds a member (default: you). The service only lets this group use its pipe, and refuses to start without the group (1066/13). The member must **sign out and back in** before the membership takes effect. |
+| 9 | `Test-PipeAccess.ps1` | **normal user** | With the service left running (`Test-ServiceLab.ps1 -LeaveRunning`), probes the pipe from PowerShell, which is not an installed client. If you are not an operator in this logon, the DACL refuses. If you are, the service closes without answering. Either is a pass. |
 | — | `Update-ServiceLab.ps1` | **administrator** | Replaces the installed service binaries with a new `Publish-ServiceLab.ps1` build. Keeps the config, runtime, registration and key, and re-hashes the files. |
 | — | `Uninstall-ServiceLab.ps1` | **administrator** | Stops and deletes the service and removes the install folder. `-RemoveVaultRoot` also removes `C:\ProgramData\SourceVault`, but only if the vault is empty. The TPM key stays in the service profile; nothing here deletes keys. |
 
@@ -46,6 +48,8 @@ Run the other elevated scripts the same way.
 | 1066 / 10 | Normal start refused: vault root missing or untrusted |
 | 1066 / 11 | Normal start refused: unexpected entry in the vault root, or the project index failed authentication |
 | 1066 / 12 | Normal start refused: a project failed authentication (whole service refuses, by owner decision) |
+| 1066 / 13 | Normal start refused: local group *SourceVault Operators* is missing |
+| 1066 / 14 | Normal start refused: the pipe could not be created (for example, the name was already taken) |
 
 Win32 exit 1066 means "service-specific error"; the number after the slash is the service-specific code.
 
