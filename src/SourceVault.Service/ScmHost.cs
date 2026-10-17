@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using SourceVault.Storage;
 using SourceVault.Windows;
 
 namespace SourceVault.Service;
@@ -31,33 +32,81 @@ internal sealed class ScmHost
             switch (ParseStartMode(ReadArguments(count, arguments)))
             {
                 case StartMode.ProvisionKey: Provision(); return;
+                case StartMode.CreateSyntheticProject: CreateSyntheticProject(); return;
                 case StartMode.Invalid: Report(new(ServiceState.Stopped, 0, 87, 0, 0)); return; // ERROR_INVALID_PARAMETER
             }
             using var instance = new ServiceLifecycle(Report);
             lifecycle = instance;
-            instance.Run(() =>
-            {
-                TpmKeyProtector.RequireServiceIdentity();
-                var config = ServiceConfiguration.LoadFromApplicationDirectory();
-                // The vault root must be provisioned and trusted before the key is even opened. The store itself
-                // is not opened: no vault, pipe, document, or build endpoint exists here.
-                if (!VaultRoot.Validate().Passed) throw new StartupRefusedException(StartupRefusedException.VaultRootUntrusted);
-                return TpmKeyProtector.OpenExisting(config.KeyName);
-            });
+            // RUNNING only after identity, config, vault root, key and every project have been verified.
+            // No pipe, document or build endpoint exists here yet.
+            instance.Run(() => OpenVerifiedVault().Key);
         }
         catch { failure = 3; }
         finally { lifecycle = null; }
     }
-    internal enum StartMode { Run, ProvisionKey, Invalid }
+    internal enum StartMode { Run, ProvisionKey, CreateSyntheticProject, Invalid }
 
     // SCM passes the service name as argv[0], then any `sc start SourceVault <args>` start parameters.
-    // The only accepted parameter is the fixed `provision-key`; everything else is refused.
+    // Only the fixed lab parameters are accepted; everything else is refused.
     internal static StartMode ParseStartMode(IReadOnlyList<string?> args) => args.Count switch
     {
         1 => StartMode.Run,
         2 when args[1] == "provision-key" => StartMode.ProvisionKey,
+        2 when args[1] == "create-synthetic-project" => StartMode.CreateSyntheticProject,
         _ => StartMode.Invalid,
     };
+
+    // Identity, config, trusted vault root, existing key, then every project authenticated. The caller owns the key.
+    private static (TpmKeyProtector Key, ProjectCatalog Catalog, IReadOnlyList<ProjectInfo> Projects) OpenVerifiedVault()
+    {
+        TpmKeyProtector.RequireServiceIdentity();
+        var config = ServiceConfiguration.LoadFromApplicationDirectory();
+        if (!VaultRoot.Validate().Passed) throw new StartupRefusedException(StartupRefusedException.VaultRootUntrusted);
+        var key = TpmKeyProtector.OpenExisting(config.KeyName);
+        try
+        {
+            var catalog = new ProjectCatalog(VaultRoot.Path, key);
+            try { return (key, catalog, catalog.OpenAndVerify()); }
+            catch (VaultCatalogException e)
+            {
+                throw new StartupRefusedException(e.Failure == CatalogFailure.Project
+                    ? StartupRefusedException.ProjectUntrusted : StartupRefusedException.CatalogUntrusted);
+            }
+        }
+        catch { key.Dispose(); throw; }
+    }
+
+    // LAB ONLY. One-shot creation of a synthetic project (fixed fictional content) under the service identity,
+    // then a full re-verification. Lets the owner exercise the encrypted store on the real TPM without any
+    // document endpoint. Outcome is only the exit code.
+    private void CreateSyntheticProject()
+    {
+        Report(new(ServiceState.StartPending, 0, 0, 1, 60000));
+        uint win32 = 0, specific = 0;
+        try
+        {
+            var (key, catalog, projects) = OpenVerifiedVault();
+            using (key)
+            {
+                var project = catalog.CreateProject($"Synthetic demo {projects.Count + 1}");
+                var store = catalog.OpenProject(project.ProjectId);
+                var snapshot = project.Snapshot;
+                foreach (var (name, text) in SyntheticFiles)
+                    snapshot = store.Commit(snapshot.SnapshotId, name, System.Text.Encoding.UTF8.GetBytes(text));
+                if (catalog.OpenAndVerify().Count != projects.Count + 1) throw new InvalidOperationException();
+            }
+        }
+        catch (StartupRefusedException refused) { win32 = 1066; specific = refused.Code; }
+        catch { win32 = 1064; }
+        Report(new(ServiceState.Stopped, 0, win32, 0, 0, specific));
+    }
+
+    private static readonly (string Name, string Text)[] SyntheticFiles =
+    [
+        ("README.md", "# Synthetic demo project\n\nFictional content created by the SourceVault lab service. Not real source.\n"),
+        ("main.ts", "import { greet } from './util';\n\nexport function main(): string {\n  return greet('synthetic');\n}\n"),
+        ("util.ts", "export function greet(name: string): string {\n  return `hello, ${name}`;\n}\n"),
+    ];
 
     private static string?[] ReadArguments(uint count, IntPtr arguments)
     {

@@ -84,3 +84,11 @@ Owner-run lab, 2026-10-17:
 | Unelevated session (same user, admin token filtered) | Listing and file creation denied on both `C:ProgramDataSourceVault` and `vault`. |
 
 The validator therefore passed under the service account itself, including reading the ancestor chain. No store has been created in the root yet.
+
+## Project catalog at startup
+
+The vault root holds only `index\`, a `RevisionStore` with a fixed id containing one encrypted `projects.json` (project ids and names), and `projects\<projectId>\`, one store per project. Project names never appear outside the encrypted index. `SourceVault.Storage.ProjectCatalog` implements this with no record-format change.
+
+Normal start, before RUNNING, checks in order: identity, config, the trusted vault root (code 10), opening the key, the layout and index (code 11), then every project's authentication (code 12). By owner decision, any failure refuses the whole service. An empty vault root is a fresh vault with zero projects, and verification creates nothing. Cost: 2 TPM unwraps for the index plus 1 per project.
+
+Lab start parameter `create-synthetic-project` verifies the vault, creates "Synthetic demo N" with three fixed fictional files, re-verifies, and stops. `scripts/lab/Test-VaultTamper.ps1` drills codes 11 and 12 and restores the vault byte-for-byte. Neither has been run by the owner yet.

@@ -21,5 +21,7 @@ internal static class VaultRoot
 internal sealed class StartupRefusedException(uint code) : Exception
 {
     internal const uint VaultRootUntrusted = 10;
+    internal const uint CatalogUntrusted = 11; // unexpected entries in the vault root, or the project index failed
+    internal const uint ProjectUntrusted = 12; // a project store failed authentication
     internal uint Code { get; } = code;
 }

@@ -44,6 +44,8 @@ Reject(() => TpmKeyProtector.ValidatePolicy(provider, "RSA", 2048, 0, CngKeyUsag
 // SCM start parameters: argv[0] is the service name; only the fixed provision-key parameter is accepted.
 Check(ScmHost.ParseStartMode(["SourceVault"]) == ScmHost.StartMode.Run);
 Check(ScmHost.ParseStartMode(["SourceVault", "provision-key"]) == ScmHost.StartMode.ProvisionKey);
+Check(ScmHost.ParseStartMode(["SourceVault", "create-synthetic-project"]) == ScmHost.StartMode.CreateSyntheticProject);
+Check(ScmHost.ParseStartMode(["SourceVault", "create-synthetic-project", "Real name"]) == ScmHost.StartMode.Invalid);
 foreach (var startArgs in new string?[][] { [], ["SourceVault", "Provision-Key"], ["SourceVault", "provision-key", "SourceVault.Lab.Other"],
     ["SourceVault", "provision-key "], ["SourceVault", null], ["SourceVault", "--software-key"] })
     Check(ScmHost.ParseStartMode(startArgs) == ScmHost.StartMode.Invalid);

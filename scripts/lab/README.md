@@ -13,6 +13,8 @@ They change machine state: a Windows service, a folder under Program Files, and 
 | 3 | `Provision-ServiceKey.ps1` | **administrator** | Runs `sc start SourceVault provision-key` once. Running as the service account, the service creates a decrypt-only key (`PCP_KEY_USAGE_POLICY` encryption-only) and never overwrites an existing one. It then confirms both private exports are refused, opens the key through the same checks used at normal startup, runs a synthetic wrap/unwrap, and stops. The result is reported only as an exit code. |
 | 4 | `Test-ServiceLab.ps1` | **administrator** | Starts the service normally. It must reach RUNNING only after opening its key under its own identity. The script checks the process account, stops the service, and confirms a clean exit with no leftover process. Rerun it after a reboot. |
 | 5 | `New-VaultRoot.ps1` | **administrator** | Creates the fixed vault root `C:\ProgramData\SourceVault\vault`, using the exact protected ACL the installed service reports (`vault-root-sddl`). The `SourceVault` parent folder is protected too: SYSTEM and Administrators get full control, and the service gets read/traverse on that folder only. The script then runs the service's read-only `vault-root-check`. It refuses if `C:\ProgramData\SourceVault` already exists, and creates no store or files. |
+| 6 | `New-SyntheticProject.ps1` | **administrator** | Runs `sc start SourceVault create-synthetic-project` once. As the service account, the service verifies the vault, creates project "Synthetic demo N" with three fixed fictional files encrypted under its TPM key, re-verifies, and stops. |
+| 7 | `Test-VaultTamper.ps1` | **administrator** | Fail-closed drill, synthetic vaults only. A stray file in the vault root must refuse startup with 1066/11. One flipped bit in a project's live manifest must refuse with 1066/12. The original bytes are restored and checked by SHA-256, and the restored vault must reach RUNNING. |
 | — | `Update-ServiceLab.ps1` | **administrator** | Replaces the installed service binaries with a new `Publish-ServiceLab.ps1` build. Keeps the config, runtime, registration and key, and re-hashes the files. |
 | — | `Uninstall-ServiceLab.ps1` | **administrator** | Stops and deletes the service and removes the install folder. `-RemoveVaultRoot` also removes `C:\ProgramData\SourceVault`, but only if the vault is empty. The TPM key stays in the service profile; nothing here deletes keys. |
 
@@ -42,6 +44,8 @@ Run the other elevated scripts the same way.
 | 1066 / 5 | Created and opened but the roundtrip failed (left in place) |
 | 87 | Invalid start parameter |
 | 1066 / 10 | Normal start refused: vault root missing or untrusted |
+| 1066 / 11 | Normal start refused: unexpected entry in the vault root, or the project index failed authentication |
+| 1066 / 12 | Normal start refused: a project failed authentication (whole service refuses, by owner decision) |
 
 Win32 exit 1066 means "service-specific error"; the number after the slash is the service-specific code.
 

@@ -18,6 +18,8 @@ Wait-State 'Running', 'Stopped' 60
 $state = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
 if ($service.Status -ne 'Running') {
     $reason = if ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 10) { 'vault root missing or untrusted; run New-VaultRoot.ps1 or the service''s vault-root-check' }
+        elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 11) { 'unexpected entry in the vault, or the project index failed authentication' }
+        elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 12) { 'a project failed authentication' }
         elseif ($state.ExitCode -eq 1064) { 'key, config or identity check failed' } else { 'see exit code' }
     Write-Output "FAIL: service did not reach RUNNING (state $($service.Status), Win32 exit $($state.ExitCode)/$($state.ServiceSpecificExitCode): $reason)."
     exit 1

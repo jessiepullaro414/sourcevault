@@ -1,6 +1,6 @@
 # Store performance and service hookup — design (proposed, not built)
 
-Status: Phase A approved and built 2026-10-17 (decisions and results at the end). Phase B deferred. Service hookup not started.
+Status: Phase A approved and built 2026-10-17 (decisions and results at the end). Phase B deferred. Service hookup steps 1-2 built (see `service-host.md`, "Project catalog at startup"); step 3 (pipe endpoints) not started.
 
 ## Problem, measured
 

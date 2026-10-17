@@ -210,6 +210,82 @@ Test("warm instance still detects a swapped document record without decrypting",
     Assert(Unwraps(() => Reject<InvalidDataException>(() => p.Store.List())) == 0);
 });
 
+// Project catalog: vault root = index\ + projects\<id>\, names only inside the encrypted index.
+string NewVault() { var v = Path.Combine(testRoot, "vault-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(v); return v; }
+void RejectCatalog(CatalogFailure expected, Action action)
+{
+    try { action(); } catch (VaultCatalogException e) when (e.Failure == expected) { return; }
+    throw new Exception("Expected catalog failure " + expected);
+}
+(string Vault, ProjectInfo A, ProjectInfo B) TwoProjects()
+{
+    var v = NewVault(); var c = new ProjectCatalog(v, counting);
+    var a = c.CreateProject("Alpha"); var b = c.CreateProject("Beta");
+    var store = c.OpenProject(a.ProjectId); store.Commit(a.Snapshot.SnapshotId, "main.cs", Text("synthetic-alpha-main"));
+    return (v, a, b);
+}
+
+Test("catalog: empty vault is a fresh vault and verification creates nothing", () =>
+{
+    var v = NewVault();
+    Assert(new ProjectCatalog(v, counting).OpenAndVerify().Count == 0 && Directory.GetFileSystemEntries(v).Length == 0);
+});
+
+Test("catalog: create, reopen, names only inside encrypted index, unwrap budget 2 + projects", () =>
+{
+    var t = TwoProjects();
+    var fresh = new ProjectCatalog(t.Vault, counting);
+    IReadOnlyList<ProjectInfo> projects = [];
+    Assert(Unwraps(() => projects = fresh.OpenAndVerify()) == 2 + 2);
+    Assert(projects.Select(p => p.Name).SequenceEqual(new[] { "Alpha", "Beta" }));
+    Assert(projects[0].Snapshot.Files.Count == 1 && projects[1].Snapshot.Files.Count == 0);
+    Assert(Encoding.UTF8.GetString(fresh.OpenProject(t.A.ProjectId).Open(projects[0].Snapshot.SnapshotId, projects[0].Snapshot.Files[0].FileId)) == "synthetic-alpha-main");
+    Assert(Directory.GetFileSystemEntries(t.Vault).Select(Path.GetFileName).OrderBy(n => n).SequenceEqual(new[] { "index", "projects" }));
+    foreach (var file in Directory.GetFiles(t.Vault, "*", SearchOption.AllDirectories))
+    {
+        var raw = File.ReadAllBytes(file);
+        Assert(raw.AsSpan().IndexOf(Text("Alpha")) < 0 && raw.AsSpan().IndexOf(Text("Beta")) < 0 && raw.AsSpan().IndexOf(Text("synthetic-alpha")) < 0);
+    }
+});
+
+Test("catalog: duplicate and invalid project names rejected", () =>
+{
+    var t = TwoProjects(); var c = new ProjectCatalog(t.Vault, counting);
+    foreach (var bad in new[] { "alpha", "", " lead", "trail ", "tab\tname", new string('n', 65), "\ud800" })
+        Reject<ArgumentException>(() => c.CreateProject(bad));
+    Assert(c.OpenAndVerify().Count == 2);
+});
+
+Test("catalog: unexpected entries fail closed as layout", () =>
+{
+    var t = TwoProjects();
+    File.WriteAllText(Path.Combine(t.Vault, "stray.txt"), "x");
+    RejectCatalog(CatalogFailure.Layout, () => new ProjectCatalog(t.Vault, counting).OpenAndVerify());
+    var u = TwoProjects();
+    Directory.CreateDirectory(Path.Combine(u.Vault, "projects", Guid.NewGuid().ToString("D")));
+    RejectCatalog(CatalogFailure.Layout, () => new ProjectCatalog(u.Vault, counting).OpenAndVerify());
+    var w = TwoProjects();
+    Directory.Delete(Path.Combine(w.Vault, "projects", w.B.ProjectId.ToString("D")), true);
+    RejectCatalog(CatalogFailure.Layout, () => new ProjectCatalog(w.Vault, counting).OpenAndVerify());
+    var x = NewVault(); Directory.CreateDirectory(Path.Combine(x, "projects"));
+    RejectCatalog(CatalogFailure.Layout, () => new ProjectCatalog(x, counting).OpenAndVerify());
+});
+
+Test("catalog: tampered index and tampered project fail closed with their own category", () =>
+{
+    var t = TwoProjects();
+    void FlipLiveManifest(string storeDir)
+    {
+        var live = Path.Combine(storeDir, File.ReadAllText(Path.Combine(storeDir, "HEAD")) + ".svr");
+        var raw = File.ReadAllBytes(live); raw[^1] ^= 1; File.WriteAllBytes(live, raw);
+    }
+    FlipLiveManifest(Path.Combine(t.Vault, "index"));
+    RejectCatalog(CatalogFailure.Index, () => new ProjectCatalog(t.Vault, counting).OpenAndVerify());
+    var u = TwoProjects();
+    FlipLiveManifest(Path.Combine(u.Vault, "projects", u.A.ProjectId.ToString("D")));
+    RejectCatalog(CatalogFailure.Project, () => new ProjectCatalog(u.Vault, counting).OpenAndVerify());
+});
+
 foreach (var target in new[] { "LOCK", "HEAD", "blob", "root" })
 {
     var f = Fixture(); var s = f.Store.Initialize();
