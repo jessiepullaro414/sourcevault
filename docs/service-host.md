@@ -51,3 +51,15 @@ Official references used for ABI and behavior:
 - [Service state transitions](https://learn.microsoft.com/en-us/windows/win32/services/service-status-transitions): accepted controls and transition semantics.
 
 Remaining lab gates: service provisioning/profile, actual hardware-provider behavior and synthetic key roundtrip under that identity; ACL and installation trust; SCM start/stop/shutdown behavior; crash/timeout handling; authenticated IPC integration; storage integration; and recovery/security review. Compilation and synthetic checks do not close any of these gates.
+
+## Lab evidence
+
+2026-10-17, this development machine (Intel firmware TPM 2.0), owner-run elevated scripts:
+
+| Step | Result |
+|---|---|
+| `Install-ServiceLab.ps1` | Service `SourceVault` registered as `NT SERVICE\SourceVault`. A later read-only query confirmed manual start, `SERVICE_SID_TYPE: UNRESTRICTED`, and the exact quoted path. 202 files were hashed, and a later re-hash found 0 mismatches. No user-writable files. |
+| `Provision-ServiceKey.ps1` | Outcome `Created`: decrypt-only key `SourceVault.Lab.Service01` created under the service identity. Both private exports were refused, the startup policy checks passed, and a synthetic roundtrip passed. |
+| `Test-ServiceLab.ps1` | RUNNING after 1.3 s, with process owner `NT SERVICE\SourceVault`. Stopped in 0.7 s with Win32 exit 0, and the service process exited. |
+
+Still open: start after reboot; missing/wrong key and config cases under SCM; shutdown during start; vault root ACLs; mutual pipe checks.
