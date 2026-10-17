@@ -35,6 +35,16 @@ Reject(() => TpmKeyProtector.ValidatePolicy(provider, "RSA", 2048, 0, CngKeyUsag
 Reject(() => TpmKeyProtector.ValidatePolicy(provider, "RSA", 2048, 0, CngKeyUsages.Decryption, true, false));
 Reject(() => TpmKeyProtector.ValidatePolicy(provider, "RSA", 2048, 0, CngKeyUsages.Decryption, false, true));
 
+// SCM start parameters: argv[0] is the service name; only the fixed provision-key parameter is accepted.
+Check(ScmHost.ParseStartMode(["SourceVault"]) == ScmHost.StartMode.Run);
+Check(ScmHost.ParseStartMode(["SourceVault", "provision-key"]) == ScmHost.StartMode.ProvisionKey);
+foreach (var startArgs in new string?[][] { [], ["SourceVault", "Provision-Key"], ["SourceVault", "provision-key", "SourceVault.Lab.Other"],
+    ["SourceVault", "provision-key "], ["SourceVault", null], ["SourceVault", "--software-key"] })
+    Check(ScmHost.ParseStartMode(startArgs) == ScmHost.StartMode.Invalid);
+// Provisioning refuses any identity other than NT SERVICE\SourceVault before touching the provider or TPM.
+Check(TpmKeyProvisioner.CreateDecryptOnly("SourceVault.Lab.Unit") == ProvisionOutcome.Unavailable);
+Reject(() => TpmKeyProvisioner.CreateDecryptOnly("SourceVault.Production"));
+
 // Synchronization is deterministic; waits have bounded deadlines so hung tests fail.
 var statuses = new List<Status>();
 using var running = new ManualResetEventSlim();

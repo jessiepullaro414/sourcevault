@@ -28,6 +28,11 @@ internal sealed class ScmHost
         {
             statusHandle = Native.RegisterServiceCtrlHandlerExW(ServiceName, handler, IntPtr.Zero);
             if (statusHandle == IntPtr.Zero) { failure = 3; return; }
+            switch (ParseStartMode(ReadArguments(count, arguments)))
+            {
+                case StartMode.ProvisionKey: Provision(); return;
+                case StartMode.Invalid: Report(new(ServiceState.Stopped, 0, 87, 0, 0)); return; // ERROR_INVALID_PARAMETER
+            }
             using var instance = new ServiceLifecycle(Report);
             lifecycle = instance;
             instance.Run(() =>
@@ -41,6 +46,38 @@ internal sealed class ScmHost
         catch { failure = 3; }
         finally { lifecycle = null; }
     }
+    internal enum StartMode { Run, ProvisionKey, Invalid }
+
+    // SCM passes the service name as argv[0], then any `sc start SourceVault <args>` start parameters.
+    // The only accepted parameter is the fixed `provision-key`; everything else is refused.
+    internal static StartMode ParseStartMode(IReadOnlyList<string?> args) => args.Count switch
+    {
+        1 => StartMode.Run,
+        2 when args[1] == "provision-key" => StartMode.ProvisionKey,
+        _ => StartMode.Invalid,
+    };
+
+    private static string?[] ReadArguments(uint count, IntPtr arguments)
+    {
+        if (count > 8 || (count > 0 && arguments == IntPtr.Zero)) return [];
+        var result = new string?[count];
+        for (var i = 0; i < count; i++) result[i] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(arguments, i * IntPtr.Size));
+        return result;
+    }
+
+    // One-shot key creation under the service identity. Reports START_PENDING, creates and checks the key,
+    // then STOPPED. The outcome is only the service-specific exit code; nothing is logged.
+    private void Provision()
+    {
+        Report(new(ServiceState.StartPending, 0, 0, 1, 60000));
+        var outcome = ProvisionOutcome.Unavailable;
+        try { outcome = TpmKeyProvisioner.CreateDecryptOnly(ServiceConfiguration.LoadFromApplicationDirectory().KeyName); }
+        catch { outcome = ProvisionOutcome.Unavailable; }
+        Report(outcome == ProvisionOutcome.Created
+            ? new(ServiceState.Stopped, 0, 0, 0, 0)
+            : new(ServiceState.Stopped, 0, 1066, 0, 0, (uint)outcome)); // ERROR_SERVICE_SPECIFIC_ERROR
+    }
+
     private uint HandleControl(uint control, uint eventType, IntPtr eventData, IntPtr context)
     {
         try
@@ -56,7 +93,7 @@ internal sealed class ScmHost
         var status = new Native.ServiceStatus
         {
             Type = 0x10, State = (uint)value.State, Accepted = value.AcceptedControls,
-            Win32ExitCode = value.ExitCode, ServiceSpecificExitCode = 0,
+            Win32ExitCode = value.ExitCode, ServiceSpecificExitCode = value.ServiceSpecificExitCode,
             Checkpoint = value.Checkpoint, WaitHint = value.WaitHint
         };
         if (!Native.SetServiceStatus(statusHandle, ref status)) throw new InvalidOperationException();

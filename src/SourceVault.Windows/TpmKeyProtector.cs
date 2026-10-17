@@ -8,7 +8,7 @@ namespace SourceVault.Windows;
 // Existing-key adapter only. Provisioning is deliberately a separate, reviewed operation.
 public sealed class TpmKeyProtector : IKeyProtector, IDisposable
 {
-    private const string ProviderName = "Microsoft Platform Crypto Provider";
+    internal const string ProviderName = "Microsoft Platform Crypto Provider";
     private readonly CngKey key;
     private readonly RSACng rsa;
     private readonly object sync = new();

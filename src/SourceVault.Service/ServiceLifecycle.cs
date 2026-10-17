@@ -1,7 +1,7 @@
 namespace SourceVault.Service;
 
 internal enum ServiceState : uint { Stopped = 1, StartPending = 2, StopPending = 3, Running = 4 }
-internal readonly record struct Status(ServiceState State, uint AcceptedControls, uint ExitCode, uint Checkpoint, uint WaitHint);
+internal readonly record struct Status(ServiceState State, uint AcceptedControls, uint ExitCode, uint Checkpoint, uint WaitHint, uint ServiceSpecificExitCode = 0);
 
 // Internal test seam; production has a single fixed initialization path.
 internal sealed class ServiceLifecycle : IDisposable
