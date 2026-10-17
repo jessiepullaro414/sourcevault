@@ -29,7 +29,7 @@
       <div class="folder-row"><span aria-hidden="true">⌄</span><span class="folder-icon" aria-hidden="true">▱</span> src</div>
       <div id="source-files" class="file-list"></div>
       <div id="root-files" class="file-list root-files"></div>
-      <div class="explorer-note"><span class="tiny-label">PREVIEW WORKSPACE</span><p>Bundled sample files.<br>Changes live in this session.</p></div>
+      <div class="explorer-note"><span class="tiny-label">PREVIEW WORKSPACE</span><p>Bundled sample files.<br>Mock service, memory only.</p></div>
     </aside>
     <main class="workspace" aria-label="Source editor">
       <div class="tab-bar"><div id="tabs" role="tablist" aria-label="Open files"></div><button id="save" class="save-button" title="Save in-memory revision (Ctrl+S)">Save revision <kbd>Ctrl S</kbd></button></div>
@@ -44,10 +44,10 @@
     </main>
     <aside class="inspector" id="inspector">
       <div class="panel-heading">SESSION DETAILS</div>
-      <div class="session-card"><span class="session-icon" aria-hidden="true">◈</span><div><strong>Local preview</strong><span>Isolated sample session</span></div><span class="status-dot"></span></div>
+      <div class="session-card"><span class="session-icon" aria-hidden="true">◈</span><div><strong>Local preview</strong><span>Mock service · memory only</span></div><span class="status-dot"></span></div>
       <div class="detail-section"><span class="tiny-label">WORKSPACE</span><dl><dt>Files</dt><dd>4 synthetic</dd><dt>Language</dt><dd id="language-detail">TypeScript</dd><dt>Source</dt><dd>Bundled sample</dd></dl></div>
       <div class="detail-section"><span class="tiny-label">SESSION REVISIONS</span><div class="revision-number" id="revision-count">00</div><p class="detail-copy">Save a revision to checkpoint edits in this session.</p><div class="memory-label"><span aria-hidden="true">◷</span> In memory only</div></div>
-      <div class="boundary-note"><strong>Editor preview</strong><p>Vault encryption, TPM protection, service authentication and isolated builds are not connected.</p></div>
+      <div class="boundary-note"><strong>Editor preview</strong><p>An in-memory mock of the service protocol stands in for the service. Vault encryption, TPM protection, service authentication and isolated builds are not connected.</p></div>
       <button id="reset" class="reset-button">↺ Reset sample workspace</button>
     </aside>
   </div>

@@ -2,7 +2,7 @@
 
 `index.html` is the browser entry point. Serve this directory through the project preview server on localhost, or map it to `https://sourcevault.local/` in the WebView2 host. Do not open it as a `file:` URL: ES modules and Monaco workers require an appropriate origin. All runtime assets are local, including the pinned Monaco distribution in `vendor/monaco/vs`.
 
-This is a synthetic editor demonstration. It makes no service, vault, TPM, encryption, compiler, Docker, or build requests. Source edits, revision snapshots, Monaco models, view state, and undo buffers exist only in the renderer's current session. Refreshing or closing discards them. The bundled synthetic seed itself is an ordinary asset on disk.
+This is a synthetic editor demonstration. It makes no real service, vault, TPM, encryption, compiler, Docker, or build requests. Its only "service" is the in-memory protocol mock described below. Source edits, revision snapshots, Monaco models, view state, and undo buffers exist only in the renderer's current session. Refreshing or closing discards them. The bundled synthetic seed itself is an ordinary asset on disk.
 
 The editor deliberately sets Monaco's `editContext: false` option to use its textarea input path. This preserves Windows accessibility and desktop automation compatibility where Chromium's newer EditContext textbox does not expose usable focus or bounds. This input setting does not change session storage behavior.
 
@@ -17,9 +17,19 @@ The editor deliberately sets Monaco's `editContext: false` option to use its tex
 
 Copy, cut, paste, drag/drop, context-menu, and print affordances are blocked on a best-effort basis. These browser controls do not establish a confidentiality boundary. No screenshot protection is claimed by this frontend.
 
+## Mock protocol service
+
+`mock-service.mjs` is a pure ES module (no DOM, network, storage, or logging) that imitates `contracts/protocol-v1.md` in memory with synthetic seed files. It is not the real service: nothing is encrypted, durable, or authenticated beyond the mock's own capability check. `state.mjs` routes open, save (`ApplyEdits` with the expected immutable revision ID), close, lock and unlock through it; Monaco models, drafts and dirty state stay renderer-local.
+
+- Envelope `{version, requestId, operation, body}` and response `{version, requestId, ok, code, body}` follow the contract: unknown/missing/extra fields, non-canonical UUIDs, and wrong versions are rejected with the contract error codes; frames over 1 MiB, documents over 256 KiB UTF-8, or nesting over 16 return `LimitExceeded`. A request ID that cannot be echoed is answered with the all-zero UUID (mock-only; the real transport drops the connection). Errors never include exception text.
+- `BeginSession` returns a random 256-bit hex capability (`crypto.getRandomValues`). Every later operation carries it in `body.capability` and rechecks it: unknown, ended, or revoked capabilities give `Unauthorized`; 5 minutes idle or 30 minutes absolute (injectable clock) gives `SessionExpired`. Only one live session exists per mock instance.
+- Operations: `BeginSession`, `ListProjects`, `ListFiles`, `OpenDocument`, `ApplyEdits` (complete text replacement; stale `expectedRevision` gives `RevisionConflict` and changes nothing; the document must be open), `CloseDocument`, `EndSession`. `RequestBuild` and `GetBuildStatus` return `Unavailable` after authorization.
+- `handle(object)` takes parsed envelopes. `handleJson(string)` uses `parseStrictJson`, which also rejects duplicate property names and invalid JSON. On the real wire, duplicate-key rejection is the native transport's job.
+- UI behavior: Lock sends `EndSession` (the capability dies) and Unlock begins a new session and reopens the open tabs. Drafts and unsaved edits remain in renderer memory while locked. If the mock session expires or is revoked, the UI locks itself and says so; unlock to continue. Edits send a throttled metadata-only `ListProjects` ping so an actively edited session is not idle-expired. Document text is never sent to the native host bridge.
+
 ## Test and host boundary
 
-From the repository root, run `node --test tests/editor-web/state.test.mjs`. Tests cover buffer independence, dirty detection, immutable snapshots, stale-save conflict rejection, locked operations, file lifecycle, and reset. Browser rendering and worker loading must also be verified separately.
+From the repository root, run `node --test tests/editor-web/state.test.mjs tests/editor-web/mock-service.test.mjs`. State tests cover buffer independence, dirty detection, immutable snapshots, stale-save conflict rejection, locked operations, file lifecycle, reset, and mock-session expiry/lock handling. Mock tests cover envelope rejection, capability checks, fake-clock idle/absolute expiry, revision conflicts, size limits, `Unavailable` build operations, and `EndSession` invalidation. Browser rendering and worker loading must also be verified separately.
 
 The optional native bridge receives exactly `{ type, locked, dirtyCount, revisionCount }`, where type is `sourcevault.preview.ready` or `sourcevault.preview.status`. Messages contain metadata only. A host may request a lock with `{ type: 'sourcevault.preview.lock' }`. Native host metadata is not used to assert working security features. The standalone browser mode needs no bridge.
 

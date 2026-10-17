@@ -37,7 +37,7 @@ function render() {
     const choose = document.createElement('button'); choose.className = 'tab-label'; choose.setAttribute('role', 'tab'); choose.setAttribute('aria-selected', String(id === session.activeId)); choose.textContent = fileName(f); choose.disabled = session.locked; choose.onclick = () => openFile(id);
     const icon = document.createElement('span'); icon.className = 'file-type'; icon.textContent = f.language === 'markdown' ? 'M↓' : 'TS';
     const close = document.createElement('button'); close.className = 'tab-close'; close.textContent = session.dirty(id) ? '●' : '×'; close.title = `Close ${fileName(f)}`; close.setAttribute('aria-label', `Close ${fileName(f)}${session.dirty(id) ? ', unsaved changes' : ''}`); close.disabled = session.locked;
-    close.onclick = () => { try { session.close(id); syncModel(); render(); } catch { announce('Save a session revision before closing this edited file.'); } };
+    close.onclick = () => { try { session.close(id); syncModel(); render(); } catch (e) { if (e.message === 'UnsavedChanges') announce('Save a session revision before closing this edited file.'); else failed(e); } };
     tab.append(icon, choose, close); $('tabs').append(tab);
   }
   $('breadcrumb-file').textContent = active ? active.path.replaceAll('/', ' › ') : 'No file selected';
@@ -57,31 +57,43 @@ function syncModel() {
   editor.setModel(model);
   if (model) { const saved = viewStates.get(model.uri.toString()); if (saved) editor.restoreViewState(saved); editor.focus(); }
 }
-function openFile(id) { session.open(id); syncModel(); render(); }
+// Mock-service failures. Messages are protocol error codes only, never document text.
+function failed(e) {
+  if (session.locked) { syncModel(); render(); announce("Mock service session ended. Editor locked; unsaved edits stay in this preview's memory. Unlock to start a new mock session."); $('unlock').focus(); }
+  else if (e?.message === 'RevisionConflict') { render(); announce('Revision conflict: the saved revision changed. Nothing was saved; your edits are kept.'); }
+  else { render(); announce('The mock service rejected the request. Nothing was changed.'); }
+}
+function openFile(id) { try { session.open(id); syncModel(); render(); } catch (e) { failed(e); } }
 function save() {
   if (session.locked || !session.activeId || !editor) return;
   const f = session.file(session.activeId); const before = f.revision;
-  session.save(f.id, f.revision); render();
-  announce(f.revision === before ? 'No unsaved session edits.' : `Revision ${f.revision} saved in memory for this session only. Refreshing discards it.`);
+  try { session.save(f.id, f.revision); } catch (e) { failed(e); return; }
+  render();
+  announce(f.revision === before ? 'No unsaved session edits.' : `Revision ${f.revision} saved in memory for this session only (mock service). Refreshing discards it.`);
 }
-function lock() { session.lock(); syncModel(); render(); announce('Session locked. Editor hidden; preview state retained in memory.'); $('unlock').focus(); }
+function lock() { session.lock(); syncModel(); render(); announce('Session locked. Mock service session ended; editor hidden; preview state retained in memory.'); $('unlock').focus(); }
+let lastTouch = 0;
+function touch() {
+  const now = Date.now(); if (now - lastTouch < 30000) return; lastTouch = now;
+  try { session.keepAlive(); } catch (e) { failed(e); }
+}
 function createModels() {
   suppress = true;
   for (const model of models.values()) model.dispose(); models.clear(); viewStates.clear();
   for (const f of session.files.values()) {
     const model = monaco.editor.createModel(f.text, f.language, monaco.Uri.parse(`file:///synthetic-workspace/${f.path}`));
-    model.onDidChangeContent(() => { if (suppress || session.locked) return; session.edit(f.id, model.getValue()); render(); $('footer-status').textContent = 'Unsaved edits · session memory only'; });
+    model.onDidChangeContent(() => { if (suppress || session.locked) return; session.edit(f.id, model.getValue()); render(); $('footer-status').textContent = 'Unsaved edits · session memory only'; touch(); });
     models.set(f.id, model);
   }
   suppress = false;
 }
 $('save').onclick = save; $('lock').onclick = lock;
-$('unlock').onclick = () => { session.unlock(); syncModel(); render(); announce('Synthetic session resumed. No service connection.'); };
+$('unlock').onclick = () => { try { session.unlock(); } catch { render(); announce('Could not start a new mock session. Still locked.'); return; } syncModel(); render(); announce('New mock session started; synthetic session resumed. No real service connection.'); };
 $('find').onclick = () => { if (!session.locked) editor?.getAction('actions.find').run(); };
 $('explorer-toggle').onclick = () => { const hidden = !$('explorer').hidden; $('explorer').hidden = hidden; $('explorer-toggle').setAttribute('aria-pressed', String(!hidden)); $('explorer-toggle').classList.toggle('selected', !hidden); editor?.layout(); };
 $('inspector-toggle').onclick = () => { const hidden = !$('inspector').hidden; $('inspector').hidden = hidden; $('inspector-toggle').setAttribute('aria-pressed', String(!hidden)); editor?.layout(); };
 $('activity-toggle').onclick = () => { const expanded = $('activity-toggle').getAttribute('aria-expanded') !== 'true'; $('activity-toggle').setAttribute('aria-expanded', String(expanded)); $('activity').classList.toggle('collapsed', !expanded); $('activity-content').hidden = !expanded; $('activity-chevron').textContent = expanded ? '⌄' : '⌃'; editor?.layout(); };
-$('reset').onclick = () => { if (!editor) return; editor.setModel(null); session.reset(); createModels(); syncModel(); render(); announce('Synthetic workspace reset. Previous session edits and revisions discarded.'); };
+$('reset').onclick = () => { if (!editor) return; editor.setModel(null); lastTouch = 0; session.reset(); createModels(); syncModel(); render(); announce('Synthetic workspace reset. Previous session edits and revisions discarded.'); };
 window.chrome?.webview?.addEventListener('message', e => { if (e.data?.type === 'sourcevault.preview.lock') lock(); });
 for (const name of ['copy', 'cut', 'paste', 'dragstart', 'drop', 'contextmenu']) document.addEventListener(name, event => event.preventDefault(), true);
 document.addEventListener('keydown', event => {
