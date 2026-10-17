@@ -12,7 +12,15 @@ They change machine state: a Windows service, a folder under Program Files, and 
 | 2 | `Install-ServiceLab.ps1` | **administrator** | Copies a private .NET 10 runtime (from the SHA-512-verified workspace SDK) and the service to `C:\Program Files\SourceVault`. Writes the config (key `SourceVault.Lab.Service01` by default) and checks that ordinary users can't modify the files. Records SHA-256 hashes in `install-manifest.sha256`. Registers service `SourceVault` as `NT SERVICE\SourceVault` with manual start. Refuses to run if either the service or the folder already exists. |
 | 3 | `Provision-ServiceKey.ps1` | **administrator** | Runs `sc start SourceVault provision-key` once. Running as the service account, the service creates a decrypt-only key (`PCP_KEY_USAGE_POLICY` encryption-only) and never overwrites an existing one. It then confirms both private exports are refused, opens the key through the same checks used at normal startup, runs a synthetic wrap/unwrap, and stops. The result is reported only as an exit code. |
 | 4 | `Test-ServiceLab.ps1` | **administrator** | Starts the service normally. It must reach RUNNING only after opening its key under its own identity. The script checks the process account, stops the service, and confirms a clean exit with no leftover process. Rerun it after a reboot. |
-| — | `Uninstall-ServiceLab.ps1` | **administrator** | Stops and deletes the service and removes the install folder. The TPM key stays in the service profile; nothing here deletes keys. |
+| 5 | `New-VaultRoot.ps1` | **administrator** | Creates the fixed vault root `C:\ProgramData\SourceVault\vault`, using the exact protected ACL the installed service reports (`vault-root-sddl`). The `SourceVault` parent folder is protected too: SYSTEM and Administrators get full control, and the service gets read/traverse on that folder only. The script then runs the service's read-only `vault-root-check`. It refuses if `C:\ProgramData\SourceVault` already exists, and creates no store or files. |
+| — | `Update-ServiceLab.ps1` | **administrator** | Replaces the installed service binaries with a new `Publish-ServiceLab.ps1` build. Keeps the config, runtime, registration and key, and re-hashes the files. |
+| — | `Uninstall-ServiceLab.ps1` | **administrator** | Stops and deletes the service and removes the install folder. `-RemoveVaultRoot` also removes `C:\ProgramData\SourceVault`, but only if the vault is empty. The TPM key stays in the service profile; nothing here deletes keys. |
+
+**Vault-root gate.** At every normal start, before opening its key, the service validates the vault root with `TrustedStorageRoot`. It refuses to start if the root is missing or untrusted, stopping with Win32 1066 and service-specific code 10. To see the findings, run this elevated:
+
+```powershell
+& "C:\Program Files\SourceVault\runtime\dotnet.exe" "C:\Program Files\SourceVault\service\SourceVault.Service.dll" vault-root-check
+```
 
 From an **elevated** Windows PowerShell in this repository folder:
 
@@ -33,6 +41,7 @@ Run the other elevated scripts the same way.
 | 1066 / 4 | Created but exportable (left in place; do not use) |
 | 1066 / 5 | Created and opened but the roundtrip failed (left in place) |
 | 87 | Invalid start parameter |
+| 1066 / 10 | Normal start refused: vault root missing or untrusted |
 
 Win32 exit 1066 means "service-specific error"; the number after the slash is the service-specific code.
 

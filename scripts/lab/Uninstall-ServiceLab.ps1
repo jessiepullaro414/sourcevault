@@ -1,7 +1,10 @@
 #Requires -RunAsAdministrator
 # LAB ONLY. Stops and deletes the SourceVault service and removes its Program Files folder.
 # The service's TPM key stays in the NT SERVICE\SourceVault profile; this script does not delete keys.
-param([string]$InstallRoot = (Join-Path $env:ProgramFiles 'SourceVault'))
+param(
+    [string]$InstallRoot = (Join-Path $env:ProgramFiles 'SourceVault'),
+    [switch]$RemoveVaultRoot # also remove C:\ProgramData\SourceVault, only if the vault folder is empty
+)
 $ErrorActionPreference = 'Stop'
 $serviceName = 'SourceVault'
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -25,4 +28,11 @@ if (Test-Path -LiteralPath $InstallRoot) {
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
     Write-Output "Removed $InstallRoot."
 }
+$vaultParent = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault'
+if ($RemoveVaultRoot -and (Test-Path -LiteralPath $vaultParent)) {
+    $contents = @(Get-ChildItem -LiteralPath $vaultParent -Recurse -Force)
+    if ($contents.Count -gt 1 -or ($contents.Count -eq 1 -and $contents[0].Name -ne 'vault')) { throw "$vaultParent is not empty; not removed." }
+    Remove-Item -LiteralPath $vaultParent -Recurse -Force
+    Write-Output "Removed empty $vaultParent."
+} elseif (Test-Path -LiteralPath $vaultParent) { Write-Output "Kept $vaultParent (use -RemoveVaultRoot to remove it when empty)." }
 Write-Output 'The service TPM key (if provisioned) remains in the NT SERVICE\SourceVault profile.'

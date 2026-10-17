@@ -39,7 +39,9 @@ internal sealed class ScmHost
             {
                 TpmKeyProtector.RequireServiceIdentity();
                 var config = ServiceConfiguration.LoadFromApplicationDirectory();
-                // Validates existing key only. No vault, pipe, document, or build endpoint exists here.
+                // The vault root must be provisioned and trusted before the key is even opened. The store itself
+                // is not opened: no vault, pipe, document, or build endpoint exists here.
+                if (!VaultRoot.Validate().Passed) throw new StartupRefusedException(StartupRefusedException.VaultRootUntrusted);
                 return TpmKeyProtector.OpenExisting(config.KeyName);
             });
         }

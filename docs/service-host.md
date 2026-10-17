@@ -63,3 +63,14 @@ Remaining lab gates: service provisioning/profile, actual hardware-provider beha
 | `Test-ServiceLab.ps1` | RUNNING after 1.3 s, with process owner `NT SERVICE\SourceVault`. Stopped in 0.7 s with Win32 exit 0, and the service process exited. |
 
 Still open: start after reboot; missing/wrong key and config cases under SCM; shutdown during start; vault root ACLs; mutual pipe checks.
+
+## Vault-root gate
+
+The vault root is fixed at `%ProgramData%\SourceVault\vault` (`VaultRoot.Path`). It is never taken from config, arguments or the environment. On every normal start the service checks identity, then config, then validates the root with `TrustedStorageRoot` against SYSTEM, Administrators, TrustedInstaller and its own service SID, and only then opens its key. An untrusted or missing root stops the service before RUNNING with Win32 1066, service-specific code 10. The store is still not opened.
+
+Console commands, both read-only:
+
+- `vault-root-check` prints findings as codes, locations and SIDs; exit 0 means trusted, 4 means not. Run it elevated, because the root grants nobody else read access.
+- `vault-root-sddl` prints the exact root DACL the validator requires. `scripts/lab/New-VaultRoot.ps1` uses it to create the root, then verifies the result.
+
+Not yet run by the owner: `Update-ServiceLab.ps1`, a start without a vault (expected refusal 1066/10), `New-VaultRoot.ps1`, and a start with the vault.

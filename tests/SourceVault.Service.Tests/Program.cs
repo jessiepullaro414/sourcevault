@@ -23,6 +23,12 @@ foreach (var text in new[] { "{}", "[]", "null", "{", valid.Replace("1,", "2,"),
     valid.Replace("\"schemaVersion\":1,", ""), valid.Replace("Unit", new string('a', 81)), new string(' ', 4097) }) Reject(() => Parse(text));
 Check(SourceVault.Service.Program.ParseCommand(["service"]) == "service");
 Check(SourceVault.Service.Program.ParseCommand(["metadata-probe"]) == "metadata-probe");
+Check(SourceVault.Service.Program.ParseCommand(["vault-root-check"]) == "vault-root-check");
+Check(SourceVault.Service.Program.ParseCommand(["vault-root-sddl"]) == "vault-root-sddl");
+Reject(() => SourceVault.Service.Program.ParseCommand(["vault-root-check", @"D:\elsewhere"]));
+// The vault root is fixed under ProgramData, never supplied by config or arguments.
+Check(VaultRoot.Path == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SourceVault", "vault"));
+Check(Path.IsPathFullyQualified(VaultRoot.Path));
 foreach (var commandArgs in new[] { Array.Empty<string>(), new[] { "console" }, new[] { "service", "--key", "untrusted" }, new[] { "metadata-probe", "--source", "x" } })
     Reject(() => SourceVault.Service.Program.ParseCommand(commandArgs));
 const string provider = "Microsoft Platform Crypto Provider";
@@ -81,6 +87,15 @@ using (var lifecycle = new ServiceLifecycle(s => statuses.Add(s)))
 {
     lifecycle.Run(() => { lifecycle.RequestStop(); return new FakeResource { ThrowOnDispose = true }; });
     Check(statuses[^1].State == ServiceState.Stopped && statuses[^1].ExitCode == 1064);
+}
+// A refused startup check (untrusted vault root) stops with ERROR_SERVICE_SPECIFIC_ERROR and its bounded code,
+// never reaching RUNNING; other failures keep the generic 1064.
+statuses.Clear();
+using (var lifecycle = new ServiceLifecycle(s => statuses.Add(s)))
+{
+    lifecycle.Run(() => throw new StartupRefusedException(StartupRefusedException.VaultRootUntrusted));
+    Check(statuses.Select(s => s.State).SequenceEqual(new[] { ServiceState.StartPending, ServiceState.Stopped }));
+    Check(statuses[^1].ExitCode == 1066 && statuses[^1].ServiceSpecificExitCode == 10);
 }
 Console.WriteLine($"serviceTests=passed; assertions={count}; tpmTouched=false; scmTouched=false; sourceEndpoints=disabled");
 sealed class FakeResource : IDisposable

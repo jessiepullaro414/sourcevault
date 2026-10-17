@@ -28,7 +28,7 @@ internal sealed class ServiceLifecycle : IDisposable
             if (started) throw new InvalidOperationException();
             started = true;
         }
-        uint exit = 0;
+        uint exit = 0, specific = 0;
         IDisposable? resource = null;
         try
         {
@@ -43,22 +43,23 @@ internal sealed class ServiceLifecycle : IDisposable
             }
             stop.Wait();
         }
+        catch (StartupRefusedException refused) { exit = 1066; specific = refused.Code; } // ERROR_SERVICE_SPECIFIC_ERROR
         catch { exit = 1064; } // ERROR_EXCEPTION_IN_SERVICE, no exception text or secret metadata.
         finally
         {
-            try { resource?.Dispose(); } catch { exit = 1064; }
+            try { resource?.Dispose(); } catch { exit = 1064; specific = 0; }
             lock (sync)
             {
-                if (state != ServiceState.Stopped) Publish(ServiceState.Stopped, exit);
+                if (state != ServiceState.Stopped) Publish(ServiceState.Stopped, exit, specific);
             }
         }
     }
-    private void Publish(ServiceState next, uint exit)
+    private void Publish(ServiceState next, uint exit, uint specific = 0)
     {
         state = next;
         report(new(next, next == ServiceState.Running ? 5u : 0u, exit,
             next is ServiceState.StartPending or ServiceState.StopPending ? 1u : 0u,
-            next is ServiceState.StartPending or ServiceState.StopPending ? 15000u : 0u));
+            next is ServiceState.StartPending or ServiceState.StopPending ? 15000u : 0u, specific));
     }
     public void Dispose() => stop.Dispose();
 }
