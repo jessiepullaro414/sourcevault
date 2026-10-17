@@ -1,7 +1,5 @@
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -29,7 +27,7 @@ internal static class Program
 
 internal sealed class EditorWindow : Window
 {
-    private const string AppOrigin = "https://sourcevault.local";
+    private const string AppOrigin = PreviewPolicy.AppOrigin;
     private readonly Grid surface = new();
     private readonly WebView2 webView = new();
     private bool closing;
@@ -53,9 +51,8 @@ internal sealed class EditorWindow : Window
     {
         try
         {
-            if (Environment.GetEnvironmentVariables().Keys.Cast<string>()
-                .Any(name => name.StartsWith("WEBVIEW2_", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name))))
+            if (PreviewPolicy.FindWebView2Override(Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+                .Select(entry => new KeyValuePair<string, string?>((string)entry.Key, entry.Value as string))) is not null)
             {
                 ShowNotice("Browser override detected", "This preview will not start with WEBVIEW2_ environment overrides, including browser debugging or alternate profiles. Launch from a clean environment.");
                 return;
@@ -78,7 +75,7 @@ internal sealed class EditorWindow : Window
             await webView.EnsureCoreWebView2Async(environment);
             if (closing) return;
             var core = webView.CoreWebView2;
-            core.SetVirtualHostNameToFolderMapping("sourcevault.local", assets, CoreWebView2HostResourceAccessKind.DenyCors);
+            core.SetVirtualHostNameToFolderMapping(PreviewPolicy.AppHost, assets, CoreWebView2HostResourceAccessKind.DenyCors);
             core.Settings.AreDevToolsEnabled = false;
             core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.AreBrowserAcceleratorKeysEnabled = false;
@@ -93,12 +90,12 @@ internal sealed class EditorWindow : Window
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
-            core.NavigationStarting += (_, e) => e.Cancel = !IsAppUri(e.Uri);
-            core.FrameNavigationStarting += (_, e) => e.Cancel = !IsAppUri(e.Uri);
+            core.NavigationStarting += (_, e) => e.Cancel = !PreviewPolicy.IsNavigationAllowed(e.Uri);
+            core.FrameNavigationStarting += (_, e) => e.Cancel = !PreviewPolicy.IsNavigationAllowed(e.Uri);
             core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
             core.WebResourceRequested += (_, e) =>
             {
-                if (!IsAppUri(e.Request.Uri) && !IsAppBlobUri(e.Request.Uri))
+                if (!PreviewPolicy.IsResourceAllowed(e.Request.Uri))
                     e.Response = environment.CreateWebResourceResponse(Stream.Null, 403, "Blocked", "Content-Type: text/plain\r\n");
             };
             core.WebMessageReceived += ReceiveMessage;
@@ -118,40 +115,20 @@ internal sealed class EditorWindow : Window
         }
     }
 
-    internal static bool IsAppUri(string value) =>
-        Uri.TryCreate(value, UriKind.Absolute, out var uri) &&
-        uri.Scheme == Uri.UriSchemeHttps && uri.Host == "sourcevault.local" &&
-        uri.Port == 443 && uri.UserInfo.Length == 0;
-
-    private static bool IsAppBlobUri(string value) =>
-        value.StartsWith("blob:", StringComparison.Ordinal) && IsAppUri(value[5..]);
-
     private void ReceiveMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
-        if (!IsAppUri(e.Source)) return;
-        string message = e.WebMessageAsJson;
-        if (Encoding.UTF8.GetByteCount(message) > 4096) return;
-        try
+        // Decision logic lives in PreviewPolicy; invalid messages have no effect and are never logged.
+        if (!PreviewPolicy.IsAppUri(e.Source)) return;
+        if (!PreviewPolicy.TryParseMessage(e.WebMessageAsJson, out var message)) return;
+        switch (message.Kind)
         {
-            using var document = JsonDocument.Parse(message, new JsonDocumentOptions { MaxDepth = 3 });
-            if (document.RootElement.ValueKind != JsonValueKind.Object) return;
-            var properties = document.RootElement.EnumerateObject().ToArray();
-            if (properties.Length != 4 || properties.Select(p => p.Name).Distinct(StringComparer.Ordinal).Count() != properties.Length) return;
-            if (!document.RootElement.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String) return;
-            if (!document.RootElement.TryGetProperty("locked", out var locked) || locked.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return;
-            if (!document.RootElement.TryGetProperty("dirtyCount", out var dirty) || dirty.ValueKind != JsonValueKind.Number || !dirty.TryGetInt32(out int dirtyCount) || dirtyCount is < 0 or > 32) return;
-            if (!document.RootElement.TryGetProperty("revisionCount", out var revision) || revision.ValueKind != JsonValueKind.Number || !revision.TryGetInt32(out int revisionCount) || revisionCount is < 0 or > 1_000_000) return;
-            switch (type.GetString())
-            {
-                case "sourcevault.preview.ready":
-                    webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"sourcevault.host.metadata\",\"mode\":\"synthetic-preview\",\"captureExclusion\":false,\"serviceConnected\":false}");
-                    break;
-                case "sourcevault.preview.status":
-                    Title = locked.GetBoolean() ? "SourceVault — Locked synthetic preview" : "SourceVault — Synthetic editor preview";
-                    break;
-            }
+            case PreviewMessageKind.Ready:
+                webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"sourcevault.host.metadata\",\"mode\":\"synthetic-preview\",\"captureExclusion\":false,\"serviceConnected\":false}");
+                break;
+            case PreviewMessageKind.Status:
+                Title = message.Locked ? "SourceVault — Locked synthetic preview" : "SourceVault — Synthetic editor preview";
+                break;
         }
-        catch (JsonException) { /* Invalid bridge messages have no effect and are never logged. */ }
     }
 
     private void ShowNotice(string heading, string detail)
