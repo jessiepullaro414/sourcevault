@@ -140,4 +140,15 @@ Checked without admin on this machine, using a copy of the installed layout:
 - it refuses to start with no fallback when `..\runtime` is missing;
 - against the live installed service it was **denied by the pipe DACL**, because this sign-in predates the operators group.
 
-`check` and `list` are also tested in process (`Endpoints.Tests`, 13 cases). Not yet run as the installed client after an operator sign-in.
+`check` and `list` are also tested in process (`Endpoints.Tests`, 13 cases).
+
+Owner-run lab, 2026-10-17, after signing out and in as an operator:
+
+| Step | Result |
+|---|---|
+| `Test-ServiceLab.ps1 -LeaveRunning` (admin) | RUNNING in 1.5 s as `NT SERVICESourceVault`; the pipe was listening. |
+| `SourceVault.LabClient.exe check` (installed, normal window) | All 9 steps passed. It listed 1 project, created "Lab client check" (210 ms) and `check.txt` (107 bytes, 41 ms), and reopened and decrypted it with matching bytes (83 ms). A stale edit was refused with `RevisionConflict`. It decrypted `README.md` (101 bytes) from the service-created "Synthetic demo 1". EndSession closed the connection, and a forged capability was refused and closed. |
+| `Test-PipeAccess.ps1` (operator, normal window) | PowerShell connected but the service closed without answering: the executable check. |
+| A byte-identical copy of the client and runtime under `artifacts` (operator, unelevated) | Refused: the service closed the connection. The installed client then listed both projects. The check keys on the admin-owned install path, not on file contents. |
+
+The owner sign-in now holds the operators group. Still open: a reboot test, and the editor (design step 3).
