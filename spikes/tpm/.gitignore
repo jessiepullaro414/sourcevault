@@ -1,0 +1,2 @@
+# Process-local SDK profile used for sandboxed development checks.
+.local-appdata/
