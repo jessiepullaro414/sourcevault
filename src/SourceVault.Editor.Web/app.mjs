@@ -1,5 +1,16 @@
 import { PreviewSession } from './state.mjs';
 
+// Block clipboard and drag export before Monaco loads. preventDefault alone is not enough: a canceled
+// copy event is how a page supplies its own clipboard data, and Monaco's textarea handlers fill and read
+// clipboardData themselves, so they must never run. Monaco also calls the async Clipboard API directly,
+// which fires no events, so that API is removed from this page.
+for (const name of ['copy', 'cut', 'paste', 'dragstart', 'drop', 'contextmenu'])
+  window.addEventListener(name, event => { event.preventDefault(); event.stopImmediatePropagation(); }, true);
+window.addEventListener('beforeinput', event => {
+  if (/^(insertFromPaste|insertFromDrop|insertFromYank|deleteByCut|deleteByDrag)/.test(event.inputType)) { event.preventDefault(); event.stopImmediatePropagation(); }
+}, true);
+Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: false });
+
 const session = new PreviewSession();
 const $ = id => document.getElementById(id);
 const models = new Map();
@@ -95,7 +106,6 @@ $('inspector-toggle').onclick = () => { const hidden = !$('inspector').hidden; $
 $('activity-toggle').onclick = () => { const expanded = $('activity-toggle').getAttribute('aria-expanded') !== 'true'; $('activity-toggle').setAttribute('aria-expanded', String(expanded)); $('activity').classList.toggle('collapsed', !expanded); $('activity-content').hidden = !expanded; $('activity-chevron').textContent = expanded ? '⌄' : '⌃'; editor?.layout(); };
 $('reset').onclick = () => { if (!editor) return; editor.setModel(null); lastTouch = 0; session.reset(); createModels(); syncModel(); render(); announce('Synthetic workspace reset. Previous session edits and revisions discarded.'); };
 window.chrome?.webview?.addEventListener('message', e => { if (e.data?.type === 'sourcevault.preview.lock') lock(); });
-for (const name of ['copy', 'cut', 'paste', 'dragstart', 'drop', 'contextmenu']) document.addEventListener(name, event => event.preventDefault(), true);
 document.addEventListener('keydown', event => {
   const mod = event.ctrlKey || event.metaKey;
   if (mod && event.key.toLowerCase() === 's') { event.preventDefault(); save(); }
