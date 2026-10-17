@@ -12,6 +12,8 @@ StoreSnapshot List();
 byte[] Open(Guid expectedSnapshotId, Guid fileId);
 StoreSnapshot Commit(Guid expectedSnapshotId, string logicalName,
                      ReadOnlySpan<byte> utf8Content);
+void ReadSnapshot(Guid expectedSnapshotId,
+                  Action<StoreFile, ReadOnlySpan<byte>> consume); // bulk read; buffers zeroed after each callback
 ```
 
 `StoreSnapshot` contains `SnapshotId` and an immutable `Files` collection. Each `StoreFile` exposes `FileId`, `LogicalName`, `RevisionId`, and `ByteLength`. Replacing an existing case-insensitive logical name retains its file ID. A stale expected snapshot raises `RevisionConflictException`. Missing documents raise `KeyNotFoundException`. Callers must zero returned document buffers when finished; managed JSON/name objects and caller-owned content have normal managed-memory lifetimes.
@@ -20,9 +22,20 @@ Documents are strict UTF-8, at most 256 KiB. A project holds at most 1024 files.
 
 Each fresh revision uses an opaque GUID `.svr` filename. Document content and the manifest including logical names are encrypted through `RecordCodec`. `HEAD` contains only the 36-byte canonical snapshot GUID. `PREVIOUS` is an explicit recovery aid, never an automatic fallback. `LOCK` is a cross-process exclusive file lease; acquisition waits at most the configured duration (default five seconds, maximum one minute). The lock is released on process exit. All APIs hold the lease through their operation.
 
-Commit authenticates the current manifest and all referenced documents, checks the expected snapshot, writes and flushes a fresh encrypted document, writes and flushes a fresh encrypted manifest, then writes/flushes an opaque same-directory temporary pointer and atomically replaces `HEAD` with `File.Replace`, retaining `PREVIOUS`. Initialization uses a no-overwrite rename and refuses any existing state except the lock file. Failures can leave encrypted orphan blobs or an opaque pointer temporary file. Initialization failure before publication requires explicit administrative review. No orphan cleanup or secure deletion is implemented.
+Commit authenticates the current manifest, verifies every referenced document record against its manifest hash, checks the expected snapshot, writes and flushes a fresh encrypted document, writes and flushes a fresh encrypted manifest, then writes/flushes an opaque same-directory temporary pointer and atomically replaces `HEAD` with `File.Replace`, retaining `PREVIOUS`. Initialization uses a no-overwrite rename and refuses any existing state except the lock file. Failures can leave encrypted orphan blobs or an opaque pointer temporary file. Initialization failure before publication requires explicit administrative review. No orphan cleanup or secure deletion is implemented.
 
-`List` and `Open` authenticate every document referenced by the active manifest, including its length and strict UTF-8 encoding, to reject missing or damaged committed state immediately. `Open` then decrypts the selected document for the caller. This deliberately costs multiple private-key unwrap operations per request; TPM throughput and project-size limits require performance measurements on actual hardware before production integration. The store has no plaintext cache.
+**Manifest schema 2** (2026-10-17, see [design](store-performance-design.md)): each manifest entry carries `recordSha256`, the SHA-256 of that document's complete encrypted record. Every operation checks every referenced record's exact size (`346 + byteLength`) and hash against the authenticated manifest, without decrypting it. Missing, truncated, altered, swapped or older-revision records therefore fail immediately, as before. `Open` and `ReadSnapshot` additionally decrypt, which verifies the AES-GCM tag, the context and strict UTF-8. Schema 1 manifests are rejected.
+
+Each store instance caches its last authenticated manifest: ids, logical names, lengths and record hashes, but no document text or keys. The cache is reused only while `HEAD` names the same snapshot and the manifest record file is byte-identical; a commit by any other instance or process forces a fresh decrypt. TPM unwraps per operation: List 0 warm and 1 cold; Commit 0 warm (wraps are public-key operations); Open 1; ReadSnapshot N. Measured on this machine's firmware TPM with 200 files:
+
+| Operation | Time |
+|---|---|
+| List (warm) | 47 ms |
+| Open | 141 ms |
+| Commit | 89 ms |
+| ReadSnapshot | 8.7 s |
+
+Under the old schema, 30 files already took 1.4 s per operation and 42.6 s for a full read. Record reads check only the record file itself for reparse points, because the lock lease has just checked the root and all of its ancestors and every record lives directly in the root. The store has no plaintext cache.
 
 Authenticated manifests reject unknown/duplicate properties, unsupported schema versions, wrong snapshot IDs, invalid/noncanonical/empty IDs, duplicate file or revision IDs, duplicate case-insensitive names, invalid lengths, and excessive file counts. Any malformed or tampered active state fails explicitly. The implementation never selects `PREVIOUS` because `HEAD` failed. Replaying a complete valid old store is outside the current format's protection.
 

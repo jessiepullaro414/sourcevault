@@ -1,6 +1,6 @@
 # Store performance and service hookup — design (proposed, not built)
 
-Status: Phase A approved 2026-10-17 (decisions at the end); implementation in progress. Phase B deferred.
+Status: Phase A approved and built 2026-10-17 (decisions and results at the end). Phase B deferred. Service hookup not started.
 
 ## Problem, measured
 
@@ -63,3 +63,22 @@ A hierarchy also simplifies key rotation and any future recovery envelope, becau
 1. **Phase A approved** as described: manifest v2 with record hashes, the manifest cache, and the bulk read.
 2. **A failed project at startup refuses the whole service.** It never reaches RUNNING until an administrator reviews the project.
 3. **Phase B deferred** until the build broker exists and real project sizes are known.
+
+## Results (Phase A built, 2026-10-17)
+
+Measured on the same TPM and lab key as the problem table:
+
+| Operation | Before, 30 files | After, 30 files | After, 200 files |
+|---|---|---|---|
+| List (warm) | 1,356 ms / 31 unwraps | 28 ms / 0 | 47 ms / 0 |
+| List (new instance) | — | 116 ms / 1 | 102 ms / 1 |
+| Open one file | 1,452 ms / 32 | 184 ms / 1 | 141 ms / 1 |
+| Commit one edit | 1,345 ms / 31 | 51 ms / 0 | 89 ms / 0 |
+| Read every file | 42,598 ms / 960 | 1,351 ms / 30 (`ReadSnapshot`) | 8,727 ms / 200 (`ReadSnapshot`) |
+
+Differences from the proposal:
+
+- **Warm operations still hash every document record**, not only the manifest. Same-instance tamper detection at List, which the existing fail-closed tests require, is therefore unchanged. The cost is milliseconds.
+- **Record reads check only the record file for reparse points.** The ancestor chain is checked once per operation, under the lock lease. Re-walking it per file was ~12 filesystem calls each; removing that cut List at 200 files from 266 ms to 47 ms.
+
+Unwrap counts are enforced by tests using a counting protector. The independent encryption check (no plaintext on disk, tamper and wrong-key rejection) passes on schema 2.

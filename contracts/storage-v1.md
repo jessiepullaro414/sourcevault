@@ -27,3 +27,9 @@ Fault injection hooks may be internal/friend-test only at pre/post document, man
 ## Integration boundaries
 
 Production TPM adapter must explicitly select hardware provider, reject exportable/nonpersisted/wrong-policy keys and never create keys during an ordinary read. The service must not expose this store until actual deployment gates pass. An explicit synthetic developer demo may exercise a test-only protector from the test project; no runtime `--software-key`/environment fallback is permitted in any production executable.
+
+## Manifest schema 2 (owner-approved change, 2026-10-17)
+
+The record layout above is unchanged. The manifest JSON `version` is now `2`, and each file entry gains a required `recordSha256`: 64 lowercase hex characters, the SHA-256 of that document's complete encrypted record file. Readers reject version 1 and any other version. Because the manifest is itself an authenticated record, these hashes bind every committed document record. Readers must verify each referenced record's exact size and hash on every operation. They may skip decrypting a record unless its content is requested.
+
+A store instance may cache its last authenticated manifest in memory (no document plaintext or keys). It may reuse that cache only when `HEAD` names the same snapshot id and the manifest record file's SHA-256 is unchanged. Record-format changes, including any key hierarchy, still require separate review. See `docs/store-performance-design.md`.
