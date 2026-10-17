@@ -21,16 +21,26 @@ if ($rootSddl -notmatch [regex]::Escape($serviceSid)) { throw 'Expected ACL does
 $programData = [Environment]::GetFolderPath('CommonApplicationData')
 $parent = Join-Path $programData 'SourceVault'
 $vault = Join-Path $parent 'vault'
-if (Test-Path -LiteralPath $parent) { throw "$parent already exists; not modified. Inspect it, or remove it if it is a leftover lab folder." }
+# A rerun may continue only over this script's own empty leftovers (an earlier interrupted run); anything else is refused.
+if (Test-Path -LiteralPath $parent) {
+    $contents = @(Get-ChildItem -LiteralPath $parent -Recurse -Force)
+    $onlyEmptyVault = $contents.Count -eq 0 -or ($contents.Count -eq 1 -and $contents[0].PSIsContainer -and $contents[0].Name -eq 'vault')
+    if (!$onlyEmptyVault) { throw "$parent already exists and is not an empty leftover of this script; not modified." }
+    Write-Output "$parent exists from an earlier run and is empty; re-applying the expected ACLs."
+}
 
+$sections = [Security.AccessControl.AccessControlSections]'Owner, Access'
 function Get-SddlShape([string]$sddl) {
+    # Round-trip through the security API so raw SIDs and their aliases (S-1-5-18 vs SY) compare equal.
+    $canonical = New-Object Security.AccessControl.DirectorySecurity
+    $canonical.SetSecurityDescriptorSddlForm($sddl, $sections)
+    $sddl = $canonical.GetSecurityDescriptorSddlForm($sections)
     if ($sddl -notmatch '^O:(?<owner>[^D]+)D:(?<flags>[A-Z]*)(?<aces>\(.*\))$') { return "unparsed:$sddl" }
     $aces = [regex]::Matches($Matches.aces, '\([^)]*\)') | ForEach-Object Value | Sort-Object
     "$($Matches.owner)|protected=$($Matches.flags.Contains('P'))|$($aces -join '')"
 }
 function Set-ExactSecurity([string]$path, [string]$sddl) {
     # Apply only owner + DACL; group and SACL are left untouched.
-    $sections = [Security.AccessControl.AccessControlSections]'Owner, Access'
     $security = New-Object Security.AccessControl.DirectorySecurity
     $security.SetSecurityDescriptorSddlForm($sddl, $sections)
     (Get-Item -LiteralPath $path).SetAccessControl($security)
@@ -38,10 +48,10 @@ function Set-ExactSecurity([string]$path, [string]$sddl) {
     $applied = (Get-Item -LiteralPath $path).GetAccessControl($sections).GetSecurityDescriptorSddlForm($sections)
     if ((Get-SddlShape $applied) -ne (Get-SddlShape $sddl)) { throw "ACL on $path did not apply exactly." }
 }
-New-Item -ItemType Directory -Path $parent | Out-Null
+if (!(Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent | Out-Null }
 # 0x1200a9 = ReadAndExecute + Synchronize, this folder only (no inheritance flags).
 Set-ExactSecurity $parent "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;$serviceSid)"
-New-Item -ItemType Directory -Path $vault | Out-Null
+if (!(Test-Path -LiteralPath $vault)) { New-Item -ItemType Directory -Path $vault | Out-Null }
 Set-ExactSecurity $vault ("O:BA" + $rootSddl)
 Write-Output "Created $vault"
 
