@@ -91,4 +91,13 @@ The vault root holds only `index\`, a `RevisionStore` with a fixed id containing
 
 Normal start, before RUNNING, checks in order: identity, config, the trusted vault root (code 10), opening the key, the layout and index (code 11), then every project's authentication (code 12). By owner decision, any failure refuses the whole service. An empty vault root is a fresh vault with zero projects, and verification creates nothing. Cost: 2 TPM unwraps for the index plus 1 per project.
 
-Lab start parameter `create-synthetic-project` verifies the vault, creates "Synthetic demo N" with three fixed fictional files, re-verifies, and stops. `scripts/lab/Test-VaultTamper.ps1` drills codes 11 and 12 and restores the vault byte-for-byte. Neither has been run by the owner yet.
+Lab start parameter `create-synthetic-project` verifies the vault, creates "Synthetic demo N" with three fixed fictional files, re-verifies, and stops. `scripts/lab/Test-VaultTamper.ps1` drills codes 11 and 12 and restores the vault byte-for-byte.
+
+Owner-run lab, 2026-10-17:
+
+| Step | Result |
+|---|---|
+| `Update-ServiceLab.ps1`, then `Test-ServiceLab.ps1` on the empty vault | RUNNING in 2.0 s: a fresh vault is accepted with zero projects. |
+| `New-SyntheticProject.ps1` | Created a three-file synthetic project under `NT SERVICESourceVault` with its TPM key, and re-verified the vault (1 project folder). |
+| `Test-ServiceLab.ps1` with the project | RUNNING in 1.3 s with the index and project authenticated at startup; clean stop, exit 0. |
+| `Test-VaultTamper.ps1` | A stray file in the vault root was refused with 1066/11; one flipped bit in the project manifest was refused with 1066/12; the restored vault reached RUNNING. The vault was restored byte-for-byte (SHA-256 verified). |
