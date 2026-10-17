@@ -1,6 +1,6 @@
 # Editor on the vault service — design (proposed, not built)
 
-Status: design approved by the owner 2026-10-17 (decisions at the end); not built yet. Step 3 of `pipe-endpoints-design.md`. Builds on protocol v2 (`contracts/protocol-v2.md`), the installed lab client pattern, and the existing synthetic editor (`docs/editor-host.md`). Synthetic data only until the owner decides otherwise.
+Status: design approved by the owner 2026-10-17 (decisions at the end). Build step 1 (`SourceVault.Client` with `EditorVaultController`; lab client moved onto it) is done, with 5 controller tests against the in-process service. Steps 2-4 not started. Step 3 of `pipe-endpoints-design.md`. Builds on protocol v2 (`contracts/protocol-v2.md`), the installed lab client pattern, and the existing synthetic editor (`docs/editor-host.md`). Synthetic data only until the owner decides otherwise.
 
 ## Shape
 

@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
+using SourceVault.Client;
 using SourceVault.Contracts;
 using SourceVault.Service;
 using SourceVault.Storage;
@@ -261,7 +262,7 @@ Test("lab client: check and list run end to end and never print document content
     var (server, pipe) = StartServer();
     using (server)
     {
-        SourceVault.LabClient.VaultClient Connect() => new(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
+        SourceVault.Client.VaultClient Connect() => new(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
         // A service-created demo project, so the check also decrypts a file it did not write itself.
         using (var setup = new Client(pipe, me))
         {
@@ -280,6 +281,131 @@ Test("lab client: check and list run end to end and never print document content
         Assert(SourceVault.LabClient.LabCommands.List(Connect, listing) == 0 && listing.ToString().Contains("check.txt"), "list");
         foreach (var output in new[] { first.ToString(), second.ToString(), listing.ToString() })
             Assert(!output.Contains("nonce:") && !output.Contains("# Synthetic demo") && !output.Contains("SourceVault lab client check"), "no content printed");
+    }
+});
+
+// ---- Editor vault controller (SourceVault.Client) against the same in-process service ----
+EditorVaultController Controller(string pipe) =>
+    new(_ => Task.FromResult(new SourceVault.Client.VaultClient(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)))));
+T Run<T>(Task<T> task) => task.GetAwaiter().GetResult();
+void ExternalEdit(string pipe, Guid projectId, Guid fileId, string text)
+{
+    using var other = new SourceVault.Client.VaultClient(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
+    other.Begin();
+    var listing = other.Call("ListFiles", w => w.WriteString("projectId", projectId.ToString("D")));
+    var edited = other.Call("ApplyEdits", w =>
+    {
+        w.WriteString("projectId", projectId.ToString("D")); w.WriteString("fileId", fileId.ToString("D"));
+        w.WriteString("expectedSnapshotId", listing.Body.GetProperty("snapshotId").GetString()); w.WriteBase64String("contentBase64", Encoding.UTF8.GetBytes(text));
+    });
+    if (!edited.Ok) throw new Exception("external edit failed: " + edited.Code);
+}
+LockReason AwaitLock(TaskCompletionSource<LockReason> tcs) =>
+    tcs.Task.Wait(TimeSpan.FromSeconds(5)) ? tcs.Task.Result : throw new Exception("Locked event not raised");
+
+Test("controller: per-file concurrency — saving one file never conflicts another; text round-trips", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Assert(Run(ctl.UnlockAsync()) is { Ok: true, Value.Count: 0 }, "unlock");
+        var project = Run(ctl.CreateProjectAsync("Controller")).Value!.ProjectId;
+        var a = Run(ctl.CreateFileAsync(project, "a.ts", "A1")).Value!.FileId;
+        var b = Run(ctl.CreateFileAsync(project, "b.ts", "B1")).Value!.FileId;
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A2")).Ok, "save a");
+        Assert(Run(ctl.SaveDocumentAsync(project, b, "B2")).Ok, "save b after a moved the project snapshot");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A3 — é ✓ 𝄞")).Ok, "save a again");
+        using var fresh = Controller(pipe);
+        Run(fresh.UnlockAsync());
+        Assert(Run(fresh.OpenDocumentAsync(project, a)).Value!.Text == "A3 — é ✓ 𝄞", "non-ASCII round trip");
+        Assert(Run(fresh.OpenDocumentAsync(project, b)).Value!.Text == "B2", "b content");
+        Assert(Run(fresh.ListProjectsAsync()).Value!.Single().FileCount == 2, "project listing");
+    }
+});
+
+Test("controller: someone else's edit is Conflict; other files still save", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Shared")).Value!.ProjectId;
+        var a = Run(ctl.CreateFileAsync(project, "a.ts", "A1")).Value!.FileId;
+        var b = Run(ctl.CreateFileAsync(project, "b.ts", "B1")).Value!.FileId;
+        ExternalEdit(pipe, project, a, "A-by-someone-else");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A-mine")).Code == "Conflict", "conflict on a");
+        Assert(Run(ctl.SaveDocumentAsync(project, b, "B-mine")).Ok, "b still saves");
+        Assert(Run(ctl.OpenDocumentAsync(project, a)).Value!.Text == "A-by-someone-else", "reload sees their version");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A-after-reload")).Ok, "save after reload");
+    }
+});
+
+Test("controller: a commit racing in between check and commit is retried once", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Race")).Value!.ProjectId;
+        var a = Run(ctl.CreateFileAsync(project, "a.ts", "A1")).Value!.FileId;
+        var b = Run(ctl.CreateFileAsync(project, "b.ts", "B1")).Value!.FileId;
+        int hooks = 0;
+        ctl.BeforeCommit = () => { if (hooks++ == 0) ExternalEdit(pipe, project, b, "B-racing"); return Task.CompletedTask; };
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A2")).Ok && hooks == 2, "retried after the race");
+        ctl.BeforeCommit = null;
+        Assert(Run(ctl.OpenDocumentAsync(project, a)).Value!.Text == "A2", "a saved");
+    }
+});
+
+Test("controller: expiry and Windows session end lock it with a reason; unlock re-checks drafts", () =>
+{
+    var clock = new ManualClock();
+    var (server, pipe) = StartServer(clock: clock);
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        var reasons = new TaskCompletionSource<LockReason>();
+        ctl.Locked += r => reasons.TrySetResult(r);
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Locks")).Value!.ProjectId;
+        var a = Run(ctl.CreateFileAsync(project, "a.ts", "A1")).Value!.FileId;
+        clock.Advance(TimeSpan.FromMinutes(6));
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A2")).Code == "Locked" && ctl.IsLocked, "expired session locks");
+        Assert(AwaitLock(reasons) == LockReason.Expired, "reason expired");
+        Assert(Run(ctl.UnlockAsync()) is { Ok: true, Value.Count: 0 }, "unlock, nothing changed");
+
+        reasons = new TaskCompletionSource<LockReason>();
+        ctl.LockAsync().GetAwaiter().GetResult();
+        Assert(AwaitLock(reasons) == LockReason.User, "reason user");
+        ExternalEdit(pipe, project, a, "A-while-locked");
+        var unlocked = Run(ctl.UnlockAsync());
+        Assert(unlocked.Ok && unlocked.Value!.Single() == (project, a), "unlock reports the changed draft");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A-draft")).Code == "Conflict", "draft save conflicts");
+
+        reasons = new TaskCompletionSource<LockReason>();
+        server.EndWindowsSession(unchecked((uint)System.Diagnostics.Process.GetCurrentProcess().SessionId));
+        Assert(Run(ctl.ListProjectsAsync()).Code == "Locked", "Windows lock closes the connection");
+        Assert(AwaitLock(reasons) == LockReason.Closed, "reason closed");
+    }
+});
+
+Test("controller: locked, not-open and content limits", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Assert(Run(ctl.ListProjectsAsync()).Code == "Locked", "starts locked");
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Limits")).Value!.ProjectId;
+        Assert(Run(ctl.SaveDocumentAsync(project, Guid.NewGuid(), "x")).Code == "NotOpen", "save of a file never opened");
+        Assert(Run(ctl.CreateFileAsync(project, "big.ts", new string('x', 262145))).Code == "LimitExceeded", "over 256 KiB");
+        Assert(Run(ctl.CreateFileAsync(project, "bad.ts", "\ud800")).Code == "InvalidRequest", "lone surrogate is not UTF-8");
+        Assert(Run(ctl.CreateFileAsync(project, "a/b.ts", "x")).Code == "InvalidRequest", "bad name");
+        Assert(Run(ctl.OpenDocumentAsync(project, Guid.NewGuid())).Code == "NotFound", "unknown file");
     }
 });
 

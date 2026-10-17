@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using SourceVault.Client;
 using SourceVault.LabClient;
 
 // LAB ONLY client for the SourceVault service pipe. Must run from <install root>\client\ as the installed .exe:

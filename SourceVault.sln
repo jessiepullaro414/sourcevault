@@ -49,6 +49,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SourceVault.Endpoints.Tests
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SourceVault.LabClient", "src\SourceVault.LabClient\SourceVault.LabClient.csproj", "{FE5982E7-3056-44AF-B9A1-CDEB45FEE249}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SourceVault.Client", "src\SourceVault.Client\SourceVault.Client.csproj", "{03FABB73-623F-4F85-A874-70CC44535323}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -263,6 +265,18 @@ Global
 		{FE5982E7-3056-44AF-B9A1-CDEB45FEE249}.Release|x64.Build.0 = Release|Any CPU
 		{FE5982E7-3056-44AF-B9A1-CDEB45FEE249}.Release|x86.ActiveCfg = Release|Any CPU
 		{FE5982E7-3056-44AF-B9A1-CDEB45FEE249}.Release|x86.Build.0 = Release|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Debug|x64.Build.0 = Debug|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Debug|x86.Build.0 = Debug|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Release|Any CPU.Build.0 = Release|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Release|x64.ActiveCfg = Release|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Release|x64.Build.0 = Release|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Release|x86.ActiveCfg = Release|Any CPU
+		{03FABB73-623F-4F85-A874-70CC44535323}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -288,5 +302,6 @@ Global
 		{DF489320-42B4-4ADB-B8F8-721578FF3163} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{B6F059FB-D73A-422E-A8F9-D3090461C964} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{FE5982E7-3056-44AF-B9A1-CDEB45FEE249} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{03FABB73-623F-4F85-A874-70CC44535323} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal
