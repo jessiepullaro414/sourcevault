@@ -113,4 +113,14 @@ Two production details differ from the IPC spike, both found while building on t
 - **Users cannot open service processes** (verified: an unelevated user is denied even limited query on LocalSystem, LocalService and NetworkService processes). Clients therefore identify the server by the **pipe's owner SID**, not by its process token.
 - **Service accounts get no access to user processes** (verified: user process DACLs grant only the user, SYSTEM, and limited query to the logon SID). Installed clients therefore grant the service `PROCESS_QUERY_LIMITED_INFORMATION` on themselves so that their executable path can be read.
 
-Tested in process (`tests/SourceVault.Endpoints.Tests`, 12 cases) with a real local pipe, synthetic vault and test key. Not yet exercised on the installed service with a separate client; the lab client is the next step.
+Tested in process (`tests/SourceVault.Endpoints.Tests`, 12 cases) with a real local pipe, synthetic vault and test key.
+
+Owner-run lab, 2026-10-17:
+
+| Step | Result |
+|---|---|
+| `New-OperatorsGroup.ps1` | Created *SourceVault Operators* and added the owner. The first run failed parameter validation (description over 48 characters) before changing anything; fixed in `3895916`. |
+| `Update-ServiceLab.ps1`, then `Test-ServiceLab.ps1 -LeaveRunning` | RUNNING in 2.6 s as `NT SERVICESourceVault`, and `\.pipeSourceVault.v1` was listening. |
+| `Test-PipeAccess.ps1` from a normal window, in a sign-in that predates the group | The pipe DACL refused the connection. |
+
+Still to run: `Test-PipeAccess.ps1` after signing out and in, which should show the executable check closing the connection without an answer; and a real installed client, the lab client (next step).
