@@ -1,4 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
-  <ItemGroup><ProjectReference Include="../../src/SourceVault.Service/SourceVault.Service.csproj" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/SourceVault.Service/SourceVault.Service.csproj" />
+    <ProjectReference Include="../../src/SourceVault.LabClient/SourceVault.LabClient.csproj" />
+  </ItemGroup>
 </Project>

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SourceVault.LabClient</AssemblyName>
+    <UseAppHost>true</UseAppHost>
+    <!-- Installed at <root>\client\: run only on the private runtime at <root>\runtime. DOTNET_ROOT and global
+         installs are never consulted, so the service's executable check pins this .exe and its runtime. -->
+    <AppHostRelativeDotNet>..\runtime</AppHostRelativeDotNet>
+    <AppHostDotNetSearch>AppRelative</AppHostDotNetSearch>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SourceVault.Windows/SourceVault.Windows.csproj" />
+    <ProjectReference Include="../SourceVault.Contracts/SourceVault.Contracts.csproj" />
+  </ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
+</Project>

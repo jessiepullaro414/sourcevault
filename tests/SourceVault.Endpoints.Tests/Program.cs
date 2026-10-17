@@ -256,6 +256,33 @@ Test("unwrap budget over the pipe: warm list 1 (index), warm open 1, warm edit 0
     }
 });
 
+Test("lab client: check and list run end to end and never print document content", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    {
+        SourceVault.LabClient.VaultClient Connect() => new(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
+        // A service-created demo project, so the check also decrypts a file it did not write itself.
+        using (var setup = new Client(pipe, me))
+        {
+            setup.Begin();
+            var demo = setup.Ok("CreateProject", ("name", "Synthetic demo 1"));
+            setup.Ok("CreateFile", ("projectId", demo.GetProperty("projectId").GetString()!), ("name", "README.md"),
+                ("expectedSnapshotId", demo.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("# Synthetic demo\n")));
+        }
+        var first = new StringWriter();
+        Assert(SourceVault.LabClient.LabCommands.Check(Connect, first) == 0, "first check: " + first);
+        Assert(first.ToString().Contains("created project") && first.ToString().Contains("created check.txt"), "first run creates");
+        var second = new StringWriter();
+        Assert(SourceVault.LabClient.LabCommands.Check(Connect, second) == 0, "second check: " + second);
+        Assert(second.ToString().Contains("saved a new revision") && second.ToString().Contains("decrypted README.md"), "second run edits");
+        var listing = new StringWriter();
+        Assert(SourceVault.LabClient.LabCommands.List(Connect, listing) == 0 && listing.ToString().Contains("check.txt"), "list");
+        foreach (var output in new[] { first.ToString(), second.ToString(), listing.ToString() })
+            Assert(!output.Contains("nonce:") && !output.Contains("# Synthetic demo") && !output.Contains("SourceVault lab client check"), "no content printed");
+    }
+});
+
 Console.WriteLine($"Endpoint tests: {passed} passed; synthetic workspace retained at {workspace}");
 return 0;
 

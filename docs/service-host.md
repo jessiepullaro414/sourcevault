@@ -124,3 +124,20 @@ Owner-run lab, 2026-10-17:
 | `Test-PipeAccess.ps1` from a normal window, in a sign-in that predates the group | The pipe DACL refused the connection. |
 
 Still to run: `Test-PipeAccess.ps1` after signing out and in, which should show the executable check closing the connection without an answer; and a real installed client, the lab client (next step).
+
+## Lab client
+
+`src/SourceVault.LabClient` builds `SourceVault.LabClient.exe`, an apphost that runs only on the private runtime at `..\runtime` (`AppHostRelativeDotNet` with `AppHostDotNetSearch=AppRelative`). `scripts/lab/Install-LabClient.ps1` installs it at `<install root>\client\`, the exact path the service accepts.
+
+At startup the client grants the service limited query on its own process. It then connects, refusing any pipe not owned by `NT SERVICE\SourceVault`. It has two commands, and neither ever prints document content:
+
+- `list`: project and file names and sizes.
+- `check`: an end-to-end exercise. It creates or edits a fictional file, reopens it and compares bytes, confirms a stale edit is refused, decrypts a file from the service-created synthetic project, confirms a forged capability is refused, and ends the session.
+
+Checked without admin on this machine, using a copy of the installed layout:
+
+- it runs on the app-relative runtime, and `DOTNET_ROOT` is ignored;
+- it refuses to start with no fallback when `..\runtime` is missing;
+- against the live installed service it was **denied by the pipe DACL**, because this sign-in predates the operators group.
+
+`check` and `list` are also tested in process (`Endpoints.Tests`, 13 cases). Not yet run as the installed client after an operator sign-in.

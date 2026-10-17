@@ -1,6 +1,6 @@
 # Named-pipe endpoints — design (proposed, not built)
 
-Status: design approved by the owner 2026-10-17 (decisions at the end). Step 1 (service endpoints) built; steps 2 (lab client) and 3 (editor) not started. Two transport details changed during the build; see `service-host.md`, "Pipe endpoints". This builds on the IPC spike (`spikes/ipc`), `SourceVault.Contracts` framing, the project catalog, and storage schema 2. Synthetic data only until the owner decides otherwise.
+Status: design approved by the owner 2026-10-17 (decisions at the end). Steps 1 (service endpoints) and 2 (lab client) built; step 3 (editor) not started. Two transport details changed during the build; see `service-host.md`, "Pipe endpoints". This builds on the IPC spike (`spikes/ipc`), `SourceVault.Contracts` framing, the project catalog, and storage schema 2. Synthetic data only until the owner decides otherwise.
 
 ## What exists and is reused
 

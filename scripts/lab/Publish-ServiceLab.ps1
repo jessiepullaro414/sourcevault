@@ -21,4 +21,13 @@ try {
     & $DotnetPath publish $project --no-restore -c Release -o $output -p:UseAppHost=false -p:UseSharedCompilation=false -m:1 -nodeReuse:false
     if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
     Write-Output "Published service to $output"
+    # Lab client: framework-dependent apphost .exe that runs only on <install root>\runtime (see its .csproj).
+    $clientProject = Join-Path $repoRoot 'src/SourceVault.LabClient/SourceVault.LabClient.csproj'
+    $clientOutput = Join-Path $repoRoot 'artifacts/client-publish'
+    if (Test-Path -LiteralPath $clientOutput) { Remove-Item -LiteralPath $clientOutput -Recurse -Force }
+    & $DotnetPath restore $clientProject --configfile (Join-Path $repoRoot 'NuGet.Config') -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Client restore failed' }
+    & $DotnetPath publish $clientProject --no-restore -c Release -o $clientOutput -p:UseSharedCompilation=false -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Client publish failed' }
+    Write-Output "Published lab client to $clientOutput"
 } finally { $env:APPDATA = $oldAppData }
