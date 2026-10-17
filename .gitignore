@@ -7,3 +7,4 @@ lab-data/
 *.pfx
 *.key
 **/.local-appdata/
+.claude/

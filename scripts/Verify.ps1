@@ -27,7 +27,9 @@ $checks = @(
     @{ Assembly='tests/SourceVault.Storage.Tests/bin/Release/net10.0/SourceVault.Storage.Tests.dll'; Args=@() },
     @{ Assembly='tests/SourceVault.Revisions.Tests/bin/Release/net10.0/SourceVault.Revisions.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/revision-tests')) },
     @{ Assembly='tests/SourceVault.Service.Tests/bin/Release/net10.0-windows/SourceVault.Service.Tests.dll'; Args=@() },
-    @{ Assembly='tests/SourceVault.Integration.Tests/bin/Release/net10.0/SourceVault.Integration.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/integration-tests')) }
+    @{ Assembly='tests/SourceVault.Integration.Tests/bin/Release/net10.0/SourceVault.Integration.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/integration-tests')) },
+    @{ Assembly='tests/SourceVault.Editor.Host.Tests/bin/Release/net10.0/SourceVault.Editor.Host.Tests.dll'; Args=@() },
+    @{ Assembly='tests/SourceVault.Windows.Tests/bin/Release/net10.0-windows/SourceVault.Windows.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/windows-tests')) }
 )
 foreach ($check in $checks) {
     $testAssembly = Join-Path $repoRoot $check.Assembly
@@ -35,9 +37,11 @@ foreach ($check in $checks) {
     & $DotnetPath $testAssembly @testArgs
     if ($LASTEXITCODE -ne 0) { throw "Tests failed: $($check.Assembly)" }
 }
-& node --check (Join-Path $repoRoot 'src/SourceVault.Editor.Web/app.mjs')
-if ($LASTEXITCODE -ne 0) { throw 'Editor script syntax check failed' }
-& node --test (Join-Path $repoRoot 'tests/editor-web/state.test.mjs')
+foreach ($module in 'app.mjs', 'state.mjs', 'mock-service.mjs') {
+    & node --check (Join-Path $repoRoot "src/SourceVault.Editor.Web/$module")
+    if ($LASTEXITCODE -ne 0) { throw "Editor script syntax check failed: $module" }
+}
+& node --test (Join-Path $repoRoot 'tests/editor-web/state.test.mjs') (Join-Path $repoRoot 'tests/editor-web/mock-service.test.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'Editor session tests failed' }
 Write-Output 'Verification passed. These synthetic tests do not validate service identities, TPM operations, or VM isolation.'
 } finally {
