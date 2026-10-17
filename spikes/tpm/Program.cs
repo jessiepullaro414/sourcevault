@@ -96,6 +96,8 @@ internal sealed class TpmKeyProtector : IDisposable
     private const int RsaBits = 2048;
     private const int CiphertextBytes = RsaBits / 8;
     private const string ProviderName = "Microsoft Platform Crypto Provider";
+    private const string PcpKeyUsagePolicyProperty = "PCP_KEY_USAGE_POLICY"; // NCRYPT_PCP_KEY_USAGE_POLICY_PROPERTY
+    private const uint PcpEncryptionKey = 0x2; // NCRYPT_PCP_ENCRYPTION_KEY
     private static readonly CngProvider Provider = new(ProviderName);
     private readonly CngKey key;
     private readonly RSACng rsa;
@@ -127,6 +129,9 @@ internal sealed class TpmKeyProtector : IDisposable
             KeyCreationOptions = CngKeyCreationOptions.None,
         };
         parameters.Parameters.Add(new CngProperty("Length", BitConverter.GetBytes(RsaBits), CngPropertyOptions.None));
+        // PCP ignores KeyUsage when choosing TPM object attributes and creates a generic sign+encrypt key
+        // (observed PCP_KEY_USAGE_POLICY 0x10003) unless this provider-specific policy is set.
+        parameters.Parameters.Add(new CngProperty(PcpKeyUsagePolicyProperty, BitConverter.GetBytes(PcpEncryptionKey), CngPropertyOptions.None));
         return new TpmKeyProtector(CngKey.Create(CngAlgorithm.Rsa, name, parameters));
     }
 
