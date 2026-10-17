@@ -6,7 +6,7 @@ param([string]$Member = "$env:USERDOMAIN\$env:USERNAME")
 $ErrorActionPreference = 'Stop'
 $group = 'SourceVault Operators'
 if (!(Get-LocalGroup -Name $group -ErrorAction SilentlyContinue)) {
-    New-LocalGroup -Name $group -Description 'May use the SourceVault lab service pipe (synthetic data only).' | Out-Null
+    New-LocalGroup -Name $group -Description 'SourceVault lab pipe access (synthetic only)' | Out-Null # 48-char limit
     Write-Output "Created local group '$group'."
 } else { Write-Output "Local group '$group' already exists." }
 $sid = (New-Object Security.Principal.NTAccount($Member)).Translate([Security.Principal.SecurityIdentifier]).Value
