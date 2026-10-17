@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "monaco": {
+    "version": "0.57.0",
+    "url": "https://registry.npmjs.org/monaco-editor/-/monaco-editor-0.57.0.tgz",
+    "integrity": "sha512-5BkI9KGoqrNvBGUe15/QlZq3OooZ8WLg1AxTpaqHRCP3HNpzPPZKE2EDz8M7c+VRmCeUw1Brp4cx/PWm3kI/5A==",
+    "verification": "SHA-512 matched npm registry integrity",
+    "license": "MIT",
+    "assets": "src/SourceVault.Editor.Web/vendor/monaco"
+  },
+  "webview2": {
+    "version": "1.0.4258.31",
+    "url": "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/1.0.4258.31/microsoft.web.webview2.1.0.4258.31.nupkg",
+    "sha512": "1e5195c2fc8ffc85a25c053c2b9ed59a0e7d9216370d630ec4c9c7e001eeb05472d3fbc3023288b5750854d5e25d76aae022df499c8d522735c0e2259cf2ec3d",
+    "verification": "Official NuGet HTTPS download; SHA-512 recorded locally; package signature not yet independently verified",
+    "license": "See WebView2-LICENSE.txt and LICENSE.txt inside package",
+    "package": "vendor/packages/microsoft.web.webview2.1.0.4258.31.nupkg"
+  }
+}

@@ -5,8 +5,8 @@ if (![System.IO.Path]::IsPathFullyQualified($DestinationPath)) { throw 'Destinat
 $destination = [System.IO.Path]::GetFullPath($DestinationPath)
 if (Test-Path -LiteralPath $destination) { throw 'Destination already exists' }
 if ([System.IO.Path]::GetExtension($destination) -ne '.zip') { throw 'Destination must have .zip extension' }
-$allowedExtensions = @('.cs','.csproj','.md','.json','.config','.props','.ps1','.sh','.sln')
-$allowedNames = @('.gitignore','.gitattributes')
+$allowedExtensions = @('.cs','.csproj','.md','.json','.config','.props','.ps1','.sh','.sln','.html','.css','.js','.mjs','.txt','.ttf','.woff','.woff2','.svg','.nupkg')
+$allowedNames = @('.gitignore','.gitattributes','LICENSE')
 $files = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -File -Force | Where-Object {
     $relative = [System.IO.Path]::GetRelativePath($sourceRoot, $_.FullName)
     $segments = $relative -split '[\\/]'

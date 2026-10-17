@@ -1,6 +1,6 @@
 # Feasibility milestone status
 
-Date: October 17, 2026. Encrypted storage and service foundations are implemented in a local Git project. This is not yet a functioning encrypted editor or deployed vault service.
+Date: October 17, 2026. Encrypted storage and service foundations are implemented in a local Git project, and a synthetic-only editor preview (WPF/WebView2 host plus offline Monaco) runs locally. The editor is not connected to the vault, key service or builder. This is not yet a functioning encrypted editor or deployed vault service.
 
 | Component | Delivered | Observed verification |
 |---|---|---|
@@ -12,8 +12,10 @@ Date: October 17, 2026. Encrypted storage and service foundations are implemente
 | Revision storage (T04) | Encrypted manifests/documents, immutable blobs, optimistic conflicts, exclusive locks, atomic HEAD publication | 38 tests passed; four symlink tests skipped |
 | Windows service foundation | Open-only TPM adapter, exact service identity guard, SCM lifecycle, fixed strict configuration | 44 assertions passed; SCM/TPM untouched |
 | Storage integration | Create/edit/reopen, stale updates, competing writers, synthetic disk scan, unavailable protector | Six checks passed |
+| Editor web preview (T06 prep) | Offline Monaco 0.57.0, synthetic documents, memory-only session revisions, dirty/conflict state, lock/unlock, reset; loopback-only preview server | `node --check` plus 7 session-state tests passed; browser/worker/layout QA not recorded |
+| Editor native host (T06 prep) | WPF/WebView2 1.0.4258.31 shell, exact-origin asset mapping, navigation/resource/download/new-window/permission lockdown, `WEBVIEW2_*` override refusal, bounded four-field bridge, capture exclusion off | Builds in Release; launched locally, but the interactive native checklist in `editor-preview-checks.md` is not yet recorded as passed |
 
-Coordinator ran `scripts/Verify.ps1` against all twelve projects in Release using Microsoft .NET SDK 10.0.402: **238 checks passed, zero build warnings/errors**. Four dangling-symlink tests explicitly skipped because the host could not create the test links. Projects use BCL only, with NuGet feeds cleared. The SDK was downloaded into the chat workspace's `work/toolchain/`, verified with SHA-512 against Microsoft's release metadata, and was not installed system-wide. See `toolchain.json` for the recorded package metadata.
+Coordinator ran `scripts/Verify.ps1` against all thirteen projects in Release using Microsoft .NET SDK 10.0.402: **238 .NET checks and 7 editor session tests passed**. Four dangling-symlink tests explicitly skipped because the host could not create the test links. Service/storage projects use BCL only. The editor host restores the pinned WebView2 package from the repository-local feed (`vendor/packages`); no remote NuGet source is configured. Monaco is vendored under `src/SourceVault.Editor.Web/vendor/monaco`. Both packages were fetched from their official registries with SHA-512 recorded in `docs/editor-dependencies.json`; the WebView2 package signature has not been independently verified. The SDK was downloaded into the chat workspace's `work/toolchain/`, verified with SHA-512 against Microsoft's release metadata, and was not installed system-wide. See `toolchain.json` for the recorded package metadata.
 
 Direct DLL execution outside the restricted sandbox was required for IPC verification. An independent native diagnostic established that this environment requires `FILE_READ_ATTRIBUTES` in the pipe ACE; final mask `0x00100083` still excludes `FILE_CREATE_PIPE_INSTANCE`. Restricted-token failures were not treated as successful isolation tests. These results do not establish deployed cross-account access control.
 
@@ -29,12 +31,14 @@ Workers reviewed the binary record layout, codec and revision integrity paths. R
 
 The service host implements SCM entry points and cancellation, but its ready state means only an existing key opened under the required identity. It exposes no document, build or pipe API. Its synchronous key open has no forced cancellation and requires startup/shutdown timing validation on hardware.
 
+The editor preview holds synthetic text in renderer memory only; Save creates session-only revisions that disappear on reload or exit. Code review of the host bridge, navigation policy, frontend and loopback server is recorded in [editor preview checks](editor-preview-checks.md); it is a code inspection, not native runtime validation. WebView2 profile directories are retained under the publish output for later persistence inspection. Registry/policy WebView2 overrides, capture behavior, and renderer/OS persistence remain untested.
+
 ## Gates still open
 
 - Actual service host/virtual identity, key/vault/service ACLs, hardware key operations, restart/reboot, export denial, and cross-machine binding.
 - Real-hardware validation of record/store integration, power-loss durability, throughput, rotation and chosen recovery design.
 - Distinct editor identity and mutual pipe behavior, genuine separate-account/remote-client denial, lock/revocation wiring, signer/path policy and process-lifetime races.
-- WPF/WebView2/Monaco editor, offline asset bundle and persistence/capture/debugging tests.
+- Editor: interactive native checklist, registry/policy debugging overrides, WebView2 profile/cache/crash persistence inspection, explicit capture-exclusion mode, WebView2 package signature verification, and connection to the real service protocol.
 - Approved real compiler, authenticated guest channel, VM-management delegation, guest lifecycle, artifact publication, and persistence investigation.
 - Offline installer/update signing, recovery drills, license selection and independent security review.
 
