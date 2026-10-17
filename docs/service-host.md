@@ -73,4 +73,14 @@ Console commands, both read-only:
 - `vault-root-check` prints findings as codes, locations and SIDs; exit 0 means trusted, 4 means not. Run it elevated, because the root grants nobody else read access.
 - `vault-root-sddl` prints the exact root DACL the validator requires. `scripts/lab/New-VaultRoot.ps1` uses it to create the root, then verifies the result.
 
-Not yet run by the owner: `Update-ServiceLab.ps1`, a start without a vault (expected refusal 1066/10), `New-VaultRoot.ps1`, and a start with the vault.
+Owner-run lab, 2026-10-17:
+
+| Step | Result |
+|---|---|
+| `Update-ServiceLab.ps1` | New binaries installed; config, runtime, registration and key kept; 202 files re-hashed. |
+| `Test-ServiceLab.ps1` with no vault root | Refused as designed: never reached RUNNING, stopped with 1066/10. |
+| `New-VaultRoot.ps1` | First run applied the ACLs, but a verification bug (raw SID vs alias comparison) stopped it before the check. Fixed in `aa1722d`. The rerun re-applied the ACLs over the empty leftovers, and `vault-root-check` reported `trusted=yes`. |
+| `Test-ServiceLab.ps1` with the vault root | RUNNING after 1.6 s as `NT SERVICESourceVault`; stopped in 0.9 s with exit 0; process exited. |
+| Unelevated session (same user, admin token filtered) | Listing and file creation denied on both `C:ProgramDataSourceVault` and `vault`. |
+
+The validator therefore passed under the service account itself, including reading the ancestor chain. No store has been created in the root yet.
