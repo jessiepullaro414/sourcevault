@@ -94,20 +94,43 @@ public sealed class RevisionStore
 
     public StoreSnapshot Commit(Guid expectedSnapshotId, string logicalName, ReadOnlySpan<byte> utf8Content)
     {
-        ValidateName(logicalName);
-        ValidateContent(utf8Content);
+        var copy = utf8Content.ToArray();
+        try { return CommitMany(expectedSnapshotId, [(logicalName, copy)]); }
+        finally { CryptographicOperations.ZeroMemory(copy); }
+    }
+
+    /// <summary>
+    /// Creates or replaces several documents in one snapshot: one new manifest, all or nothing. A name that matches an
+    /// existing file (case-insensitively) replaces it and keeps its file ID. Callers zero their buffers afterwards.
+    /// </summary>
+    public StoreSnapshot CommitMany(Guid expectedSnapshotId, IReadOnlyList<(string Name, byte[] Content)> documents)
+    {
+        if (documents.Count == 0 || documents.Count > MaximumFiles) throw new ArgumentException("Invalid document count.");
+        foreach (var (name, content) in documents) { ValidateName(name); ValidateContent(content); }
+        if (documents.Select(d => d.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != documents.Count) throw new ArgumentException("Duplicate names in one commit.");
         using var lease = AcquireLock();
         var manifest = ReadCurrent();
         var current = manifest.Snapshot;
         if (current.SnapshotId != expectedSnapshotId) throw new RevisionConflictException();
-        var existing = current.Files.SingleOrDefault(f => StringComparer.OrdinalIgnoreCase.Equals(f.LogicalName, logicalName));
-        if (existing is null && current.Files.Count == MaximumFiles) throw new InvalidDataException("Document count exceeded.");
-        var entry = new StoreFile(existing?.FileId ?? Guid.NewGuid(), logicalName, Guid.NewGuid(), utf8Content.Length);
-        var record = RecordCodec.Encrypt(new(projectId, entry.FileId, entry.RevisionId, RecordKind.Document), utf8Content, protector);
-        WriteBlob(entry.RevisionId, record);
+        var byName = current.Files.ToDictionary(f => f.LogicalName, StringComparer.OrdinalIgnoreCase);
+        var replaced = new HashSet<Guid>();
+        var added = new List<StoreFile>();
+        var hashes = new Dictionary<Guid, byte[]>();
+        foreach (var (name, content) in documents)
+        {
+            byName.TryGetValue(name, out var existing);
+            if (existing is not null) replaced.Add(existing.FileId);
+            var entry = new StoreFile(existing?.FileId ?? Guid.NewGuid(), name, Guid.NewGuid(), content.Length);
+            var record = RecordCodec.Encrypt(new(projectId, entry.FileId, entry.RevisionId, RecordKind.Document), content, protector);
+            WriteBlob(entry.RevisionId, record);
+            hashes[entry.RevisionId] = SHA256.HashData(record);
+            added.Add(entry);
+        }
         FaultInjection?.Invoke(CommitStage.DocumentFlushed);
-        var entries = current.Files.Where(f => f.FileId != entry.FileId).Append(entry).ToArray();
-        var hashes = entries.ToDictionary(f => f.RevisionId, f => f.RevisionId == entry.RevisionId ? SHA256.HashData(record) : manifest.DocumentSha256[f.RevisionId]);
+        var entries = current.Files.Where(f => !replaced.Contains(f.FileId)).Concat(added).ToArray();
+        if (entries.Length > MaximumFiles) throw new InvalidDataException("Document count exceeded.");
+        if (!IsValidTree(entries.Select(f => f.LogicalName))) throw new NameExistsException(); // a file where a folder is, or vice versa
+        foreach (var f in entries) if (!hashes.ContainsKey(f.RevisionId)) hashes[f.RevisionId] = manifest.DocumentSha256[f.RevisionId];
         var next = Snapshot(Guid.NewGuid(), entries);
         var written = WriteManifest(next, hashes);
         FaultInjection?.Invoke(CommitStage.ManifestFlushed);
@@ -211,6 +234,7 @@ public sealed class RevisionStore
                 entries.Add(new(fileId, name, revision, length));
                 hashes.Add(revision, hash);
             }
+            if (!IsValidTree(names)) throw new InvalidDataException();
             return new(Snapshot(expectedId, entries), recordSha256, hashes);
         }
         catch (Exception e) when (e is JsonException or InvalidOperationException or FormatException or OverflowException or ArgumentException or InvalidDataException)
@@ -253,7 +277,30 @@ public sealed class RevisionStore
         catch (DecoderFallbackException) { throw new InvalidDataException("Invalid document encoding."); }
     }
 
+    public const int MaximumPathLength = 260;
+    public const int MaximumPathDepth = 32;
+
+    // A logical name is a relative path: 1-32 '/'-separated segments, at most 260 characters, each segment a valid
+    // Windows file name (no empty, '.', '..', reserved device names, separators or trailing dot/space).
     private static void ValidateName(string name)
+    {
+        if (string.IsNullOrEmpty(name) || name.Length > MaximumPathLength) throw new ArgumentException("Invalid logical name.");
+        var segments = name.Split('/');
+        if (segments.Length > MaximumPathDepth) throw new ArgumentException("Invalid logical name.");
+        foreach (var segment in segments) ValidateSegment(segment);
+    }
+
+    /// <summary>No path is both a file and a folder of another path (case-insensitive), e.g. "a" with "a/b".</summary>
+    private static bool IsValidTree(IEnumerable<string> names)
+    {
+        var files = new HashSet<string>(names, StringComparer.OrdinalIgnoreCase);
+        foreach (var name in files)
+            for (int slash = name.IndexOf('/'); slash > 0; slash = name.IndexOf('/', slash + 1))
+                if (files.Contains(name[..slash])) return false;
+        return true;
+    }
+
+    private static void ValidateSegment(string name)
     {
         if (string.IsNullOrEmpty(name) || name.Length > 128 || name is "." or ".." || name.EndsWith(' ') || name.EndsWith('.') ||
             name.Any(c => char.IsControl(c) || c is '/' or '\\' or ':' or '<' or '>' or '"' or '|' or '?' or '*')) throw new ArgumentException("Invalid logical name.");

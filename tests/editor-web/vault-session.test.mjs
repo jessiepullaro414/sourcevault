@@ -72,7 +72,8 @@ test('create file and project; duplicate names are AlreadyExists; switching proj
   const id = await session.createFile('notes.md', '# notes\n');
   assert.equal(session.activeId, id); assert.equal(session.file(id).language, 'markdown');
   await rejectsWith(session.createFile('NOTES.md'), 'AlreadyExists');
-  await rejectsWith(session.createFile('a/b.ts'), 'InvalidRequest');
+  await rejectsWith(session.createFile('a/../b.ts'), 'InvalidRequest');
+  assert.ok(await session.createFile('src/nested/deep.ts', 'x'), 'folder paths are allowed');
   session.edit(byName('notes.md').id, '# draft\n');
   await rejectsWith(session.createProject('Second'), 'UnsavedChanges');
   await session.save(id);

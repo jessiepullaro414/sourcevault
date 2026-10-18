@@ -29,7 +29,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Client restore failed' }
     & $DotnetPath publish $clientProject --no-restore -c Release -o $clientOutput -p:UseSharedCompilation=false -m:1 -nodeReuse:false
     if ($LASTEXITCODE -ne 0) { throw 'Client publish failed' }
-    Write-Output "Published lab client to $clientOutput"
+    # Importer: same folder as the lab client (<install root>\client\), same pinned runtime.
+    $importProject = Join-Path $repoRoot 'src/SourceVault.Import/SourceVault.Import.csproj'
+    & $DotnetPath restore $importProject --configfile (Join-Path $repoRoot 'NuGet.Config') -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Importer restore failed' }
+    & $DotnetPath publish $importProject --no-restore -c Release -o $clientOutput -p:UseSharedCompilation=false -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Importer publish failed' }
+    Write-Output "Published lab client and importer to $clientOutput"
     # Editor, installed build: apphost pinned to <install root>\runtime (SourceVaultInstalled=true).
     $editorProject = Join-Path $repoRoot 'src/SourceVault.Editor.Host/SourceVault.Editor.Host.csproj'
     $editorOutput = Join-Path $repoRoot 'artifacts/editor-publish'

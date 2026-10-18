@@ -53,3 +53,14 @@ Concurrency is project-wide and optimistic: any commit in the project since `exp
 - Errors never contain exception text, names or content.
 
 Not in v2: deleting or renaming files and projects, per-file history, per-project permissions, and builds.
+
+## Addition: folder paths and ImportFiles (owner request, 2026-10-18)
+
+**File names are relative paths.** Segments are separated by `/`. A name has at most 32 segments and 260 characters in total, and each segment follows the earlier file-name rules. A path can't be both a file and a folder (`a` alongside `a/b`); that clash returns `AlreadyExists`. The storage format is unchanged: names live inside the encrypted manifest.
+
+**`ImportFiles`.** Request body: `capability`, `projectId`, `expectedSnapshotId`, and `files[]`, where each entry is `{name, contentBase64}`. Success body: `snapshotId`, `imported`.
+
+- 1–256 entries per request, committed as one snapshot, all or nothing.
+- **Create-only:** a name that already exists, or clashes with a path, returns `AlreadyExists`, and nothing is written.
+- Duplicate names within one request return `InvalidRequest`; more than 256 entries returns `LimitExceeded`.
+- Used by `SourceVault.Import.exe`, an installed client allowed at `<install root>\client\SourceVault.Import.exe`.

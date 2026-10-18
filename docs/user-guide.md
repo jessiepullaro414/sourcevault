@@ -96,10 +96,33 @@ If you see a lock screen instead, it explains why:
 
 - **Choose a project** from the list, or type a name and **Create project**. Names are 1–64 characters.
 - **Open a file** from the Explorer. Only files you open are decrypted; closing a tab removes its text from the editor.
-- **+ New file** creates a file. Names can't contain `\ / : * ? " < > |`. Names aren't case-sensitive, so `Main.ts` and `main.ts` count as the same name.
+- **+ New file** creates a file. Use `/` for folders (`src/app/main.ts`), up to 260 characters and 32 levels. Names can't contain `\ : * ? " < > |`. Names aren't case-sensitive, so `Main.ts` and `main.ts` count as the same name.
 - **Switch project** returns to the project list. Save or reload edited files first.
 - **Save** with **Ctrl+S** or the Save button. Each save becomes a new encrypted, unchangeable revision in the vault. Until you save, your edits exist only in the editor; a dot on the tab means unsaved changes.
-- Limits: 256 KiB per file, 1,024 files per project, 256 projects.
+- Limits: 256 KiB per file (UTF-8 text), 1,024 files per project, 256 projects.
+
+### Import an existing folder
+
+Use the importer to bring a folder of code into a **new** project. Copy/paste is blocked, so this is how existing code gets in. Run it from a normal (not administrator) PowerShell, as an operator, while the service is running:
+
+```powershell
+& "C:\Program Files\SourceVault\client\SourceVault.Import.exe" "C:\code\my-app" --project "My app" --dry-run
+& "C:\Program Files\SourceVault\client\SourceVault.Import.exe" "C:\code\my-app" --project "My app"
+```
+
+- **`--dry-run` first:** it lists what would be imported and what would be skipped, with reasons. It doesn't connect and changes nothing.
+- **What's imported:** UTF-8 text files up to 256 KiB, with their folder structure. Up to 1,024 files per project.
+- **What's skipped:**
+  - binaries and non-UTF-8 files (images, DLLs, UTF-16 text)
+  - files over 256 KiB
+  - links and junctions, which are never followed
+  - the folders `.git`, `node_modules`, `bin`, `obj`, `dist`, `build`, `out`, `target`, `.vs`, `.idea`, `__pycache__`, `.venv`, `venv`, `packages`, `.gradle`, `.next` and `coverage`
+  - more folders by name with `--exclude <name>` (repeatable)
+- **Always a new project:** it never adds to or overwrites an existing one. If the name is taken, choose another.
+- **Verified:** after importing, it decrypts **every** file through the service and compares it byte for byte with your original. It ends with "all N decrypted and matched the originals" or lists any file that didn't.
+- **Changed files:** if a file changes while the import runs, the import stops. Run it again into a new project name.
+- **Your original folder is not changed.** Once you've checked the project in the editor, deleting the originals is your decision. Deleting does **not** securely erase files from an SSD, so copies may remain recoverable.
+- **No deletes yet:** projects can't be deleted, so a half-finished import stays in the list. Re-run into a new name.
 
 ### When someone else changed the file
 
@@ -145,3 +168,4 @@ Different files never conflict: two people can edit different files of the same 
 - **No recovery, no backup, no migration** to another computer yet.
 - **Not yet verified:** that everything works after a reboot (automatic start at boot), and an independent security review.
 - **Builds are not available yet.** The vault stores and edits files only.
+- **No delete or rename** of files or projects yet.

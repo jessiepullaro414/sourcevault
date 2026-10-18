@@ -89,6 +89,7 @@ internal sealed class ScmHost
     {
         var installRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
         yield return Path.Combine(installRoot, "client", "SourceVault.LabClient.exe");
+        yield return Path.Combine(installRoot, "client", "SourceVault.Import.exe");
         yield return Path.Combine(installRoot, "editor", "SourceVault.Editor.exe");
     }
 

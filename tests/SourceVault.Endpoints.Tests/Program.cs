@@ -160,7 +160,7 @@ Test("strict bodies, unknown projects, limits and unavailable builds", () =>
         Assert(c.Code("ListFiles", ("projectId", project.ToUpperInvariant())) == "InvalidRequest", "non-canonical id");
         Assert(c.Code("ListFiles", ("projectId", Guid.NewGuid().ToString("D"))) == "NotFound", "unknown project");
         Assert(c.Code("CreateProject", ("name", " padded")) == "InvalidRequest", "bad project name");
-        Assert(c.Code("CreateFile", ("projectId", project), ("name", "a/b.ts"), ("expectedSnapshotId", s0), ("contentBase64", B64("x"))) == "InvalidRequest", "bad file name");
+        Assert(c.Code("CreateFile", ("projectId", project), ("name", "a//b.ts"), ("expectedSnapshotId", s0), ("contentBase64", B64("x"))) == "InvalidRequest", "bad file name");
         Assert(c.Code("CreateFile", ("projectId", project), ("name", "big.ts"), ("expectedSnapshotId", s0), ("contentBase64", Convert.ToBase64String(new byte[262145]))) == "LimitExceeded", "content limit");
         Assert(c.Code("CreateFile", ("projectId", project), ("name", "bin.ts"), ("expectedSnapshotId", s0), ("contentBase64", Convert.ToBase64String(new byte[] { 0xff }))) == "InvalidRequest", "invalid UTF-8");
         Assert(c.Code("CreateFile", ("projectId", project), ("name", "b64.ts"), ("expectedSnapshotId", s0), ("contentBase64", "@@@")) == "InvalidRequest", "invalid base64");
@@ -404,7 +404,7 @@ Test("controller: locked, not-open and content limits", () =>
         Assert(Run(ctl.SaveDocumentAsync(project, Guid.NewGuid(), "x")).Code == "NotOpen", "save of a file never opened");
         Assert(Run(ctl.CreateFileAsync(project, "big.ts", new string('x', 262145))).Code == "LimitExceeded", "over 256 KiB");
         Assert(Run(ctl.CreateFileAsync(project, "bad.ts", "\ud800")).Code == "InvalidRequest", "lone surrogate is not UTF-8");
-        Assert(Run(ctl.CreateFileAsync(project, "a/b.ts", "x")).Code == "InvalidRequest", "bad name");
+        Assert(Run(ctl.CreateFileAsync(project, "a/../b.ts", "x")).Code == "InvalidRequest", "bad name");
         Assert(Run(ctl.OpenDocumentAsync(project, Guid.NewGuid())).Code == "NotFound", "unknown file");
     }
 });
@@ -429,6 +429,111 @@ Test("controller: unlock failures are reported as fixed, explainable codes", () 
         Assert(Run(ctl.UnlockAsync()).Code == "ClientRejected", "executable check");
 });
 
+// ---- Import: ImportFiles over the pipe, and the SourceVault.Import tool end to end ----
+string ImportBody(params (string Name, string Text)[] files) => "[" + string.Join(",", files.Select(f =>
+    JsonSerializer.Serialize(new Dictionary<string, string> { ["name"] = f.Name, ["contentBase64"] = B64(f.Text) }))) + "]";
+string ImportCode(Client c, string project, string snapshot, string filesJson) =>
+    c.RawBody("ImportFiles", $"{{\"capability\":{JsonSerializer.Serialize(c.Capability)},\"projectId\":\"{project}\",\"expectedSnapshotId\":\"{snapshot}\",\"files\":{filesJson}}}");
+
+Test("ImportFiles: batches of new files with folder paths; create-only; limits; no TPM unwraps when warm", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var created = c.Ok("CreateProject", ("name", "Imported"));
+        var project = created.GetProperty("projectId").GetString()!;
+        string s0 = created.GetProperty("snapshotId").GetString()!;
+        key.Unwraps = 0;
+        using var first = JsonDocument.Parse(ImportCode(c, project, s0, ImportBody(("src/app/main.ts", "export const a = 1;\n"), ("src/util.ts", "u"), ("README.md", "# r"))));
+        Assert(first.RootElement.GetProperty("code").GetString() == "Ok" && first.RootElement.GetProperty("body").GetProperty("imported").GetInt32() == 3, "first batch");
+        Assert(key.Unwraps == 0, "import needs no unwraps: " + key.Unwraps);
+        var s1 = first.RootElement.GetProperty("body").GetProperty("snapshotId").GetString()!;
+        var names = c.Ok("ListFiles", ("projectId", project)).GetProperty("files").EnumerateArray().Select(f => f.GetProperty("name").GetString()).OrderBy(n => n).ToArray();
+        Assert(names.SequenceEqual(new[] { "README.md", "src/app/main.ts", "src/util.ts" }), "paths kept");
+        Assert(ImportCode(c, project, s1, ImportBody(("SRC/util.ts", "again"))).Contains("\"AlreadyExists\""), "existing name");
+        Assert(ImportCode(c, project, s1, ImportBody(("src/app", "file where a folder is"))).Contains("\"AlreadyExists\""), "path clash");
+        Assert(ImportCode(c, project, s1, ImportBody(("a.ts", "1"), ("A.ts", "2"))).Contains("\"InvalidRequest\""), "duplicate in batch");
+        Assert(ImportCode(c, project, s1, ImportBody(("a/../b.ts", "1"))).Contains("\"InvalidRequest\""), "bad path");
+        Assert(ImportCode(c, project, s0, ImportBody(("late.ts", "1"))).Contains("\"RevisionConflict\""), "stale snapshot");
+        Assert(ImportCode(c, project, s1, ImportBody(Enumerable.Range(0, 257).Select(i => ($"f{i}.ts", "x")).ToArray())).Contains("\"LimitExceeded\""), "batch limit");
+        Assert(c.Ok("ListFiles", ("projectId", project)).GetProperty("files").GetArrayLength() == 3, "refused batches wrote nothing");
+    }
+});
+
+string NewSourceFolder()
+{
+    var root = Path.Combine(workspace, "source-" + Guid.NewGuid().ToString("N"));
+    void Write(string relative, byte[] bytes) { var p = Path.Combine(root, relative); Directory.CreateDirectory(Path.GetDirectoryName(p)!); File.WriteAllBytes(p, bytes); }
+    Write(@"src\app\main.ts", Encoding.UTF8.GetBytes("export function main() { return 'synthetic'; }\n"));
+    Write(@"src\util.ts", Encoding.UTF8.GetBytes("export const é = '✓ 𝄞';\n"));
+    Write("README.md", [0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("# Synthetic import\n")]); // UTF-8 BOM kept byte for byte
+    Write(".gitignore", Encoding.UTF8.GetBytes("bin/\n"));
+    Write(@"node_modules\left-pad\index.js", Encoding.UTF8.GetBytes("module.exports = 1;\n"));
+    Write(@"bin\Debug\app.dll", [0x4D, 0x5A, 0x00, 0x01]);
+    Write(@"assets\logo.png", [0x89, 0x50, 0x4E, 0x47, 0x00, 0x00]);
+    Write("big.txt", Encoding.UTF8.GetBytes(new string('x', 262145)));
+    Write("latin1.txt", [0x63, 0x61, 0x66, 0xE9]); // "café" in Latin-1: not UTF-8
+    return root;
+}
+
+Test("importer: scan includes UTF-8 text only and explains every skip; links are not followed", () =>
+{
+    var root = NewSourceFolder();
+    var junction = Path.Combine(root, "linked");
+    var linked = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{Path.Combine(root, "src")}\"") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true })!;
+    linked.WaitForExit();
+    var plan = SourceVault.Import.ImportPlan.Scan(root);
+    Assert(plan.Files.Select(f => f.Path).SequenceEqual(new[] { ".gitignore", "README.md", "src/app/main.ts", "src/util.ts" }), "included: " + string.Join(",", plan.Files.Select(f => f.Path)));
+    string Reason(string path) => plan.Skipped.Single(s => s.Path == path).Reason;
+    Assert(Reason("node_modules/") == SourceVault.Import.ImportPlan.ExcludedFolder && Reason("bin/") == SourceVault.Import.ImportPlan.ExcludedFolder, "excluded folders");
+    Assert(Reason("assets/logo.png") == SourceVault.Import.ImportPlan.NotText && Reason("latin1.txt") == SourceVault.Import.ImportPlan.NotText, "binary and non-UTF-8");
+    Assert(Reason("big.txt") == SourceVault.Import.ImportPlan.TooLarge, "too large");
+    if (Directory.Exists(junction)) Assert(Reason("linked") == SourceVault.Import.ImportPlan.Link, "junction not followed");
+    var withExtra = SourceVault.Import.ImportPlan.Scan(root, ["src"]);
+    Assert(withExtra.Files.Count == 2 && withExtra.Skipped.Any(s => s.Path == "src/"), "--exclude adds folders");
+});
+
+Test("importer: imports into a new project, verifies every file byte for byte, refuses an existing name", () =>
+{
+    var root = NewSourceFolder();
+    var (server, pipe) = StartServer();
+    using (server)
+    {
+        SourceVault.Client.VaultClient Connect() => new(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
+        var plan = SourceVault.Import.ImportPlan.Scan(root);
+        var output = new StringWriter();
+        Assert(SourceVault.Import.Importer.Run(plan, "Imported app", Connect, output) == 0, "import: " + output);
+        Assert(output.ToString().Contains("all 4 decrypted and matched"), "verified");
+        Assert(!output.ToString().Contains("synthetic'") && !output.ToString().Contains("✓"), "no content printed");
+        using (var c = new Client(pipe, me))
+        {
+            c.Begin();
+            var project = c.Ok("ListProjects").GetProperty("projects").EnumerateArray().Single(p => p.GetProperty("name").GetString() == "Imported app");
+            var files = c.Ok("ListFiles", ("projectId", project.GetProperty("projectId").GetString()!));
+            var readme = files.GetProperty("files").EnumerateArray().Single(f => f.GetProperty("name").GetString() == "README.md");
+            var bytes = c.Ok("OpenDocument", ("projectId", project.GetProperty("projectId").GetString()!), ("fileId", readme.GetProperty("fileId").GetString()!),
+                ("expectedSnapshotId", files.GetProperty("snapshotId").GetString()!)).GetProperty("contentBase64").GetBytesFromBase64();
+            Assert(bytes.SequenceEqual(File.ReadAllBytes(Path.Combine(root, "README.md"))), "BOM and bytes preserved");
+        }
+        var again = new StringWriter();
+        Assert(SourceVault.Import.Importer.Run(plan, "imported APP", Connect, again) == 1 && again.ToString().Contains("already exists"), "existing project name");
+        File.AppendAllText(Path.Combine(root, "src", "util.ts"), "// edited after the scan\n");
+        try { SourceVault.Import.Importer.Run(plan, "Second import", Connect, new StringWriter()); throw new Exception("changed file accepted"); }
+        catch (SourceVault.Import.ImportException e) { Assert(e.Message.Contains("changed after it was scanned"), "changed file"); }
+    }
+});
+
+Test("importer: batches stay under the frame limit and 256 files", () =>
+{
+    var many = Enumerable.Range(0, 600).Select(i => new SourceVault.Import.ImportCandidate($"f{i}.ts", "", 2048, new byte[32])).ToList();
+    var batches = SourceVault.Import.Importer.Batches(many).ToList();
+    Assert(batches.Sum(b => b.Count) == 600 && batches.All(b => b.Count <= 256 && b.Sum(f => f.Length) <= SourceVault.Import.Importer.MaxBatchBytes), "batching");
+    var big = Enumerable.Range(0, 5).Select(i => new SourceVault.Import.ImportCandidate($"b{i}.ts", "", 256 * 1024, new byte[32])).ToList();
+    Assert(SourceVault.Import.Importer.Batches(big).All(b => b.Sum(f => f.Length) <= SourceVault.Import.Importer.MaxBatchBytes), "large files split");
+});
+
 Console.WriteLine($"Endpoint tests: {passed} passed; synthetic workspace retained at {workspace}");
 return 0;
 
@@ -436,6 +541,7 @@ sealed class Client : IDisposable
 {
     private readonly NamedPipeClientStream pipe;
     private string? capability;
+    public string? Capability => capability;
     public Client(string name, SecurityIdentifier server, TimeSpan? busy = null) => pipe = VaultPipe.Connect(name, server, busy ?? TimeSpan.FromSeconds(5));
 
     public void Begin()

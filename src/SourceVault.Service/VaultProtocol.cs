@@ -77,6 +77,7 @@ internal sealed class VaultProtocol
                 "ListFiles" => ListFiles(request),
                 "OpenDocument" => OpenDocument(request),
                 "CreateFile" => CreateFile(request),
+                "ImportFiles" => ImportFiles(request),
                 "ApplyEdits" => ApplyEdits(request),
                 "RequestBuild" or "GetBuildStatus" => Error(request, "Unavailable"),
                 _ => Error(request, "UnsupportedOperation"),
@@ -204,6 +205,46 @@ internal sealed class VaultProtocol
             });
         }
         finally { CryptographicOperations.ZeroMemory(content); }
+    }
+
+    internal const int MaxImportBatch = 256;
+
+    /// <summary>
+    /// Adds up to 256 new files in one snapshot, all or nothing (used by the importer). Create-only: any name that
+    /// already exists, or that clashes with an existing folder/file path, is AlreadyExists and nothing is written.
+    /// </summary>
+    private ProtocolResponse ImportFiles(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "expectedSnapshotId", "files");
+        var store = Project(request.Body);
+        var expected = Id(request.Body, "expectedSnapshotId");
+        var files = request.Body.GetProperty("files");
+        if (files.ValueKind != JsonValueKind.Array || files.GetArrayLength() is 0) throw new RequestException("InvalidRequest");
+        if (files.GetArrayLength() > MaxImportBatch) throw new RequestException("LimitExceeded");
+        var documents = new List<(string Name, byte[] Content)>();
+        try
+        {
+            foreach (var file in files.EnumerateArray())
+            {
+                Require(file, "name", "contentBase64");
+                var name = Text(file, "name");
+                if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest");
+                documents.Add((name, Content(file)));
+            }
+            if (documents.Select(d => d.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != documents.Count) throw new RequestException("InvalidRequest");
+            var current = store.List();
+            if (current.SnapshotId != expected) throw new RevisionConflictException();
+            var existing = current.Files.Select(f => f.LogicalName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (documents.Any(d => existing.Contains(d.Name))) throw new NameExistsException();
+            if (current.Files.Count + documents.Count > RevisionStore.MaximumFiles) throw new RequestException("LimitExceeded");
+            var next = store.CommitMany(expected, documents); // re-checks the snapshot under the lock; path clashes are NameExists
+            return Ok(request, w =>
+            {
+                w.WriteString("snapshotId", next.SnapshotId.ToString("D"));
+                w.WriteNumber("imported", documents.Count);
+            });
+        }
+        finally { foreach (var (_, content) in documents) CryptographicOperations.ZeroMemory(content); }
     }
 
     private ProtocolResponse ApplyEdits(ParsedRequest request)

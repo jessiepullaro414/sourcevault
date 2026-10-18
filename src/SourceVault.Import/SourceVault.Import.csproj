@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SourceVault.Import</AssemblyName>
+    <UseAppHost>true</UseAppHost>
+    <!-- Installed at <root>\client\ beside the lab client: runs only on the private runtime at <root>\runtime. -->
+    <AppHostRelativeDotNet>..\runtime</AppHostRelativeDotNet>
+    <AppHostDotNetSearch>AppRelative</AppHostDotNetSearch>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SourceVault.Client/SourceVault.Client.csproj" />
+  </ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
+</Project>

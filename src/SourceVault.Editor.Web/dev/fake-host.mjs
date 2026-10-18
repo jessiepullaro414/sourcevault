@@ -16,9 +16,11 @@ const MAX_TEXT_BYTES = 256 * 1024;
 const encoder = new TextEncoder();
 const bytes = text => encoder.encode(text).length;
 const isId = v => typeof v === 'string' && UUID.test(v) && v !== '00000000-0000-0000-0000-000000000000';
-const isName = v => typeof v === 'string' && v.length > 0 && v.length <= 128 && ![...v].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127) && v.isWellFormed();
+const isName = v => typeof v === 'string' && v.length > 0 && v.length <= 260 && ![...v].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127) && v.isWellFormed();
 const isText = v => typeof v === 'string' && v.isWellFormed() && bytes(v) <= MAX_TEXT_BYTES;
-const validFileName = name => !/[\\/:<>"|?*]/.test(name) && name !== '.' && name !== '..' && !/[ .]$/.test(name);
+// Vault paths: '/'-separated segments, each a valid Windows file name (as RevisionStore checks).
+const validSegment = s => s.length > 0 && s.length <= 128 && !/[\\/:<>"|?*]/.test(s) && s !== '.' && s !== '..' && !/[ .]$/.test(s);
+const validFileName = name => name.split('/').length <= 32 && name.split('/').every(validSegment);
 
 const SEED = [
   { name: 'Synthetic demo 1', files: [

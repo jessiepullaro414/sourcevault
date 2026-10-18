@@ -33,3 +33,9 @@ Production TPM adapter must explicitly select hardware provider, reject exportab
 The record layout above is unchanged. The manifest JSON `version` is now `2`, and each file entry gains a required `recordSha256`: 64 lowercase hex characters, the SHA-256 of that document's complete encrypted record file. Readers reject version 1 and any other version. Because the manifest is itself an authenticated record, these hashes bind every committed document record. Readers must verify each referenced record's exact size and hash on every operation. They may skip decrypting a record unless its content is requested.
 
 A store instance may cache its last authenticated manifest in memory (no document plaintext or keys). It may reuse that cache only when `HEAD` names the same snapshot id and the manifest record file's SHA-256 is unchanged. Record-format changes, including any key hierarchy, still require separate review. See `docs/store-performance-design.md`.
+
+## Addition: folder paths and batch commits (2026-10-18)
+
+Logical names may now be relative paths of `/`-separated segments: at most 32 segments and 260 characters, each segment a valid basename under the earlier rules. No path may be a folder prefix of another file (case-insensitive). Readers reject manifests that break this.
+
+`RevisionStore.CommitMany` writes many documents and one manifest in a single all-or-nothing commit. The record format and manifest schema 2 are unchanged.

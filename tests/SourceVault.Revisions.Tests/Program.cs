@@ -44,8 +44,22 @@ Test("initialize, commit, replace, reopen and stable file identity", () =>
     }
 });
 
-foreach (var name in new[] { "", ".", "..", "../x", "a/b", "a\\b", "a:b", "CON", "NUL.txt", "COM1.cs", "LPT¹.txt", "CONIN$", "x.", "x ", "a\n", "a?b", new string('a',129), "\ud800" })
+foreach (var name in new[] { "", ".", "..", "../x", "a\\b", "a:b", "CON", "NUL.txt", "COM1.cs", "LPT¹.txt", "CONIN$", "x.", "x ", "a\n", "a?b", new string('a',129), "\ud800",
+    "/a", "a/", "a//b", "a/./b", "a/../b", "src/CON/x.ts", "src/x./y", string.Join('/', Enumerable.Repeat("d", 33)), string.Join('/', Enumerable.Repeat(new string('d', 20), 13)) })
 Test("reject logical name " + passed, () => { var f = Fixture(); var s = f.Store.Initialize(); Reject<ArgumentException>(() => f.Store.Commit(s.SnapshotId, name, Text("synthetic"))); });
+
+Test("folder paths: nested names commit and reopen; a file and a folder cannot share a path", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    s = f.Store.Commit(s.SnapshotId, "src/app/main.ts", Text("synthetic-nested"));
+    s = f.Store.Commit(s.SnapshotId, string.Join('/', Enumerable.Repeat("d", 31)) + "/deep.ts", Text("synthetic-deep"));
+    var reopened = new RevisionStore(f.Path, f.Project, key).List();
+    Assert(reopened.Files.Any(x => x.LogicalName == "src/app/main.ts"));
+    Reject<NameExistsException>(() => f.Store.Commit(reopened.SnapshotId, "src/app", Text("file where a folder is")));
+    Reject<NameExistsException>(() => f.Store.Commit(reopened.SnapshotId, "SRC/app/main.ts/x", Text("folder where a file is")));
+    Assert(f.Store.List().SnapshotId == reopened.SnapshotId);
+});
+
 
 Test("reject document limits and non UTF8", () =>
 {
@@ -170,6 +184,21 @@ Test("unwrap budget: cold list 1, warm list 0, open 1, commit 0, bulk read N", (
     Assert(Unwraps(() => cold.ReadSnapshot(next.SnapshotId, (f, content) => seen.Add(f.LogicalName + "=" + Encoding.UTF8.GetString(content)))) == 8);
     Assert(seen.Count == 8 && seen.Contains("file3.cs=synthetic-edit") && seen.Contains("file7.cs=synthetic-content-7"));
     Reject<RevisionConflictException>(() => cold.ReadSnapshot(p.Snap.SnapshotId, (_, _) => { }));
+});
+
+Test("CommitMany: many files in one snapshot, all or nothing, no TPM unwraps when warm", () =>
+{
+    var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); var project = Guid.NewGuid();
+    var store = new RevisionStore(path, project, counting); var s = store.Initialize();
+    var batch = Enumerable.Range(0, 50).Select(i => ($"src/m{i / 10}/f{i}.ts", Text($"synthetic-{i}"))).ToList();
+    StoreSnapshot next = s;
+    Assert(Unwraps(() => next = store.CommitMany(s.SnapshotId, batch)) == 0);
+    Assert(next.Files.Count == 50 && Directory.GetFiles(path, "*.svr").Length == 1 + 1 + 50);
+    Reject<ArgumentException>(() => store.CommitMany(next.SnapshotId, [("dup.ts", Text("a")), ("DUP.ts", Text("b"))]));
+    Reject<RevisionConflictException>(() => store.CommitMany(s.SnapshotId, [("late.ts", Text("x"))]));
+    var replaced = store.CommitMany(next.SnapshotId, [("src/m0/f0.ts", Text("synthetic-replaced")), ("new.ts", Text("synthetic-new"))]);
+    Assert(replaced.Files.Count == 51 && replaced.Files.Single(x => x.LogicalName == "src/m0/f0.ts").FileId == next.Files.Single(x => x.LogicalName == "src/m0/f0.ts").FileId);
+    Assert(Encoding.UTF8.GetString(store.Open(replaced.SnapshotId, replaced.Files.Single(x => x.LogicalName == "src/m0/f0.ts").FileId)) == "synthetic-replaced");
 });
 
 Test("store root given with a trailing separator still reads its records", () =>

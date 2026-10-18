@@ -21,7 +21,7 @@ internal static class BridgePolicy
     internal const string LockedType = "sourcevault.vault.locked";
     internal const int MaxMessageChars = 2 * 1024 * 1024; // checked before parsing; escaped 256 KiB text fits
     internal const int MaxTextBytes = 256 * 1024;
-    internal const int MaxNameChars = 128;
+    internal const int MaxNameChars = 260; // vault paths: up to 260 characters ("src/app/main.ts")
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private static readonly Dictionary<string, (VaultOperation Op, string[] Args)> Operations = new(StringComparer.Ordinal)
