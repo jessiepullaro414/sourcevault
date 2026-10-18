@@ -1,6 +1,8 @@
-param([string]$DotnetPath = 'dotnet')
+param([string]$DotnetPath)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+# Default: the verified portable SDK in local/toolchain (see docs/local-project.md), else dotnet on PATH.
+if (!$DotnetPath) { $localSdk = Join-Path $repoRoot 'local/toolchain/dotnet/dotnet.exe'; $DotnetPath = if (Test-Path -LiteralPath $localSdk) { $localSdk } else { 'dotnet' } }
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
 $env:DOTNET_NOLOGO = '1'

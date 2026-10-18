@@ -11,6 +11,20 @@ if (args.Length == 2 && args[1] == "hold-lock")
     Console.WriteLine("READY"); Console.Out.Flush();
     Console.ReadLine(); return;
 }
+if (args.Length == 4 && args[1] == "commit-loop")
+{
+    // Test child: commits until killed. The ephemeral test key arrives on stdin (never on disk or the command line).
+    using var rsa = RSA.Create();
+    rsa.ImportPkcs8PrivateKey(Convert.FromBase64String(Console.ReadLine()!), out _);
+    using var imported = new ImportedProtector(rsa);
+    var store = new RevisionStore(args[2], Guid.Parse(args[3]), imported);
+    for (int i = 0; ; i++)
+    {
+        var current = store.List();
+        var next = store.Commit(current.SnapshotId, $"src/f{i % 5}.ts", Encoding.UTF8.GetBytes($"synthetic-kill-{i}\n"));
+        Console.WriteLine("COMMITTED " + next.SnapshotId.ToString("D")); Console.Out.Flush();
+    }
+}
 Directory.CreateDirectory(args[0]);
 string testRoot = Path.Combine(args[0], "revisions-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(testRoot);
@@ -79,6 +93,43 @@ Test("fault interruption and retry " + stage, () =>
     Assert(stage == CommitStage.HeadPublished ? after.Files.Count == 1 : after.SnapshotId == before.SnapshotId);
     if (stage == CommitStage.HeadPublished) Reject<RevisionConflictException>(() => reopened.Commit(before.SnapshotId, "fault.cs", Text("synthetic-retry")));
     else Assert(reopened.Commit(before.SnapshotId, "fault.cs", Text("synthetic-retry")).Files.Count == 1);
+});
+
+Test("killed mid-commit: the store always reopens at a complete snapshot and accepts the next commit", () =>
+{
+    // Process.Kill (TerminateProcess) at random points, 20 times: no finally blocks, no flushes, no cleanup run.
+    // Process-crash evidence only; power loss is a lab test (docs/lab-checklist.md).
+    using var rsa = RSA.Create(2048);
+    using var shared = new ImportedProtector(rsa);
+    var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); var project = Guid.NewGuid();
+    new RevisionStore(path, project, shared).Initialize();
+    var random = new Random(20261018);
+    for (int round = 0; round < 20; round++)
+    {
+        var reported = new List<Guid>();
+        var info = new ProcessStartInfo(Environment.ProcessPath!) { RedirectStandardInput = true, RedirectStandardOutput = true, UseShellExecute = false };
+        foreach (var a in new[] { typeof(EphemeralProtector).Assembly.Location, testRoot, "commit-loop", path, project.ToString("D") }) info.ArgumentList.Add(a);
+        using (var child = Process.Start(info)!)
+        {
+            child.StandardInput.WriteLine(Convert.ToBase64String(rsa.ExportPkcs8PrivateKey())); child.StandardInput.Flush();
+            int wanted = random.Next(1, 4);
+            while (reported.Count < wanted) reported.Add(Guid.Parse(child.StandardOutput.ReadLine()!["COMMITTED ".Length..]));
+            Thread.Sleep(random.Next(0, 25)); // land somewhere inside a later commit
+            child.Kill(); child.WaitForExit();
+        }
+        var reopened = new RevisionStore(path, project, shared);
+        var snapshot = reopened.List(); // fails if HEAD, the manifest or any referenced record is incomplete
+        Assert(snapshot.SnapshotId == reported[^1] || !reported.SkipLast(1).Contains(snapshot.SnapshotId)); // the last reported one, or one newer
+        int read = 0;
+        reopened.ReadSnapshot(snapshot.SnapshotId, (file, content) =>
+        {
+            var text = Encoding.UTF8.GetString(content);
+            Assert(file.LogicalName == "after-kill.ts" ? text == "synthetic-after" : text.StartsWith("synthetic-kill-", StringComparison.Ordinal));
+            read++;
+        });
+        Assert(read == snapshot.Files.Count && read is >= 1 and <= 6); // src/f0..f4 plus after-kill.ts
+        reopened.Commit(snapshot.SnapshotId, "after-kill.ts", Text("synthetic-after")); // the lock was released by process death
+    }
 });
 
 Test("competing store instances allow exactly one expected-snapshot writer", () =>
@@ -573,6 +624,13 @@ sealed class CountingProtector : IKeyProtector, IDisposable
     public byte[] WrapKey(ReadOnlySpan<byte> key) { lock (rsa) return rsa.Encrypt(key.ToArray(), RSAEncryptionPadding.OaepSHA256); }
     public byte[] UnwrapKey(ReadOnlySpan<byte> key) { lock (rsa) { Unwraps++; return rsa.Decrypt(key.ToArray(), RSAEncryptionPadding.OaepSHA256); } }
     public void Dispose() => rsa.Dispose();
+}
+// Test-only: wraps an RSA key the test created (the kill test shares one with its child process over stdin).
+sealed class ImportedProtector(RSA rsa) : IKeyProtector, IDisposable
+{
+    public byte[] WrapKey(ReadOnlySpan<byte> key) { lock (rsa) return rsa.Encrypt(key.ToArray(), RSAEncryptionPadding.OaepSHA256); }
+    public byte[] UnwrapKey(ReadOnlySpan<byte> key) { lock (rsa) return rsa.Decrypt(key.ToArray(), RSAEncryptionPadding.OaepSHA256); }
+    public void Dispose() { }
 }
 sealed class EphemeralProtector : IKeyProtector, IDisposable
 {

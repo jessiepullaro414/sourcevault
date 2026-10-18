@@ -8,25 +8,83 @@ public sealed class ArtifactRejectedException(string reason) : Exception("Artifa
     public string Reason { get; } = reason;
 }
 
-public sealed record PublishedArtifacts(string Folder, int Files, long Bytes);
+/// <summary>An output file left out because it can reveal source. <see cref="Reason"/> is a fixed code.</summary>
+public sealed record DroppedArtifact(string Path, string Reason);
+
+/// <summary>What was published. <see cref="Dropped"/> lists at most <see cref="ArtifactFilter.MaxListed"/> of the <see cref="DroppedCount"/> left out.</summary>
+public sealed record PublishedArtifacts(string Folder, int Files, long Bytes, IReadOnlyList<DroppedArtifact> Dropped, int DroppedCount)
+{
+    public PublishedArtifacts(string folder, int files, long bytes) : this(folder, files, bytes, [], 0) { }
+}
+
+/// <summary>
+/// Output files that can reveal source, left out of the published artifacts by default (owner decision 2026-10-18,
+/// docs/hardening-design.md section 5). An administrator can keep a kind per target with build.json "keepFileTypes".
+/// This reduces accidental disclosure only: a build can still copy source into any file it keeps.
+/// </summary>
+public static class ArtifactFilter
+{
+    public const int MaxListed = 100;
+    public const string DsymFolder = ".dsym";
+    public const string InlineSourceMap = "inline-source-map";
+    internal const int InlineScanBytes = 64 * 1024;
+    private static readonly Dictionary<string, string> Extensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [".map"] = "SourceMap",
+        [".pdb"] = "DebugSymbols", [".mdb"] = "DebugSymbols", [".debug"] = "DebugSymbols", [".dwo"] = "DebugSymbols", [".dwp"] = "DebugSymbols",
+        [".ilk"] = "Intermediate", [".obj"] = "Intermediate", [".o"] = "Intermediate", [".iobj"] = "Intermediate", [".ipdb"] = "Intermediate",
+    };
+    private static readonly string[] ScriptExtensions = [".js", ".mjs", ".cjs", ".css"];
+    private static readonly byte[] InlineMarker = "sourceMappingURL=data:"u8.ToArray();
+
+    /// <summary>Every value "keepFileTypes" may name.</summary>
+    public static IReadOnlyList<string> Kinds { get; } = [.. Extensions.Keys, DsymFolder, InlineSourceMap];
+
+    /// <summary>The drop reason for a relative artifact path ('/'-separated), or null to publish it.</summary>
+    internal static string? ReasonFor(string relative, IReadOnlySet<string> keep)
+    {
+        var parts = relative.TrimEnd('/').Split('/');
+        if (!keep.Contains(DsymFolder) && parts.SkipLast(1).Any(p => p.EndsWith(".dSYM", StringComparison.OrdinalIgnoreCase))) return "DebugSymbols";
+        var extension = Path.GetExtension(parts[^1]).ToLowerInvariant(); // keep holds lowercase kinds
+        return Extensions.TryGetValue(extension, out var reason) && !keep.Contains(extension) ? reason : null;
+    }
+
+    /// <summary>True for a script or stylesheet whose last 64 KiB hold an inline (data:) source map, which embeds the source.</summary>
+    internal static bool HasInlineSourceMap(string file, string relative, IReadOnlySet<string> keep)
+    {
+        if (keep.Contains(InlineSourceMap) || !ScriptExtensions.Contains(Path.GetExtension(relative), StringComparer.OrdinalIgnoreCase)) return false;
+        using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var length = (int)Math.Min(stream.Length, InlineScanBytes);
+        stream.Seek(-length, SeekOrigin.End);
+        var tail = new byte[length];
+        stream.ReadExactly(tail);
+        return tail.AsSpan().IndexOf(InlineMarker) >= 0;
+    }
+}
 
 /// <summary>
 /// Publishes a container's artifact folder (a tar from the Docker archive API) to the host. Untrusted input: only
 /// regular files and folders, relative paths with valid Windows names, within the size and count limits; links,
 /// devices, absolute or "..", duplicate (case-insensitive) and over-long paths reject the whole set. Files are written
 /// to a fresh ".partial" folder with CreateNew, and the folder is renamed into place only when everything was written.
+/// Files that can reveal source (<see cref="ArtifactFilter"/>) are left out unless <c>keep</c> names their kind; limits
+/// still count them.
 /// </summary>
 public static class ArtifactPublisher
 {
     public const int MaxFiles = 10000;
     public const int MaxRelativePath = 200;
 
-    public static async Task<PublishedArtifacts> PublishAsync(Stream tar, string containerFolderName, string destination, long maxBytes, CancellationToken ct)
+    public static async Task<PublishedArtifacts> PublishAsync(Stream tar, string containerFolderName, string destination, long maxBytes, CancellationToken ct,
+        IReadOnlySet<string>? keep = null)
     {
+        keep ??= new HashSet<string>();
         if (Directory.Exists(destination) || Directory.Exists(destination + ".partial")) throw new ArtifactRejectedException("DestinationExists");
         var partial = destination + ".partial";
         Directory.CreateDirectory(partial);
-        int files = 0; long bytes = 0;
+        int files = 0, published = 0, droppedCount = 0; long bytes = 0, publishedBytes = 0;
+        var dropped = new List<DroppedArtifact>();
+        void Drop(string relative, string reason) { droppedCount++; if (dropped.Count < ArtifactFilter.MaxListed) dropped.Add(new(relative, reason)); }
         try
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -42,17 +100,26 @@ public static class ArtifactPublisher
                 if (relative is null) continue; // the artifact folder itself
                 if (!seen.Add(relative.TrimEnd('/'))) throw new ArtifactRejectedException("DuplicateName");
                 var target = Path.Combine(partial, relative.TrimEnd('/').Replace('/', '\\'));
-                if (isFolder) { Directory.CreateDirectory(target); continue; }
+                if (isFolder)
+                {
+                    if (!keep.Contains(ArtifactFilter.DsymFolder) && relative.TrimEnd('/').Split('/').Any(p => p.EndsWith(".dSYM", StringComparison.OrdinalIgnoreCase))) continue;
+                    Directory.CreateDirectory(target); continue;
+                }
                 if (++files > MaxFiles) throw new ArtifactRejectedException("TooManyFiles");
                 bytes += entry.Length;
                 if (entry.Length < 0 || bytes > maxBytes) throw new ArtifactRejectedException("TooLarge");
+                if (ArtifactFilter.ReasonFor(relative, keep) is { } reason) { Drop(relative, reason); continue; } // the reader skips its data
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                await using var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                if (entry.DataStream is not null) await CopyBoundedAsync(entry.DataStream, output, entry.Length, ct).ConfigureAwait(false);
-                await output.FlushAsync(ct).ConfigureAwait(false);
+                await using (var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    if (entry.DataStream is not null) await CopyBoundedAsync(entry.DataStream, output, entry.Length, ct).ConfigureAwait(false);
+                    await output.FlushAsync(ct).ConfigureAwait(false);
+                }
+                if (ArtifactFilter.HasInlineSourceMap(target, relative, keep)) { File.Delete(target); Drop(relative, "InlineSourceMap"); continue; }
+                published++; publishedBytes += entry.Length;
             }
             Directory.Move(partial, destination);
-            return new PublishedArtifacts(destination, files, bytes);
+            return new PublishedArtifacts(destination, published, publishedBytes, dropped, droppedCount);
         }
         catch (Exception e) when (e is not ArtifactRejectedException and not OperationCanceledException)
         {

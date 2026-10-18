@@ -7,15 +7,18 @@ using Microsoft.Win32.SafeHandles;
 
 namespace SourceVault.Windows;
 
-/// <summary>A connected client as reported by the OS (never by the message): token user, logon session, PID, image.</summary>
-public sealed record PipePeer(SecurityIdentifier User, uint Session, uint ProcessId, string ImagePath);
+/// <summary>
+/// A connected client as reported by the OS (never by the message): token user, logon session, PID, the process's
+/// creation time (UTC FILETIME, which tells a reused PID apart) and image.
+/// </summary>
+public sealed record PipePeer(SecurityIdentifier User, uint Session, uint ProcessId, long ProcessCreated, string ImagePath);
 
 /// <summary>
 /// Who may use the vault pipe: interactive members of the operators group, running an installed client executable.
 /// The executable check is defense in depth: it stops other programs run by the operator, not code injected into
 /// an allowed client.
 /// </summary>
-public sealed class PipePeerPolicy(SecurityIdentifier operatorsGroup, IEnumerable<string> allowedImagePaths)
+public sealed class PipePeerPolicy(SecurityIdentifier operatorsGroup, IEnumerable<string> allowedImagePaths, ClientPins? pins = null)
 {
     private static readonly SecurityIdentifier Interactive = new(WellKnownSidType.InteractiveSid, null);
     private static readonly SecurityIdentifier Network = new(WellKnownSidType.NetworkSid, null);
@@ -35,6 +38,12 @@ public sealed class PipePeerPolicy(SecurityIdentifier operatorsGroup, IEnumerabl
     {
         if (!images.Contains(imagePath)) throw new UnauthorizedAccessException("Peer policy rejected.");
     }
+
+    /// <summary>
+    /// Once per connection, after <see cref="VaultPipe.ValidateClient"/>: the client's installed files must match
+    /// their pins (<see cref="ClientPins"/>). Without pins (in-process tests only) this checks nothing.
+    /// </summary>
+    public void ValidateInstalledFiles(string imagePath) => pins?.Verify(imagePath);
 }
 
 /// <summary>Production named-pipe plumbing for the vault service and its clients. BCL P/Invoke only.</summary>
@@ -97,10 +106,13 @@ public static class VaultPipe
     /// Call after reading each frame: checks the OS client token (identification-level impersonation, never message
     /// claims), then the client's executable as reported by Windows. The service can open the client process only
     /// because the client granted it limited query access (<see cref="AllowServiceToIdentifyThisProcess"/>); a
-    /// client that did not is rejected. Residual risk, documented: a same-user process that hands its pipe handle to
-    /// another and exits could have its PID reused by an allowed client; same-user code is outside the claim anyway.
+    /// client that did not is rejected. PID reuse: the process must still be running and must have been created no
+    /// later than <paramref name="connectedUtc"/>, when the server accepted the connection; the open handle keeps the
+    /// PID from being reused while it is checked, so a PID that now names a newer process is refused. Residual risk,
+    /// documented: a same-user process that hands its pipe handle to
+    /// an allowed client that was already running could pass as that client; same-user code is outside the claim anyway.
     /// </summary>
-    public static PipePeer ValidateClient(NamedPipeServerStream pipe, PipePeerPolicy policy)
+    public static PipePeer ValidateClient(NamedPipeServerStream pipe, PipePeerPolicy policy, DateTime connectedUtc)
     {
         Check(GetNamedPipeClientProcessId(pipe.SafePipeHandle, out uint pid));
         SecurityIdentifier? user = null; uint session = 0;
@@ -114,9 +126,20 @@ public static class VaultPipe
         if (user is null) throw new UnauthorizedAccessException();
         using var process = OpenProcess(ProcessQueryLimited, false, pid);
         if (process.IsInvalid) throw new UnauthorizedAccessException("Client process not identifiable.");
+        long created = CheckProcessLifetime(process, connectedUtc);
         var image = ImagePath(process);
         policy.ValidateImage(image);
-        return new PipePeer(user, session, pid, image);
+        return new PipePeer(user, session, pid, created, image);
+    }
+
+    /// <summary>The process's creation time; throws unless it is still running and was created by <paramref name="connectedUtc"/>.</summary>
+    internal static long CheckProcessLifetime(SafeProcessHandle process, DateTime connectedUtc)
+    {
+        const uint StillActive = 259;
+        if (!GetExitCodeProcess(process, out uint exitCode) || exitCode != StillActive) throw new UnauthorizedAccessException("Client process exited.");
+        if (!GetProcessTimes(process, out long created, out _, out _, out _)) throw new UnauthorizedAccessException("Client process not identifiable.");
+        if (created > connectedUtc.ToFileTimeUtc()) throw new UnauthorizedAccessException("Client process is newer than the connection.");
+        return created;
     }
 
     /// <summary>
@@ -210,6 +233,8 @@ public static class VaultPipe
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint pid);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, uint pid);
     [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(SafeProcessHandle process, out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetProcessTimes(SafeProcessHandle process, out long creation, out long exit, out long kernel, out long user);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool QueryFullProcessImageName(SafeProcessHandle process, uint flags, StringBuilder name, ref uint size);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool GetTokenInformation(SafeAccessTokenHandle token, int kind, out uint value, uint size, out uint returned);
     [DllImport("advapi32.dll")] private static extern uint GetSecurityInfo(SafePipeHandle handle, int type, uint info, out IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl, out IntPtr descriptor);

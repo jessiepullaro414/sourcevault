@@ -306,7 +306,7 @@ internal sealed class EditorWindow : Window
         w.WriteString("requestedAt", b.RequestedAt.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
         if (b.FinishedAt is { } done) w.WriteString("finishedAt", done.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)); else w.WriteNull("finishedAt");
         if (b.ArtifactFolder is null) w.WriteNull("artifactFolder"); else w.WriteString("artifactFolder", b.ArtifactFolder);
-        w.WriteNumber("artifactFiles", b.ArtifactFiles); w.WriteNumber("artifactBytes", b.ArtifactBytes);
+        w.WriteNumber("artifactFiles", b.ArtifactFiles); w.WriteNumber("artifactBytes", b.ArtifactBytes); w.WriteNumber("artifactsDropped", b.ArtifactsDropped);
         w.WriteBoolean("logAvailable", b.LogAvailable); w.WriteBoolean("logTruncated", b.LogTruncated);
     }
 

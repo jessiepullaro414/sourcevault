@@ -58,6 +58,7 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Status
   ```
   Reports the service account and state, whether installed files still match their hashes, the operators, and whether the vault folder's permissions are trusted.
+- **Installed files are checked on every connection.** The service accepts the editor and importer only while every file in their folders matches `install-manifest.sha256`. If a file was changed, added or removed, they are refused ("only accepts the installed…"); run `-Update` from the package to restore them.
 - **Update to a newer package.** Close all editors, then from the new package:
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update
@@ -106,6 +107,14 @@ SourceVault can send a project's saved files to an **already-running, named Dock
 5. **Apply:** run `Setup-SourceVault.ps1 -Update -WithBuilds` again. It validates `build.json` and creates the artifact folder (the build service can write, *SourceVault Operators* can read, nobody else has access), then starts the build service. `-Status` reports the build service and the configuration.
 
 Containers should have **no network** (`--network none`). Builds are refused otherwise, unless a target sets `"allowNetwork": true`.
+
+**Files that can reveal source are left out of the output** by default, and the build log lists them:
+- source maps (`.map`);
+- debug symbols (`.pdb`, `.mdb`, `.debug`, `.dwo`, `.dwp`, `*.dSYM` folders);
+- compiler intermediates (`.obj`, `.o`, `.ilk`, `.iobj`, `.ipdb`);
+- scripts and stylesheets (`.js`, `.mjs`, `.cjs`, `.css`) that end with an inline `sourceMappingURL=data:` map.
+
+To publish a kind anyway, add it to the target, for example `"keepFileTypes": [".pdb", ".dsym", "inline-source-map"]`. This only catches the usual accidents: a build can still copy source into any file it keeps.
 
 ---
 
@@ -199,6 +208,7 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 - The list shows each build with when, who and how long. It refreshes while a build is queued or running.
 - Click a build to see its result, its **output folder** on this PC (*Output (N files)*), and its **log**. The log is stored encrypted in the vault and shown read-only here, like files; copying is blocked.
 - **Output files are ordinary, unencrypted files** in that folder, readable by every operator. That is their purpose.
+- **Left out:** source maps, debug symbols and similar files are not published. The result says how many, and the end of the log lists them. Your administrator can allow a kind.
 - Common results:
   - *failed*: the build command returned an error (see the log);
   - *timed out*: it ran longer than allowed and was stopped;

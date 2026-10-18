@@ -5,7 +5,7 @@
 param([string]$DotnetPath)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-if (!$DotnetPath) { $DotnetPath = [IO.Path]::GetFullPath((Join-Path $repoRoot '../../work/toolchain/dotnet/dotnet.exe')) }
+if (!$DotnetPath) { $DotnetPath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'local/toolchain/dotnet/dotnet.exe')) }
 $sdkRoot = Split-Path -Parent $DotnetPath
 $outRoot = Join-Path $repoRoot 'artifacts\installer'
 $package = Join-Path $outRoot 'SourceVault-Setup'

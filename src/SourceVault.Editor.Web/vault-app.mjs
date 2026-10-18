@@ -427,6 +427,7 @@ export async function startVault(transport, metadata, onSession) {
       const line = (label, value) => { const p = document.createElement('div'); const s = document.createElement('strong'); s.textContent = label + ': '; p.append(s, value); summary.append(p); };
       line('Result', `${STATE_TEXT[selected.state] ?? selected.state}${selected.exitCode != null ? ` (exit code ${selected.exitCode})` : ''}${selected.reason ? ` — ${BUILD_REASONS[selected.reason] ?? BUILD_REASONS[selected.reason.replace(/^Artifacts.*/, 'Artifacts')] ?? selected.reason}` : ''}`);
       if (selected.artifactFolder) { const code = document.createElement('code'); code.textContent = selected.artifactFolder; line(`Output (${selected.artifactFiles} file${selected.artifactFiles === 1 ? '' : 's'}, ${formatBytes(selected.artifactBytes)})`, code); }
+      if (selected.artifactsDropped > 0) line('Left out', `${selected.artifactsDropped} file${selected.artifactsDropped === 1 ? '' : 's'} that can reveal source (source maps, debug symbols); listed at the end of the log`);
       if (selected.logTruncated) line('Log', 'only the end of the output was kept');
     } else summary.textContent = buildsView.builds.length ? 'Choose a build to see its result and output.' : '';
   }

@@ -3,7 +3,7 @@
 param([string]$DotnetPath)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (!$DotnetPath) { $DotnetPath = [IO.Path]::GetFullPath((Join-Path $repoRoot '../../work/toolchain/dotnet/dotnet.exe')) }
+if (!$DotnetPath) { $DotnetPath = [IO.Path]::GetFullPath((Join-Path $repoRoot 'local/toolchain/dotnet/dotnet.exe')) }
 if (!(Test-Path -LiteralPath $DotnetPath)) { throw "dotnet not found: $DotnetPath" }
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_NOLOGO = '1'

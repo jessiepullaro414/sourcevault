@@ -55,10 +55,10 @@ public static class BuildRunner
             if (archive is null) { Directory.CreateDirectory(destination); published = new(destination, 0, 0); } // no output folder: nothing to publish
             else
             {
-                try { published = await ArtifactPublisher.PublishAsync(archive, folderName, destination, target.MaxArtifactBytes, ct).ConfigureAwait(false); }
+                try { published = await ArtifactPublisher.PublishAsync(archive, folderName, destination, target.MaxArtifactBytes, ct, target.Keep).ConfigureAwait(false); }
                 catch (ArtifactRejectedException e) { return new(BuildState.Rejected, "Artifacts" + e.Reason, 0, run.Output, run.Truncated, null); }
             }
-            return new(BuildState.Succeeded, null, 0, run.Output, run.Truncated, published);
+            return new(BuildState.Succeeded, null, 0, WithDroppedNotice(run.Output, published), run.Truncated, published);
         }
         catch (DockerException) { return Unavailable("EngineFailed"); }
         catch (Exception e) when (e is HttpRequestException or IOException or UnauthorizedAccessException) { return Unavailable("EngineFailed"); }
@@ -71,6 +71,21 @@ public static class BuildRunner
     }
 
     private static BuildOutcome Unavailable(string reason) => new(BuildState.Unavailable, reason, null, [], false, null);
+
+    // The dropped files are listed at the end of the build log, which the vault stores encrypted (and, when trimming
+    // a long log, keeps the end of). The old buffer, which may hold build output, is zeroed.
+    internal static byte[] WithDroppedNotice(byte[] output, PublishedArtifacts published)
+    {
+        if (published.DroppedCount == 0) return output;
+        var notice = new System.Text.StringBuilder();
+        notice.Append($"\n[SourceVault] {published.DroppedCount} output file(s) were not published because they can reveal source:\n");
+        foreach (var d in published.Dropped) notice.Append($"  {d.Path}  ({d.Reason})\n");
+        if (published.DroppedCount > published.Dropped.Count) notice.Append($"  ...and {published.DroppedCount - published.Dropped.Count} more\n");
+        notice.Append("[SourceVault] An administrator can publish a kind anyway with \"keepFileTypes\" in build.json.\n");
+        var log = output.Concat(System.Text.Encoding.UTF8.GetBytes(notice.ToString())).ToArray();
+        CryptographicOperations.ZeroMemory(output);
+        return log;
+    }
 
     // Removes and recreates sourcePath and artifactPath inside the container. Paths come from the validated admin config.
     internal static IReadOnlyList<string> CleanupCommand(BuildTarget target) => target.IsWindows

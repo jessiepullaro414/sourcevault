@@ -300,7 +300,7 @@ export class VaultSession {
     return (await this.#call('requestBuild', { projectId: this.project.projectId, name: target })).buildNumber;
   }
 
-  /** The project's builds, newest first: { buildNumber, target, state, reason, exitCode, requestedBy, requestedAt, finishedAt, artifactFolder, artifactFiles, artifactBytes, logAvailable, logTruncated }. */
+  /** The project's builds, newest first: { buildNumber, target, state, reason, exitCode, requestedBy, requestedAt, finishedAt, artifactFolder, artifactFiles, artifactBytes, artifactsDropped, logAvailable, logTruncated }. */
   async listBuilds() { return (await this.#call('listBuilds', { projectId: this.project.projectId })).builds ?? []; }
 
   async buildStatus(buildNumber) { return this.#call('buildStatus', { projectId: this.project.projectId, buildNumber }); }

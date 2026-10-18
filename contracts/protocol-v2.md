@@ -126,7 +126,7 @@ See `docs/files-history-builds-design.md`, section 4. Every operation also takes
 | ListBuilds | `projectId` | `builds[]`, newest first (the 100 newest stored, plus queued and running) |
 | OpenBuildLog | `projectId`, `buildNumber` | `contentBase64` (UTF-8, ≤ 250 KiB; the end of the output is kept) |
 
-- **A build** has these fields: `buildNumber`, `target`, `state` (`queued` / `running` / `succeeded` / `failed` / `timedOut` / `rejected` / `unavailable`), `reason` (a fixed code or null), `exitCode`, `requestedBy`, `requestedAt`, `finishedAt`, `artifactFolder` (a host path or null), `artifactFiles`, `artifactBytes`, `logAvailable` and `logTruncated`.
+- **A build** has these fields: `buildNumber`, `target`, `state` (`queued` / `running` / `succeeded` / `failed` / `timedOut` / `rejected` / `unavailable`), `reason` (a fixed code or null), `exitCode`, `requestedBy`, `requestedAt`, `finishedAt`, `artifactFolder` (a host path or null), `artifactFiles`, `artifactBytes`, `artifactsDropped` (output files left out because they can reveal source, listed at the end of the log; added 2026-10-18, so older clients ignore it and records stored before then read as 0), `logAvailable` and `logTruncated`.
 - **Errors:** an unknown target or build returns `NotFound`. A full queue (1 running and 4 waiting for that target) returns `LimitExceeded`. A build service that isn't reachable returns `Unavailable`.
 - **What is built:** the project's current saved snapshot, decrypted by the vault service and sent to the build service over the private build pipe below. The buffers are zeroed afterwards.
 
@@ -138,5 +138,5 @@ See `docs/files-history-builds-design.md`, section 4. Every operation also takes
   - `{op: "targets"}`
   - `{op: "build", target, projectId, buildNumber, fileCount}`, followed by `fileCount` frames of `{name, contentBase64}`.
 
-  The reply is `{ok, …}`; the build reply carries `state`, `reason`, `exitCode`, `logBase64` (≤ 512 KiB), `logTruncated`, `artifactFolder`, `artifactFiles` and `artifactBytes`.
+  The reply is `{ok, …}`; the build reply carries `state`, `reason`, `exitCode`, `logBase64` (≤ 512 KiB), `logTruncated`, `artifactFolder`, `artifactFiles`, `artifactBytes` and `artifactsDropped`.
 - **The build service** never receives project names and never opens the vault or the TPM key.

@@ -1,36 +1,41 @@
 # Next implementation tasks
 
-The record codec, revision store, Windows adapter, and SCM host foundation are implemented and covered by synthetic tests. A synthetic-only editor preview (WPF/WebView2 host, offline Monaco, memory-only revisions) is implemented with pinned, vendored packages; see [editor preview checks](editor-preview-checks.md). These are distinct from passing hardware/deployment gates. Do not introduce a software key provider to bypass those gates.
+Updated 2026-10-18. The vault service, encrypted store, editor vault mode, importer, file operations, history, merge and container builds are implemented, and `scripts/Verify.ps1` passes (see [status](status.md)). Owner-run lab checks have passed for the installed service, key provisioning, vault root, catalog tamper checks, pipe DACL and lab client. Everything added since then is tested in process only. Do not introduce a software key provider to bypass the hardware gates, and use synthetic inputs only.
 
-## Next worker wave
+## Owner lab steps (next)
 
-1. **Service-host lab integration (T01/T02 continuation).** Service-identity key provisioning (`provision-key`) and owner-run lab scripts (`scripts/lab`) now exist and passed on this machine (2026-10-17): key created under the service identity, export refused, start/stop clean. Remaining: rerun `Test-ServiceLab.ps1` after a reboot; test wrong/missing key and config behavior. Vault-root gate and `New-VaultRoot.ps1` passed on this machine (refused without the root, RUNNING with it, unelevated access denied). Store performance fix (schema 2) and the project catalog with startup verification are built; both passed on this machine (synthetic project created under the service identity; tamper drill refused 11 and 12 and restored). Protocol v2 pipe endpoints are built (in-process tested). Next: owner runs `New-OperatorsGroup.ps1` (then sign out/in), `Update-ServiceLab.ps1`, `Test-ServiceLab.ps1 -LeaveRunning` and `Test-PipeAccess.ps1`; the lab client passed end to end as an operator, and the executable check refused PowerShell and a copied client. Next: design step 3, the editor host on protocol v2 (`docs/editor-vault-design.md`). Its steps 1-3 (client library, host vault mode, renderer vault mode) are done; next is step 4: install the editor (`Install-Editor.ps1`, or `Setup-SourceVault.ps1 -Update` from the built package) and run the owner smoke checklist with `SourceVault.Editor.exe --vault`, including project deletion and `SourceVault.Import.exe --delete-source` on a synthetic folder. Use the implemented SCM-compatible metadata host and existing-key adapter. Validate actual `NT SERVICE\SourceVault` identity, service profile/key provisioning, service/key/vault DACLs, restart/shutdown timing, and mutual pipe checks on a TPM-equipped test machine. Implement reviewed provisioning; the current console key spike is not itself an SCM service. Do not enable source endpoints until identity and trusted storage-root policy pass.
-2. **Storage hardening and service integration (T04/T05).** Review `contracts/storage-v1.md` and the tested implementation. A read-only trusted-root validator (`SourceVault.Windows/TrustedStorageRoot.cs`) now exists; gate service readiness on it when the service first opens a store, and write the reviewed provisioning that applies `ExpectedRootSddl`; implement key rotation/recovery decisions; measure hardware unwrap throughput; run power-loss tests; execute skipped reparse cases in a suitable lab. Then integrate bounded authorized document operations with the service. Current test protectors remain confined to test assemblies. No production import until the TPM gate passes.
-3. **Editor native validation (T06 continuation).** The synthetic preview shell exists. Run and record the interactive native checklist in `docs/editor-preview-checks.md`: export paths, devtools/accelerators, navigation/resource/message rejection, registry/policy WebView2 overrides, and WebView2 profile/cache/crash-dump inspection with unique synthetic markers. Confirm the stricter `PreviewPolicy` still loads every Monaco asset, worker and the codicon font. Exercise capture exclusion only in an explicit, separately reviewed mode and report it as best effort. (Policy extraction with hostile-input tests and the package signature check are done.)
-4. **Editor against the service protocol (T06).** The renderer already talks to an in-memory protocol-v1 mock. Next, move the mock behind the native host over the real framing, still synthetic-only, so the host owns the capability and the renderer never sees it. Expose no decryption shortcut or generic IPC passthrough; keep document text out of the bridge until the protocol message set is reviewed. Real service connection waits on item 1.
+**All owner-run tests are tracked in [lab-checklist.md](lab-checklist.md)**, grouped by what they disturb: no sign-out or reboot, needs a sign-out or reboot, or stops the service for a while. Start with the editor and builds sections; they need neither a sign-out nor a reboot. Record results in `status.md`, and turn failures into tasks here.
 
-## Owner lab steps for 2026-10-18 work
+## Development work
 
-1. Rebuild and run `Setup-SourceVault.ps1 -Update` from the package folder, then smoke-test in the editor:
-   - rename and move files, delete and restore files, rename a project;
-   - History (compare and restore), Merge after a conflict;
-   - deleting a project, and `--delete-source` on a synthetic folder.
-2. Builds:
-   1. Run `-Update -WithBuilds`, write `build.json` from the example, then run `Grant-BuildDockerAccess.ps1`.
-   2. For WSL, run `New-WslDockerTls.ps1 -Distro <name>` and apply the printed dockerd settings.
-   3. Run `-Update -WithBuilds` again, then build a synthetic project on each target.
-   4. Record what works, especially the Windows-container archive copy.
-3. Run `scripts/Verify.ps1` once from an elevated PowerShell so the 5 symlink checks run instead of being skipped.
+Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-design.md](hardening-design.md)):
+- **Pipe client PID reuse:** the client must still be running and be older than the connection.
+- **Client hash pins:** every file in the client's install folder must match `install-manifest.sha256`, re-read per connection.
+- **Durable HEAD:** publication is flushed, and a kill-at-random-points test covers process crashes.
+- **Monaco assets:** a test checks that every shipped asset passes `PreviewPolicy`.
+- **Build output:** source maps, debug symbols, intermediates and inline source maps are dropped and listed in the log; `keepFileTypes` overrides.
 
-## Builder continuation
+Still open:
 
-T03 requires a supported Hyper-V lab host, verified Linux image/toolchain and dedicated identities. Implement and test the narrow VM-management helper and authenticated guest channel before transferring confidential content. The current synthetic CLI is not that broker. The supplied guest wrapper is untested. Establish the practical encrypted-storage profile first; defer RAM-only claims.
+1. **Editor native validation (T06).** The interactive items are in the lab checklist. Still for development: anything those runs turn up. Pagefile and hibernation persistence remain out of scope and documented.
+2. **Client identity.** An Authenticode signer check waits for the signing decision (below). Genuine separate-account and remote-client denial, and lock/revocation across several editors, are lab items.
+3. **Storage.** The skipped reparse-point cases need an elevated run. Power loss is a lab item. TPM throughput beyond 200 files is unmeasured. A crash between creating a project's folder and recording it in the index leaves an orphan folder, which makes startup refuse (code 11) until an administrator removes it. That is by design ("for review"); decide whether to keep it.
+4. **Builds.** Artifacts go through a `.partial` folder and are published with no approval step; an owner-approval release step is not built. A real initial compiler is still to be chosen.
+5. **Release.** Offline installer and update signing, a supported hardware/OS matrix, and an independent security review.
+
+## Retired or out of scope (owner, 2026-10-18)
+
+- **Hyper-V builder (T03): retired.** Builds use administrator-configured Docker containers through `NT SERVICE\SourceVaultBuild` (decisions D3/D4). `spikes/builder` stays as historical reference; its guest wrapper is untested. Make no RAM-only or isolation claims for builds.
+- **Key rotation: out of scope.** The key never leaves the TPM, and anyone who could misuse it is a local administrator, whom the design already trusts.
 
 ## Decisions before real source or public release
 
 - Confirm operator/administrator threat model and intentional-export policy.
 - ~~Confirm device-only loss policy versus an owner recovery envelope.~~ Decided 2026-10-18: device-only, no recovery. Do not add a recovery envelope, escrow or key export.
 - Approve supported hardware/OS/runtime and offline update strategy.
-- Choose a real initial compiler and artifact policy. Readable JavaScript output does not conceal implementation.
-- Signing/release ownership. (License: MIT, chosen by the owner in the GitHub repository, 2026-10-18.)
-- Per-project permissions: decided 2026-10-18, none. Every member of *SourceVault Operators* can open every project; access is limited by that group alone.
+- Choose a real initial compiler and artifact policy. Readable JavaScript output does not conceal implementation. (Dropping source maps and debug symbols: decided 2026-10-18.)
+- Signing/release ownership. This also unblocks an Authenticode client check.
+- ~~License.~~ Decided 2026-10-18: MIT, chosen by the owner in the GitHub repository (`LICENSE`).
+- ~~Per-project permissions.~~ Decided 2026-10-18: none. Every member of *SourceVault Operators* can open every project; access is limited by that group alone.
+- ~~Key rotation.~~ Decided 2026-10-18: out of scope.
+- ~~Hyper-V builder (T03).~~ Decided 2026-10-18: retired.

@@ -2,7 +2,7 @@ param([string]$DotnetPath, [switch]$Rebuild)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (!$DotnetPath) {
-    $workspaceSdk = Join-Path $repoRoot '../../work/toolchain/dotnet/dotnet.exe'
+    $workspaceSdk = Join-Path $repoRoot 'local/toolchain/dotnet/dotnet.exe'
     $DotnetPath = if (Test-Path -LiteralPath $workspaceSdk) { [System.IO.Path]::GetFullPath($workspaceSdk) } else { (Get-Command dotnet -ErrorAction Stop).Source }
 }
 $DotnetPath = (Resolve-Path -LiteralPath $DotnetPath).Path

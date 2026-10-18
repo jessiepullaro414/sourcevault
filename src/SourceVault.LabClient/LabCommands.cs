@@ -128,6 +128,69 @@ internal static class LabCommands
         return failures;
     }
 
+    internal const string PowerLossProject = "Lab power-loss check";
+    internal const string CounterFile = "counter.txt";
+    private static byte[] CounterContent(int count) => Encoding.UTF8.GetBytes($"SourceVault power-loss check (fictional)\ncount: {count}\n");
+
+    /// <summary>
+    /// For the power-loss lab test: saves the fictional counter file <paramref name="saves"/> times, printing
+    /// "saved N" only after the service confirmed each save. Cut the power while it runs, then run save-check.
+    /// </summary>
+    internal static int SaveLoop(Func<VaultClient> connect, TextWriter output, int saves)
+    {
+        using var client = connect();
+        Expect(client.Begin(), "BeginSession");
+        var (projectId, fileId, snapshot, count) = Counter(client, create: true);
+        output.WriteLine($"starting at count {count}; cut the power any time");
+        for (int i = 0; i < saves; i++)
+        {
+            var content = CounterContent(++count);
+            var saved = client.Call("ApplyEdits", w => { w.WriteString("projectId", projectId); w.WriteString("fileId", fileId!); w.WriteString("expectedSnapshotId", snapshot); w.WriteBase64String("contentBase64", content); });
+            snapshot = Expect(saved, "ApplyEdits").GetProperty("snapshotId").GetString()!;
+            output.WriteLine($"saved {count}"); output.Flush();
+        }
+        client.Call("EndSession");
+        return 0;
+    }
+
+    /// <summary>After the power came back: prints the count the vault holds (only this fictional file's number).</summary>
+    internal static int SaveCheck(Func<VaultClient> connect, TextWriter output)
+    {
+        using var client = connect();
+        Expect(client.Begin(), "BeginSession");
+        var (_, fileId, _, count) = Counter(client, create: false);
+        client.Call("EndSession");
+        if (fileId is null) { output.WriteLine($"FAIL: no \"{PowerLossProject}\" project or {CounterFile}; run save-loop first."); return 1; }
+        output.WriteLine($"PASS: the vault opened and {CounterFile} decrypted; it holds count {count}.");
+        output.WriteLine("Compare with the last \"saved N\" line before the power cut: the count must be N or N+1 (a save in flight may or may not have landed).");
+        return 0;
+    }
+
+    // The counter project's ids, current snapshot and count (0 when the file doesn't exist yet).
+    private static (string ProjectId, string? FileId, string Snapshot, int Count) Counter(VaultClient client, bool create)
+    {
+        var projects = Expect(client.Call("ListProjects"), "ListProjects").GetProperty("projects").EnumerateArray().ToList();
+        var project = projects.FirstOrDefault(p => p.GetProperty("name").GetString() == PowerLossProject);
+        string projectId;
+        if (project.ValueKind != JsonValueKind.Undefined) projectId = project.GetProperty("projectId").GetString()!;
+        else if (create) projectId = Expect(client.Call("CreateProject", w => w.WriteString("name", PowerLossProject)), "CreateProject").GetProperty("projectId").GetString()!;
+        else return ("", null, "", 0);
+        var listing = Expect(client.Call("ListFiles", w => w.WriteString("projectId", projectId)), "ListFiles");
+        var snapshot = listing.GetProperty("snapshotId").GetString()!;
+        var file = listing.GetProperty("files").EnumerateArray().FirstOrDefault(f => f.GetProperty("name").GetString() == CounterFile);
+        if (file.ValueKind == JsonValueKind.Undefined)
+        {
+            if (!create) return (projectId, null, snapshot, 0);
+            var made = Expect(client.Call("CreateFile", w => { w.WriteString("projectId", projectId); w.WriteString("name", CounterFile); w.WriteString("expectedSnapshotId", snapshot); w.WriteBase64String("contentBase64", CounterContent(0)); }), "CreateFile");
+            return (projectId, made.GetProperty("fileId").GetString()!, made.GetProperty("snapshotId").GetString()!, 0);
+        }
+        var fileId = file.GetProperty("fileId").GetString()!;
+        var text = Encoding.UTF8.GetString(Expect(client.Call("OpenDocument", w => { w.WriteString("projectId", projectId); w.WriteString("fileId", fileId); w.WriteString("expectedSnapshotId", snapshot); }), "OpenDocument").GetProperty("contentBase64").GetBytesFromBase64());
+        var line = text.Split('\n').FirstOrDefault(l => l.StartsWith("count: ", StringComparison.Ordinal));
+        if (line is null || !int.TryParse(line["count: ".Length..], out int count)) throw new LabClientException($"{CounterFile} is not a counter file");
+        return (projectId, fileId, snapshot, count);
+    }
+
     private static JsonElement Expect(VaultResponse response, string operation) =>
         response.Ok ? response.Body : throw new LabClientException($"{operation} returned {response.Code}");
 }

@@ -15,7 +15,7 @@ public sealed record DeletedSummary(Guid FileId, string Name, int ByteLength, Da
 /// <summary>Inputs for a three-way merge: the text the editor's copy is based on, and the current text and revision.</summary>
 public sealed record MergeSources(string BaseText, string TheirsText, Guid TheirsRevision);
 public sealed record BuildSummary(int Number, string Target, string State, string? Reason, int? ExitCode, string? RequestedBy, DateTimeOffset RequestedAt,
-    DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated);
+    DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated, int ArtifactsDropped = 0);
 
 /// <summary>Outcome of a controller call: a protocol code, or <c>Conflict</c> / <c>Locked</c> / <c>NotOpen</c>.</summary>
 public sealed record VaultResult<T>(string Code, T? Value)
@@ -260,7 +260,8 @@ public sealed class EditorVaultController : IDisposable
         return new BuildSummary(e.GetProperty("buildNumber").GetInt32(), S(e, "target")!, S(e, "state")!, S(e, "reason"),
             e.GetProperty("exitCode").ValueKind == JsonValueKind.Number ? e.GetProperty("exitCode").GetInt32() : null, S(e, "requestedBy"),
             T(e, "requestedAt")!.Value, T(e, "finishedAt"), S(e, "artifactFolder"), e.GetProperty("artifactFiles").GetInt32(), e.GetProperty("artifactBytes").GetInt64(),
-            e.GetProperty("logAvailable").GetBoolean(), e.GetProperty("logTruncated").GetBoolean());
+            e.GetProperty("logAvailable").GetBoolean(), e.GetProperty("logTruncated").GetBoolean(),
+            e.TryGetProperty("artifactsDropped", out var dropped) ? dropped.GetInt32() : 0); // absent from an older service
     }
 
     // List, optionally check the listing, then commit against that snapshot; a commit racing in between is retried once.

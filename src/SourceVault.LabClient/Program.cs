@@ -10,6 +10,8 @@ try
     {
         ["list"] => LabCommands.List(VaultClient.ConnectInstalled, Console.Out),
         ["check"] => LabCommands.Check(VaultClient.ConnectInstalled, Console.Out) == 0 ? 0 : 1,
+        ["save-loop"] => LabCommands.SaveLoop(VaultClient.ConnectInstalled, Console.Out, 2000),
+        ["save-check"] => LabCommands.SaveCheck(VaultClient.ConnectInstalled, Console.Out),
         _ => Usage(),
     };
 }
@@ -22,6 +24,6 @@ catch (LabClientException e) { Console.Error.WriteLine("Service error: " + e.Mes
 
 static int Usage()
 {
-    Console.Error.WriteLine("usage: SourceVault.LabClient list | check");
+    Console.Error.WriteLine("usage: SourceVault.LabClient list | check | save-loop | save-check");
     return 2;
 }

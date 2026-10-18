@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup><ProjectReference Include="../SourceVault.Storage/SourceVault.Storage.csproj" /></ItemGroup>
-  <ItemGroup><InternalsVisibleTo Include="SourceVault.Service.Tests" /><InternalsVisibleTo Include="SourceVault.Service" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Service.Tests" /><InternalsVisibleTo Include="SourceVault.Service" /><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
 </Project>
 

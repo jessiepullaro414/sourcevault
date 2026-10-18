@@ -7,9 +7,12 @@ namespace SourceVault.Build;
 /// <summary>One build target: a named, already-running container on a Docker engine.</summary>
 public sealed record BuildTarget(
     string Name, Uri Engine, string? CaFile, string? ClientCertificateThumbprint, string Container, string Platform,
-    string SourcePath, IReadOnlyList<string> Command, string ArtifactPath, int TimeoutSeconds, long MaxArtifactBytes, bool AllowNetwork)
+    string SourcePath, IReadOnlyList<string> Command, string ArtifactPath, int TimeoutSeconds, long MaxArtifactBytes, bool AllowNetwork,
+    IReadOnlySet<string>? KeepFileTypes = null)
 {
     public bool IsWindows => Platform == "windows";
+    /// <summary>Lowercase <see cref="ArtifactFilter.Kinds"/> the administrator chose to publish anyway.</summary>
+    public IReadOnlySet<string> Keep => KeepFileTypes ?? new HashSet<string>();
 }
 
 /// <summary>The configuration file is invalid. The message names the field, never secrets.</summary>
@@ -87,7 +90,7 @@ public sealed record BuildConfig(string ArtifactRoot, IReadOnlyList<BuildTarget>
     private static BuildTarget ParseTarget(JsonElement item)
     {
         Properties(item, "target", ["name", "engine", "container", "platform", "sourcePath", "command", "artifactPath"],
-            ["tls", "timeoutSeconds", "maxArtifactMegabytes", "allowNetwork"]);
+            ["tls", "timeoutSeconds", "maxArtifactMegabytes", "allowNetwork", "keepFileTypes"]);
         var name = Text(item, "name", 1, 32);
         if (!TargetName.IsMatch(name)) throw new BuildConfigException("A target name must be 1-32 letters, digits, '-' or '_'.");
         string where = $"target '{name}'";
@@ -141,7 +144,18 @@ public sealed record BuildConfig(string ArtifactRoot, IReadOnlyList<BuildTarget>
         bool allowNetwork = false;
         if (item.TryGetProperty("allowNetwork", out var network))
             allowNetwork = network.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => throw new BuildConfigException($"{where}: allowNetwork must be true or false.") };
-        return new BuildTarget(name, new Uri(engineText), caFile, thumbprint, container, platform, sourcePath, command, artifactPath, timeout, maxMegabytes * 1024L * 1024L, allowNetwork);
+        var keep = new HashSet<string>(StringComparer.Ordinal);
+        if (item.TryGetProperty("keepFileTypes", out var keepElement))
+        {
+            string allowed = string.Join(", ", ArtifactFilter.Kinds);
+            if (keepElement.ValueKind != JsonValueKind.Array || keepElement.GetArrayLength() > ArtifactFilter.Kinds.Count) throw new BuildConfigException($"{where}: keepFileTypes must list some of: {allowed}.");
+            foreach (var kind in keepElement.EnumerateArray())
+            {
+                var text = kind.ValueKind == JsonValueKind.String ? kind.GetString()!.ToLowerInvariant() : "";
+                if (!ArtifactFilter.Kinds.Contains(text) || !keep.Add(text)) throw new BuildConfigException($"{where}: keepFileTypes must list some of: {allowed} (each once).");
+            }
+        }
+        return new BuildTarget(name, new Uri(engineText), caFile, thumbprint, container, platform, sourcePath, command, artifactPath, timeout, maxMegabytes * 1024L * 1024L, allowNetwork, keep);
     }
 
     private static int Number(JsonElement item, string field, int fallback, int min, int max, string where)
