@@ -300,5 +300,81 @@ Check("the real process environment feeds the same policy without throwing", () 
     Assert((found is not null) == expected, "consistent with an independent scan");
 });
 
+// ---- Bridge v2: renderer-to-host vault requests ----
+const string P = "0b6f3c1e-8d24-4a97-9c51-7e2a40d8b6f1";
+const string F = "3d9a5e72-c6b1-4f08-a2d4-91b7c3e60f58";
+string Req(string op, string args, string? id = null, string type = "sourcevault.vault.request") =>
+    $"{{\"type\":\"{type}\",\"requestId\":\"{id ?? Guid1}\",\"operation\":\"{op}\",\"args\":{args}}}";
+bool Vault(string? json) => BridgePolicy.TryParseVaultRequest(json, out _);
+VaultBridgeRequest Parsed(string json) => BridgePolicy.TryParseVaultRequest(json, out var r) ? r : throw new Exception("rejected: " + Show(json));
+
+Check("bridge accepts every operation with its exact arguments", () =>
+{
+    Assert(Parsed(Req("listProjects", "{}")).Operation == VaultOperation.ListProjects, "listProjects");
+    Assert(Parsed(Req("createProject", "{\"name\":\"Demo\"}")).Name == "Demo", "createProject");
+    Assert(Parsed(Req("listFiles", $"{{\"projectId\":\"{P}\"}}")).ProjectId == Guid.Parse(P), "listFiles");
+    var open = Parsed(Req("openDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"));
+    Assert(open.Operation == VaultOperation.OpenDocument && open.FileId == Guid.Parse(F), "openDocument");
+    Assert(Parsed(Req("closeDocument", $"{{\"fileId\":\"{F}\",\"projectId\":\"{P}\"}}")).Operation == VaultOperation.CloseDocument, "field order is free");
+    var save = Parsed(Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"line\\n\\\"quoted\\\" \\u00e9 \\ud834\\udd1e\"}}"));
+    Assert(save.Text == "line\n\"quoted\" é 𝄞", "escaped text and a surrogate pair decode");
+    Assert(Parsed(Req("createFile", $"{{\"projectId\":\"{P}\",\"name\":\"a.ts\",\"text\":\"\"}}")).Text == "", "empty text");
+    Assert(Parsed(Req("lock", "{}")).Operation == VaultOperation.Lock && Parsed(Req("unlock", "{}")).Operation == VaultOperation.Unlock, "lock/unlock");
+});
+
+Check("bridge rejects wrong envelopes, unknown operations and duplicate keys", () => Rejects(Vault,
+    null, "", "[]", "\"x\"", "{}", Req("listProjects", "{}", type: "sourcevault.preview.status"),
+    Req("ListProjects", "{}"), Req("deleteProject", "{}"), Req("openDocument ", "{}"), Req("listProjects", "[]"), Req("listProjects", "null"),
+    Req("listProjects", "{}").Replace("\"args\":{}", "\"args\":{},\"extra\":1"),
+    Req("listProjects", "{}").Replace("\"type\":", "\"type\":\"sourcevault.vault.request\",\"type\":"),
+    Req("listProjects", "{}").Replace("{\"type\"", "{\"capability\":\"x\",\"type\""),
+    "{\"type\":\"sourcevault.vault.request\",\"requestId\":\"" + Guid1 + "\",\"operation\":\"listProjects\"}",
+    Req("listProjects", "{}") + "x", Req("listProjects", "{}").Replace("}", ",}")));
+
+Check("bridge rejects missing, extra, duplicate and mistyped arguments", () => Rejects(Vault,
+    Req("listProjects", "{\"projectId\":\"" + P + "\"}"), Req("createProject", "{}"), Req("createProject", "{\"name\":7}"),
+    Req("listFiles", "{}"), Req("listFiles", $"{{\"projectId\":\"{P}\",\"projectId\":\"{P}\"}}"),
+    Req("openDocument", $"{{\"projectId\":\"{P}\"}}"), Req("openDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\"}}"),
+    Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"), Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":null}}"),
+    Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":[\"x\"]}}"),
+    Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\",\"expectedSnapshotId\":\"{P}\"}}"),
+    Req("lock", "{\"reason\":\"x\"}")));
+
+Check("bridge rejects non-canonical, empty and malformed ids", () => Rejects(Vault,
+    Req("listProjects", "{}", id: Guid1.ToUpperInvariant()), Req("listProjects", "{}", id: "{" + Guid1 + "}"),
+    Req("listProjects", "{}", id: "00000000-0000-0000-0000-000000000000"), Req("listProjects", "{}", id: Guid1.Replace("-", "")),
+    Req("listFiles", "{\"projectId\":\"" + P.ToUpperInvariant() + "\"}"), Req("listFiles", "{\"projectId\":\" " + P + "\"}"),
+    Req("listFiles", "{\"projectId\":123}"), Req("openDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"not-a-guid\"}}")));
+
+Check("bridge enforces the text limit in UTF-8 bytes and rejects lone surrogates", () =>
+{
+    string Save(string escapedText) => Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"{escapedText}\"}}");
+    Assert(Vault(Save(new string('a', BridgePolicy.MaxTextBytes))), "exactly 256 KiB accepted");
+    Rejects(Vault, Save(new string('a', BridgePolicy.MaxTextBytes + 1)), Save(new string('é', BridgePolicy.MaxTextBytes / 2 + 1)),
+        Save("\\ud800"), Save("x\\udc00y"), Save("\\ud834"));
+    Assert(Vault(Save(string.Concat(Enumerable.Repeat("\\n", 100000)))), "escaped content within limits");
+    Assert(!Vault(Req("listProjects", "{}") + new string(' ', BridgePolicy.MaxMessageChars)), "oversized message rejected before parsing");
+});
+
+Check("bridge rejects bad names and excessive nesting", () => Rejects(Vault,
+    Req("createProject", "{\"name\":\"\"}"), Req("createProject", "{\"name\":\"" + new string('n', BridgePolicy.MaxNameChars + 1) + "\"}"),
+    Req("createProject", "{\"name\":\"tab\\tname\"}"), Req("createProject", "{\"name\":\"\\ud800\"}"),
+    Req("createFile", $"{{\"projectId\":\"{P}\",\"name\":\"a\\u0000b\",\"text\":\"x\"}}"),
+    Req("createProject", "{\"name\":{\"a\":{\"b\":{\"c\":1}}}}")));
+
+Check("host messages are well-formed JSON and carry text losslessly", () =>
+{
+    var text = "</script>\"quote\" \\ back\nline é 𝄞";
+    var response = BridgePolicy.BuildResponse(Guid.Parse(Guid1), "Ok", w => { w.WriteString("fileId", F); w.WriteString("text", text); });
+    using var doc = System.Text.Json.JsonDocument.Parse(response);
+    Assert(doc.RootElement.GetProperty("type").GetString() == "sourcevault.vault.response" && doc.RootElement.GetProperty("requestId").GetString() == Guid1, "envelope");
+    Assert(doc.RootElement.GetProperty("result").GetProperty("text").GetString() == text, "text round-trips");
+    Assert(!response.Contains("</script>"), "HTML-significant characters are escaped");
+    using var error = System.Text.Json.JsonDocument.Parse(BridgePolicy.BuildResponse(Guid.Parse(Guid1), "Conflict", null));
+    Assert(error.RootElement.GetProperty("result").ValueKind == System.Text.Json.JsonValueKind.Null, "errors carry no result");
+    Assert(BridgePolicy.BuildLocked("windows").Contains("\"reason\":\"windows\""), "locked event");
+    try { BridgePolicy.BuildLocked("anything"); throw new Exception("accepted unknown reason"); } catch (ArgumentException) { }
+});
+
 Console.WriteLine($"Editor host policy tests: {passed} passed; {failures.Count} failed.");
 return failures.Count == 0 ? 0 : 1;

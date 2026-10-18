@@ -45,8 +45,18 @@ public sealed class EditorVaultController : IDisposable
     public Task<VaultResult<IReadOnlyList<(Guid ProjectId, Guid FileId)>>> UnlockAsync(CancellationToken ct = default) => Guarded(async () =>
     {
         client?.Dispose();
-        client = await connect(ct).ConfigureAwait(false);
-        var begun = await client.BeginAsync(ct).ConfigureAwait(false);
+        client = null;
+        VaultResponse begun;
+        try
+        {
+            client = await connect(ct).ConfigureAwait(false);
+            begun = await client.BeginAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception e) when (UnlockFailure(e) is { } code)
+        {
+            client?.Dispose(); client = null;
+            return new VaultResult<IReadOnlyList<(Guid, Guid)>>(code, null);
+        }
         if (!begun.Ok) { client.Dispose(); client = null; return new VaultResult<IReadOnlyList<(Guid, Guid)>>(begun.Code, null); }
         IsLocked = false;
         var changed = new List<(Guid, Guid)>();
@@ -236,6 +246,19 @@ public sealed class EditorVaultController : IDisposable
         // Raised off this call chain: handlers may call back into the controller without deadlocking on its gate.
         if (wasUnlocked && Locked is { } handler) _ = Task.Run(() => handler(reason));
     }
+
+    /// <summary>Why a connection could not be opened, as a fixed code the UI can explain. Null: not a connection failure.</summary>
+    internal static string? UnlockFailure(Exception e) => e switch
+    {
+        System.Security.Principal.IdentityNotMappedException => "ServiceNotInstalled", // NT SERVICE\SourceVault does not exist
+        System.ComponentModel.Win32Exception { NativeErrorCode: 2 } => "ServiceNotRunning", // no pipe
+        System.ComponentModel.Win32Exception { NativeErrorCode: 5 } => "AccessDenied",      // not an operator in this sign-in
+        System.ComponentModel.Win32Exception { NativeErrorCode: 231 } => "Busy",           // all connections in use
+        System.ComponentModel.Win32Exception => "ServiceNotRunning",
+        UnauthorizedAccessException => "ServerUntrusted",      // pipe not owned by the service account
+        IOException or EndOfStreamException => "ClientRejected", // service closed without answering: not an installed client
+        _ => null,
+    };
 
     private static byte[]? Encode(string text, out string code)
     {

@@ -409,6 +409,26 @@ Test("controller: locked, not-open and content limits", () =>
     }
 });
 
+Test("controller: unlock failures are reported as fixed, explainable codes", () =>
+{
+    foreach (var (failure, expected) in new (Exception, string)[]
+    {
+        (new IdentityNotMappedException(), "ServiceNotInstalled"), (new Win32Exception(2), "ServiceNotRunning"),
+        (new Win32Exception(5), "AccessDenied"), (new Win32Exception(231), "Busy"),
+        (new UnauthorizedAccessException(), "ServerUntrusted"), (new EndOfStreamException(), "ClientRejected"),
+    })
+    {
+        using var ctl = new EditorVaultController(_ => Task.FromException<SourceVault.Client.VaultClient>(failure));
+        var result = Run(ctl.UnlockAsync());
+        Assert(result.Code == expected && ctl.IsLocked, $"{failure.GetType().Name} -> {result.Code}");
+    }
+    // A real rejection: the service closes without answering a program that is not an allowed client.
+    var (server, pipe) = StartServer(new PipePeerPolicy(authenticatedUsers, [@"C:\Program Files\SourceVault\editor\SourceVault.Editor.exe"]));
+    using (server)
+    using (var ctl = Controller(pipe))
+        Assert(Run(ctl.UnlockAsync()).Code == "ClientRejected", "executable check");
+});
+
 Console.WriteLine($"Endpoint tests: {passed} passed; synthetic workspace retained at {workspace}");
 return 0;
 

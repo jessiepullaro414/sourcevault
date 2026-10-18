@@ -30,4 +30,13 @@ try {
     & $DotnetPath publish $clientProject --no-restore -c Release -o $clientOutput -p:UseSharedCompilation=false -m:1 -nodeReuse:false
     if ($LASTEXITCODE -ne 0) { throw 'Client publish failed' }
     Write-Output "Published lab client to $clientOutput"
+    # Editor, installed build: apphost pinned to <install root>\runtime (SourceVaultInstalled=true).
+    $editorProject = Join-Path $repoRoot 'src/SourceVault.Editor.Host/SourceVault.Editor.Host.csproj'
+    $editorOutput = Join-Path $repoRoot 'artifacts/editor-publish'
+    if (Test-Path -LiteralPath $editorOutput) { Remove-Item -LiteralPath $editorOutput -Recurse -Force }
+    & $DotnetPath restore $editorProject --configfile (Join-Path $repoRoot 'NuGet.Config') -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Editor restore failed' }
+    & $DotnetPath publish $editorProject --no-restore -c Release -o $editorOutput -p:SourceVaultInstalled=true -p:UseSharedCompilation=false -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Editor publish failed' }
+    Write-Output "Published editor to $editorOutput"
 } finally { $env:APPDATA = $oldAppData }
