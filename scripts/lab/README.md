@@ -58,4 +58,4 @@ Win32 exit 1066 means "service-specific error"; the number after the slash is th
 
 ## Limits
 
-The service binary is `dotnet.exe` running `SourceVault.Service.dll`, so Windows sees `dotnet.exe` as the executable; no executable-identity claim follows. Local administrators can still act as the service, read its profile, or replace the install. Anything later wrapped by this key is lost if the TPM is cleared or the service profile is deleted; no recovery envelope exists yet.
+The service binary is `dotnet.exe` running `SourceVault.Service.dll`, so Windows sees `dotnet.exe` as the executable; no executable-identity claim follows. Local administrators can still act as the service, read its profile, or replace the install. Anything later wrapped by this key is lost if the TPM is cleared or the service profile is deleted; by owner decision there is no recovery envelope.

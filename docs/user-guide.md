@@ -191,7 +191,7 @@ Different files never conflict: two people can edit different files of the same 
 
 - **Administrators of this computer** can act as the service and read the vault. SourceVault protects against other users and stolen disks, not against the machine's own admins.
 - **Text of open files** is in the editor's memory, and Windows may write memory to the pagefile or hibernation file. Capture exclusion is best effort; cameras and some tools bypass it.
-- **No recovery, no backup, no migration** to another computer yet.
+- **No recovery, by design.** No backup tool and no migration to another computer either: if this computer's TPM is cleared or the computer is lost, the vault is gone.
 - **Not yet verified:** that everything works after a reboot (automatic start at boot), and an independent security review.
 - **Builds are not available yet.** The vault stores and edits files only.
 - **Projects can be deleted; files can't** be deleted or renamed yet, and projects can't be renamed.

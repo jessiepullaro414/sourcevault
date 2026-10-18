@@ -16,7 +16,7 @@ T03 requires a supported Hyper-V lab host, verified Linux image/toolchain and de
 ## Decisions before real source or public release
 
 - Confirm operator/administrator threat model and intentional-export policy.
-- Confirm device-only loss policy versus an explicitly designed owner recovery envelope.
+- ~~Confirm device-only loss policy versus an owner recovery envelope.~~ Decided 2026-10-18: device-only, no recovery. Do not add a recovery envelope, escrow or key export.
 - Approve supported hardware/OS/runtime and offline update strategy.
 - Choose a real initial compiler and artifact policy. Readable JavaScript output does not conceal implementation.
 - Choose an open-source license and signing/release ownership. No license is assumed automatically.

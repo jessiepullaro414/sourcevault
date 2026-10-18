@@ -41,11 +41,11 @@ Project deletion and importer source cleanup were added on 2026-10-18 (owner req
 ## Gates still open
 
 - Actual service host/virtual identity, key/vault/service ACLs, hardware key operations, restart/reboot, export denial, and cross-machine binding.
-- Real-hardware validation of record/store integration, power-loss durability, throughput, rotation and chosen recovery design.
+- Real-hardware validation of record/store integration, power-loss durability, throughput and rotation. (No recovery, by owner decision 2026-10-18.)
 - Distinct editor identity and mutual pipe behavior, genuine separate-account/remote-client denial, lock/revocation wiring, signer/path policy and process-lifetime races.
 - Editor: interactive native checklist, registry/policy debugging overrides, WebView2 profile/cache/crash persistence inspection, explicit capture-exclusion mode, native confirmation that the stricter `PreviewPolicy` still loads all Monaco assets/workers, and connection to the real service protocol.
 - Storage root: wiring the validator into service readiness once the service opens a store, and validation of the full real ancestor chain under the deployed service SID.
 - Approved real compiler, authenticated guest channel, VM-management delegation, guest lifecycle, artifact publication, and persistence investigation.
-- Offline installer/update signing, recovery drills, license selection and independent security review.
+- Offline installer/update signing, license selection and independent security review.
 
 See [next assignments](next-tasks.md) before dispatching further implementation. Only synthetic inputs should be used until the appropriate gates pass.
