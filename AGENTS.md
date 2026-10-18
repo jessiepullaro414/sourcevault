@@ -1,6 +1,6 @@
 # SourceVault implementation rules
 
-Use synthetic inputs only until the feasibility gates pass. Read `docs/architecture.md` and `contracts/protocol-v1.md` before implementation. The parent planning documents are outside this repository, in `../`.
+Use synthetic inputs only until the feasibility gates pass. Read `docs/architecture.md` and `contracts/protocol-v1.md` before implementation. The original planning documents are in `local/planning/` (git-ignored; see `docs/local-project.md`).
 
 The coordinator owns shared contracts, repository configuration, integration, and status. Workers own their assigned directories; do not edit another worker's files concurrently. Do not install services, modify machine policies/ACLs, clear TPMs, enable Hyper-V, or provision VMs during development checks. Provide explicit lab scripts and report tests requiring those changes as unverified. Never clear a TPM as a test step.
 

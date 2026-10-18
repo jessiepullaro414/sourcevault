@@ -32,14 +32,14 @@ Fresh encryption-key zeroization and failed-plaintext zeroization are implemente
 From the repository directory, with the workspace portable .NET SDK:
 
 ```powershell
-$env:APPDATA = Join-Path $PWD '../../work/codec-profile'
-$env:DOTNET_CLI_HOME = Join-Path $PWD '../../work/codec-cli'
+$env:APPDATA = Join-Path $PWD 'local/work/codec-profile'
+$env:DOTNET_CLI_HOME = Join-Path $PWD 'local/work/codec-cli'
 $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = 'false'
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
 $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH = 'false'
-& ../../work/toolchain/dotnet/dotnet.exe restore tests/SourceVault.Storage.Tests/SourceVault.Storage.Tests.csproj --configfile NuGet.Config
-& ../../work/toolchain/dotnet/dotnet.exe build tests/SourceVault.Storage.Tests/SourceVault.Storage.Tests.csproj --no-restore -p:UseSharedCompilation=false
-& ../../work/toolchain/dotnet/dotnet.exe tests/SourceVault.Storage.Tests/bin/Debug/net10.0/SourceVault.Storage.Tests.dll
+& local/toolchain/dotnet/dotnet.exe restore tests/SourceVault.Storage.Tests/SourceVault.Storage.Tests.csproj --configfile NuGet.Config
+& local/toolchain/dotnet/dotnet.exe build tests/SourceVault.Storage.Tests/SourceVault.Storage.Tests.csproj --no-restore -p:UseSharedCompilation=false
+& local/toolchain/dotnet/dotnet.exe tests/SourceVault.Storage.Tests/bin/Debug/net10.0/SourceVault.Storage.Tests.dll
 ```
 
 Check each command's exit code before proceeding. This test executable takes no arguments and creates no vault files.
