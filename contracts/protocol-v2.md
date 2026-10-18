@@ -52,7 +52,7 @@ Concurrency is project-wide and optimistic: any commit in the project since `exp
 - `Unavailable` covers vault integrity, key and store failures; the input itself was valid.
 - Errors never contain exception text, names or content.
 
-Not in v2: deleting or renaming files and projects, per-file history, per-project permissions, and builds.
+Not in v2: deleting or renaming files and projects (project deletion was added later; see the end of this file), per-file history, per-project permissions, and builds.
 
 ## Addition: folder paths and ImportFiles (owner request, 2026-10-18)
 
@@ -64,3 +64,12 @@ Not in v2: deleting or renaming files and projects, per-file history, per-projec
 - **Create-only:** a name that already exists, or clashes with a path, returns `AlreadyExists`, and nothing is written.
 - Duplicate names within one request return `InvalidRequest`; more than 256 entries returns `LimitExceeded`.
 - Used by `SourceVault.Import.exe`, an installed client allowed at `<install root>\client\SourceVault.Import.exe`.
+
+## Addition: DeleteProject (owner request, 2026-10-18)
+
+**`DeleteProject`.** Request body: `capability`, `projectId`, `confirmName`. Success body: `filesRemoved` (boolean).
+
+- `confirmName` must equal the project's name exactly, including letter case. A mismatch returns `InvalidRequest`, and the error never echoes the name.
+- The project and all its revisions are deleted for every connection. Later requests for it return `NotFound`, and its name can be reused.
+- `filesRemoved` is false when some encrypted files were in use. The project is already gone from the catalog, and the service removes the files later, at the latest on its next start. See `contracts/storage-v1.md`.
+- Deleting or renaming files, and renaming projects, are still not in v2.

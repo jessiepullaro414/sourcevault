@@ -218,6 +218,8 @@ internal sealed class EditorWindow : Window
                 }),
                 VaultOperation.CreateProject => Respond(request, await controller.CreateProjectAsync(request.Name!), (w, p) =>
                     { w.WriteString("projectId", p.ProjectId.ToString("D")); w.WriteString("name", p.Name); }),
+                VaultOperation.DeleteProject => Respond(request, await controller.DeleteProjectAsync(request.ProjectId, request.Name!), (w, removed) =>
+                    w.WriteBoolean("filesRemoved", removed)),
                 VaultOperation.ListFiles => Respond(request, await controller.ListFilesAsync(request.ProjectId), (w, files) =>
                 {
                     // Revision ids stay in the host.

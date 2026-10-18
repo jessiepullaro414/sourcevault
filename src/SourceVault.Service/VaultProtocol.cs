@@ -78,6 +78,7 @@ internal sealed class VaultProtocol
                 "OpenDocument" => OpenDocument(request),
                 "CreateFile" => CreateFile(request),
                 "ImportFiles" => ImportFiles(request),
+                "DeleteProject" => DeleteProject(request),
                 "ApplyEdits" => ApplyEdits(request),
                 "RequestBuild" or "GetBuildStatus" => Error(request, "Unavailable"),
                 _ => Error(request, "UnsupportedOperation"),
@@ -105,8 +106,7 @@ internal sealed class VaultProtocol
     {
         Require(request.Body, "capability");
         var verified = catalog.OpenAndVerify();
-        foreach (var p in verified) projects[p.ProjectId] = true;
-        return Ok(request, w =>
+        foreach (var p in verified) projects[p.ProjectId] = true;        return Ok(request, w =>
         {
             w.WriteStartArray("projects");
             foreach (var p in verified)
@@ -134,6 +134,25 @@ internal sealed class VaultProtocol
             w.WriteString("projectId", created.ProjectId.ToString("D"));
             w.WriteString("snapshotId", created.Snapshot.SnapshotId.ToString("D"));
         });
+    }
+
+    /// <summary>
+    /// Deletes a project and all its revisions. confirmName must equal the project's name exactly, so a stale or
+    /// mistaken id cannot delete a different project. Other connections then get NotFound for that project.
+    /// filesRemoved is false when some files were in use; the tombstone keeps them until a later cleanup.
+    /// </summary>
+    private ProtocolResponse DeleteProject(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "confirmName");
+        var id = Id(request.Body, "projectId");
+        var confirmName = Text(request.Body, "confirmName");
+        if (!projects.ContainsKey(id)) throw new KeyNotFoundException();
+        bool removed;
+        try { removed = catalog.DeleteProject(id, confirmName); }
+        catch (ArgumentException) { throw new RequestException("InvalidRequest"); }
+        catch (KeyNotFoundException) { projects.TryRemove(id, out _); throw; }
+        projects.TryRemove(id, out _);
+        return Ok(request, w => w.WriteBoolean("filesRemoved", removed));
     }
 
     private ProtocolResponse ListFiles(ParsedRequest request)

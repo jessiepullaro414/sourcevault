@@ -36,6 +36,8 @@ An independent check on 2026-10-17, separate from the test suite, encrypted abou
 
 The editor is not connected to the encrypted store. The editor preview holds synthetic text in renderer memory only; Save creates session-only revisions that disappear on reload or exit. Code review of the host bridge, navigation policy, frontend and loopback server is recorded in [editor preview checks](editor-preview-checks.md); it is a code inspection, not native runtime validation. WebView2 profile directories are retained under the publish output for later persistence inspection. Registry/policy WebView2 overrides, capture behavior, and renderer/OS persistence remain untested.
 
+Project deletion and importer source cleanup were added on 2026-10-18 (owner request). Vault projects are deleted with a typed exact-name confirmation through protocol v2 `DeleteProject`, using index tombstones so an interrupted deletion fails neither verification nor startup (index document version 2; version 1 still opens). `SourceVault.Import.exe --delete-source` deletes only imported files still identical to the verified vault copy, after a typed `DELETE`, overwriting each first; `.git`, skipped files and anything behind a link are kept. Both are covered by synthetic in-process tests only. They have not yet run against the installed service, and overwriting is not a secure erase on SSDs.
+
 ## Gates still open
 
 - Actual service host/virtual identity, key/vault/service ACLs, hardware key operations, restart/reboot, export denial, and cross-machine binding.

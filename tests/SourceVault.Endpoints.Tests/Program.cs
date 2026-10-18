@@ -92,6 +92,30 @@ Test("names: duplicates are AlreadyExists, and errors carry no names or content"
     }
 });
 
+Test("DeleteProject: exact name required, other connections then get NotFound, the name is free again", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    using (var other = new Client(pipe, me))
+    {
+        c.Begin(); other.Begin();
+        var created = c.Ok("CreateProject", ("name", "Doomed-Name"));
+        var project = created.GetProperty("projectId").GetString()!;
+        c.Ok("CreateFile", ("projectId", project), ("name", "a.ts"), ("expectedSnapshotId", created.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("doomed-content")));
+        Assert(other.Ok("ListFiles", ("projectId", project)).GetProperty("files").GetArrayLength() == 1, "other sees it");
+        var raw = c.Raw("DeleteProject", ("projectId", project), ("confirmName", "doomed-name"));
+        Assert(raw.Contains("\"InvalidRequest\"") && !raw.Contains("Doomed", StringComparison.OrdinalIgnoreCase), "case-different name refused, no name echoed");
+        Assert(c.Code("DeleteProject", ("projectId", project)) == "InvalidRequest", "confirmName required");
+        Assert(c.Code("DeleteProject", ("projectId", Guid.NewGuid().ToString("D")), ("confirmName", "Doomed-Name")) == "NotFound", "unknown project");
+        Assert(c.Ok("DeleteProject", ("projectId", project), ("confirmName", "Doomed-Name")).GetProperty("filesRemoved").GetBoolean(), "deleted");
+        Assert(other.Code("ListFiles", ("projectId", project)) == "NotFound", "other connection: gone");
+        Assert(c.Code("DeleteProject", ("projectId", project), ("confirmName", "Doomed-Name")) == "NotFound", "second delete");
+        Assert(c.Ok("ListProjects").GetProperty("projects").GetArrayLength() == 0, "listing empty");
+        c.Ok("CreateProject", ("name", "Doomed-Name"));
+    }
+});
+
 Test("authorization: no session, wrong capability and a second BeginSession", () =>
 {
     var (server, pipe) = StartServer();
@@ -324,6 +348,22 @@ Test("controller: per-file concurrency — saving one file never conflicts anoth
     }
 });
 
+Test("controller: deleting a project forgets its opened files", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Gone")).Value!.ProjectId;
+        var a = Run(ctl.CreateFileAsync(project, "a.ts", "A1")).Value!.FileId;
+        Assert(Run(ctl.DeleteProjectAsync(project, "gone")).Code == "InvalidRequest", "wrong name");
+        Assert(Run(ctl.DeleteProjectAsync(project, "Gone")) is { Ok: true, Value: true }, "deleted");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A2")).Code == "NotOpen", "opened entry dropped");
+        Assert(Run(ctl.ListProjectsAsync()).Value!.Count == 0, "listing empty");
+    }
+});
+
 Test("controller: someone else's edit is Conflict; other files still save", () =>
 {
     var (server, pipe) = StartServer();
@@ -523,6 +563,58 @@ Test("importer: imports into a new project, verifies every file byte for byte, r
         try { SourceVault.Import.Importer.Run(plan, "Second import", Connect, new StringWriter()); throw new Exception("changed file accepted"); }
         catch (SourceVault.Import.ImportException e) { Assert(e.Message.Contains("changed after it was scanned"), "changed file"); }
     }
+});
+
+bool TryJunction(string link, string target)
+{
+    using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true })!;
+    p.WaitForExit();
+    return p.ExitCode == 0 && Directory.Exists(link);
+}
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+static extern bool CreateHardLink(string fileName, string existingFileName, IntPtr securityAttributes);
+
+Test("importer --delete-source: typed DELETE only; deletes unchanged imported files; keeps skipped, changed and hard-linked ones", () =>
+{
+    var root = NewSourceFolder();
+    Directory.CreateDirectory(Path.Combine(root, ".git")); File.WriteAllText(Path.Combine(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    File.WriteAllText(Path.Combine(root, "linked.ts"), "export const linked = 1;\n");
+    var plan = SourceVault.Import.ImportPlan.Scan(root);
+    var output = new StringWriter();
+    Assert(SourceVault.Import.SourceCleanup.Run(plan, "P", () => "delete", output) == 0 && output.ToString().Contains("nothing was deleted"), "lowercase is not consent");
+    Assert(SourceVault.Import.SourceCleanup.Run(plan, "P", () => null, new StringWriter()) == 0, "no input is not consent");
+    Assert(plan.Files.All(f => File.Exists(f.FullPath)), "nothing deleted without consent");
+    Assert(output.ToString().Contains(".git stays"), ".git warning");
+
+    File.AppendAllText(Path.Combine(root, "src", "util.ts"), "// edited after the import\n");
+    var hardLink = Path.Combine(workspace, "hardlink-" + Guid.NewGuid().ToString("N") + ".ts");
+    bool linked = CreateHardLink(hardLink, Path.Combine(root, "linked.ts"), IntPtr.Zero);
+    output = new StringWriter();
+    int deleted = SourceVault.Import.SourceCleanup.Run(plan, "P", () => " DELETE ", output);
+    var text = output.ToString();
+    Assert(deleted == plan.Files.Count - 1 - (linked ? 1 : 0), "deleted count: " + text);
+    Assert(File.Exists(Path.Combine(root, "src", "util.ts")) && text.Contains(SourceVault.Import.SourceCleanup.Changed), "changed file kept");
+    Assert(!File.Exists(Path.Combine(root, "src", "app", "main.ts")) && !Directory.Exists(Path.Combine(root, "src", "app")), "emptied folder removed");
+    Assert(Directory.Exists(Path.Combine(root, "src")), "folder with a kept file stays");
+    if (linked) Assert(File.Exists(Path.Combine(root, "linked.ts")) && File.ReadAllText(hardLink) == "export const linked = 1;\n" && text.Contains(SourceVault.Import.SourceCleanup.HardLinked), "hard link untouched");
+    foreach (var keep in new[] { @".git\HEAD", @"node_modules\left-pad\index.js", @"bin\Debug\app.dll", @"assets\logo.png", "big.txt", "latin1.txt" })
+        Assert(File.Exists(Path.Combine(root, keep)), "skipped item kept: " + keep);
+    Assert(Directory.Exists(root), "root kept");
+    Assert(!text.Contains("synthetic'") && !text.Contains("✓"), "no content printed");
+});
+
+Test("importer --delete-source: a folder swapped for a junction after the scan is not followed", () =>
+{
+    var root = NewSourceFolder();
+    var plan = SourceVault.Import.ImportPlan.Scan(root);
+    var elsewhere = Path.Combine(workspace, "elsewhere-" + Guid.NewGuid().ToString("N"));
+    Directory.Move(Path.Combine(root, "src"), elsewhere);
+    if (!TryJunction(Path.Combine(root, "src"), elsewhere)) { Console.WriteLine("SKIP junction swap: junction creation unavailable"); return; }
+    var output = new StringWriter();
+    SourceVault.Import.SourceCleanup.Run(plan, "P", () => "DELETE", output);
+    Assert(File.Exists(Path.Combine(elsewhere, "util.ts")) && File.Exists(Path.Combine(elsewhere, "app", "main.ts")), "files behind the junction untouched");
+    Assert(output.ToString().Contains(SourceVault.Import.SourceCleanup.LinkInPath), "reported");
+    Assert(!File.Exists(Path.Combine(root, "README.md")), "other files still cleaned");
 });
 
 Test("importer: batches stay under the frame limit and 256 files", () =>

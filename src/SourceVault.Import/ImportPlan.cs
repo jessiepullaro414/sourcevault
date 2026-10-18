@@ -27,6 +27,8 @@ internal sealed class ImportPlan
     private const int MaxBytes = 256 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
+    /// <summary>Full path of the scanned folder.</summary>
+    public required string Root { get; init; }
     public required IReadOnlyList<ImportCandidate> Files { get; init; }
     public required IReadOnlyList<SkippedItem> Skipped { get; init; }
     public long TotalBytes => Files.Sum(f => f.Length);
@@ -74,7 +76,7 @@ internal sealed class ImportPlan
             }
         }
         files.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Path, b.Path));
-        return new ImportPlan { Files = files, Skipped = skipped };
+        return new ImportPlan { Root = rootInfo.FullName, Files = files, Skipped = skipped };
     }
 
     /// <summary>Strict UTF-8 without NUL bytes. UTF-16 files (full of NULs) and binaries are excluded.</summary>

@@ -24,6 +24,10 @@ public sealed class VaultCatalogException(CatalogFailure failure) : Exception("V
 ///   projects\&lt;projectId&gt;\   one RevisionStore per project
 /// Project names exist only inside the encrypted index; directory names are opaque ids. No record-format change:
 /// the index is an ordinary encrypted store.
+///
+/// Deletion is crash-safe: the index first moves the project to a "deleted" list (a tombstone), then its directory
+/// is removed, then the tombstone is cleared. A directory may exist without an index entry only while its tombstone
+/// does; any other stray directory still fails verification.
 /// </summary>
 public sealed class ProjectCatalog
 {
@@ -37,6 +41,9 @@ public sealed class ProjectCatalog
     // Store instances are kept so their authenticated-manifest caches stay warm across requests.
     private readonly ConcurrentDictionary<Guid, RevisionStore> stores = new();
     private readonly object createGate = new();
+
+    // Index document: version 1 = { projects }, version 2 = { projects, deleted } (tombstones awaiting cleanup).
+    private sealed record IndexState(List<(Guid ProjectId, string Name)> Projects, List<Guid> Deleted);
 
     public ProjectCatalog(string vaultRoot, IKeyProtector protector)
     {
@@ -56,9 +63,10 @@ public sealed class ProjectCatalog
     /// </summary>
     public IReadOnlyList<ProjectInfo> OpenAndVerify()
     {
-        var entries = ReadIndexEntries(); // null: fresh vault
-        if (entries is null) return [];
-        var expected = entries.Select(e => e.ProjectId.ToString("D")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var state = ReadIndex(); // null: fresh vault
+        if (state is null) return [];
+        var expected = state.Projects.Select(e => e.ProjectId.ToString("D")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var tombstoned = state.Deleted.Select(id => id.ToString("D")).ToHashSet(StringComparer.OrdinalIgnoreCase);
         string[] present;
         try
         {
@@ -67,9 +75,10 @@ public sealed class ProjectCatalog
                 : [];
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new VaultCatalogException(CatalogFailure.Layout); }
-        if (present.Length != expected.Count || !present.All(expected.Contains)) throw new VaultCatalogException(CatalogFailure.Layout);
+        // Every listed project must exist; a directory may otherwise exist only for a project awaiting cleanup.
+        if (!expected.All(present.Contains) || !present.All(p => expected.Contains(p) || tombstoned.Contains(p))) throw new VaultCatalogException(CatalogFailure.Layout);
         var result = new List<ProjectInfo>();
-        foreach (var (id, name) in entries)
+        foreach (var (id, name) in state.Projects)
         {
             try { result.Add(new(id, name, Store(id).List())); }
             catch (Exception e) when (e is not OutOfMemoryException) { throw new VaultCatalogException(CatalogFailure.Project); }
@@ -89,23 +98,71 @@ public sealed class ProjectCatalog
 
     private ProjectInfo CreateProjectLocked(string name)
     {
-        var entries = ReadIndexEntries();
-        if (entries is null)
+        var state = ReadIndex();
+        if (state is null)
         {
             var index = Store(IndexStoreId);
             var empty = index.Initialize();
-            index.Commit(empty.SnapshotId, IndexDocument, SerializeIndex([]));
-            entries = [];
+            state = new IndexState([], []);
+            index.Commit(empty.SnapshotId, IndexDocument, SerializeIndex(state));
         }
-        if (entries.Count >= MaximumProjects) throw new InvalidDataException("Project count exceeded.");
-        if (entries.Any(e => StringComparer.OrdinalIgnoreCase.Equals(e.Name, name))) throw new NameExistsException();
+        if (state.Projects.Count + state.Deleted.Count >= MaximumProjects) throw new InvalidDataException("Project count exceeded.");
+        if (state.Projects.Any(e => StringComparer.OrdinalIgnoreCase.Equals(e.Name, name))) throw new NameExistsException();
         var id = Guid.NewGuid();
         Directory.CreateDirectory(ProjectsPath);
         var snapshot = Store(id).Initialize();
-        var indexStore = Store(IndexStoreId);
-        var current = indexStore.List();
-        indexStore.Commit(current.SnapshotId, IndexDocument, SerializeIndex(entries.Append((id, name)).ToList()));
+        WriteIndex(new IndexState([.. state.Projects, (id, name)], state.Deleted));
         return new(id, name, snapshot);
+    }
+
+    /// <summary>
+    /// Deletes a project and all its encrypted files. <paramref name="confirmName"/> must equal the project's name
+    /// exactly (a guard against deleting the wrong id). The project disappears from the index at once; its directory is
+    /// then removed, and if that fails (e.g. a file is in use) the tombstone keeps it allowed until
+    /// <see cref="PurgeDeleted"/> succeeds.
+    /// </summary>
+    public bool DeleteProject(Guid projectId, string confirmName)
+    {
+        lock (createGate)
+        {
+            var state = ReadIndex() ?? throw new KeyNotFoundException();
+            var entry = state.Projects.FirstOrDefault(p => p.ProjectId == projectId);
+            if (entry.ProjectId == Guid.Empty) throw new KeyNotFoundException();
+            if (!string.Equals(entry.Name, confirmName, StringComparison.Ordinal)) throw new ArgumentException("Confirmation does not match the project name.");
+            WriteIndex(new IndexState(state.Projects.Where(p => p.ProjectId != projectId).ToList(), [.. state.Deleted, projectId]));
+            stores.TryRemove(projectId, out _);
+            // The deletion is recorded; anything that fails from here on only leaves the tombstone for a later purge.
+            try { return PurgeLocked() == 0; }
+            catch (Exception e) when (e is not OutOfMemoryException) { return false; }
+        }
+    }
+
+    /// <summary>Removes directories of deleted projects and clears their tombstones. Returns how many remain pending.</summary>
+    public int PurgeDeleted()
+    {
+        lock (createGate) return PurgeLocked();
+    }
+
+    private int PurgeLocked()
+    {
+        var state = ReadIndex();
+        if (state is null || state.Deleted.Count == 0) return 0;
+        var remaining = new List<Guid>();
+        foreach (var id in state.Deleted)
+        {
+            var path = ProjectPath(id);
+            try
+            {
+                if (Directory.Exists(path))
+                {
+                    if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) Directory.Delete(path); // remove a link itself, never its target
+                    else Directory.Delete(path, recursive: true); // does not follow links inside
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { remaining.Add(id); }
+        }
+        if (remaining.Count != state.Deleted.Count) WriteIndex(state with { Deleted = remaining });
+        return remaining.Count;
     }
 
     /// <summary>The store of a project that <see cref="OpenAndVerify"/> returned.</summary>
@@ -115,7 +172,13 @@ public sealed class ProjectCatalog
         ? new RevisionStore(IndexPath, IndexStoreId, protector)
         : new RevisionStore(ProjectPath(key), key, protector));
 
-    private List<(Guid ProjectId, string Name)>? ReadIndexEntries()
+    private void WriteIndex(IndexState state)
+    {
+        var indexStore = Store(IndexStoreId);
+        indexStore.Commit(indexStore.List().SnapshotId, IndexDocument, SerializeIndex(state));
+    }
+
+    private IndexState? ReadIndex()
     {
         string[] rootEntries;
         try { rootEntries = Directory.EnumerateFileSystemEntries(vaultRoot).Select(p => Path.GetFileName(p)!).ToArray(); }
@@ -136,18 +199,21 @@ public sealed class ProjectCatalog
         finally { if (content is not null) CryptographicOperations.ZeroMemory(content); }
     }
 
-    private static byte[] SerializeIndex(List<(Guid ProjectId, string Name)> entries) => JsonSerializer.SerializeToUtf8Bytes(new
+    private static byte[] SerializeIndex(IndexState state) => JsonSerializer.SerializeToUtf8Bytes(new
     {
-        version = 1,
-        projects = entries.Select(e => new { projectId = e.ProjectId.ToString("D"), name = e.Name }),
+        version = 2,
+        projects = state.Projects.Select(e => new { projectId = e.ProjectId.ToString("D"), name = e.Name }),
+        deleted = state.Deleted.Select(id => id.ToString("D")),
     });
 
-    private static List<(Guid, string)> ParseIndex(byte[] content)
+    private static IndexState ParseIndex(byte[] content)
     {
         using var document = JsonDocument.Parse(content, new JsonDocumentOptions { MaxDepth = 4 });
         var root = document.RootElement;
-        Properties(root, "version", "projects");
-        if (root.GetProperty("version").GetInt32() != 1) throw new InvalidDataException();
+        int version = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("version", out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+        if (version == 1) Properties(root, "version", "projects");
+        else if (version == 2) Properties(root, "version", "projects", "deleted");
+        else throw new InvalidDataException();
         var projects = root.GetProperty("projects");
         if (projects.ValueKind != JsonValueKind.Array || projects.GetArrayLength() > MaximumProjects) throw new InvalidDataException();
         var result = new List<(Guid, string)>();
@@ -155,14 +221,32 @@ public sealed class ProjectCatalog
         foreach (var project in projects.EnumerateArray())
         {
             Properties(project, "projectId", "name");
-            var text = project.GetProperty("projectId").GetString();
-            if (!Guid.TryParseExact(text, "D", out var id) || id == Guid.Empty || id == IndexStoreId || id.ToString("D") != text) throw new InvalidDataException();
+            var id = ReadId(project.GetProperty("projectId"));
             var name = project.GetProperty("name").GetString()!;
             ValidateProjectName(name);
             if (!ids.Add(id) || !names.Add(name)) throw new InvalidDataException();
             result.Add((id, name));
         }
-        return result;
+        var deleted = new List<Guid>();
+        if (version == 2)
+        {
+            var list = root.GetProperty("deleted");
+            if (list.ValueKind != JsonValueKind.Array || list.GetArrayLength() > MaximumProjects) throw new InvalidDataException();
+            foreach (var item in list.EnumerateArray())
+            {
+                var id = ReadId(item);
+                if (!ids.Add(id)) throw new InvalidDataException(); // never both live and deleted, never twice
+                deleted.Add(id);
+            }
+        }
+        return new IndexState(result, deleted);
+    }
+
+    private static Guid ReadId(JsonElement value)
+    {
+        var text = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        if (!Guid.TryParseExact(text, "D", out var id) || id == Guid.Empty || id == IndexStoreId || id.ToString("D") != text) throw new InvalidDataException();
+        return id;
     }
 
     private static void Properties(JsonElement value, params string[] expected)

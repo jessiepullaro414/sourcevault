@@ -317,6 +317,67 @@ Test("catalog: tampered index and tampered project fail closed with their own ca
     RejectCatalog(CatalogFailure.Project, () => new ProjectCatalog(u.Vault, counting).OpenAndVerify());
 });
 
+Test("catalog: delete needs the exact name, removes the files, and frees the name", () =>
+{
+    var t = TwoProjects(); var c = new ProjectCatalog(t.Vault, counting);
+    c.OpenAndVerify();
+    Reject<ArgumentException>(() => c.DeleteProject(t.A.ProjectId, "alpha"));
+    Reject<KeyNotFoundException>(() => c.DeleteProject(Guid.NewGuid(), "Alpha"));
+    Assert(c.DeleteProject(t.A.ProjectId, "Alpha"));
+    Assert(!Directory.Exists(Path.Combine(t.Vault, "projects", t.A.ProjectId.ToString("D"))));
+    Reject<KeyNotFoundException>(() => c.DeleteProject(t.A.ProjectId, "Alpha"));
+    var after = new ProjectCatalog(t.Vault, counting).OpenAndVerify();
+    Assert(after.Select(p => p.Name).SequenceEqual(new[] { "Beta" }));
+    Assert(c.CreateProject("Alpha").ProjectId != t.A.ProjectId && new ProjectCatalog(t.Vault, counting).OpenAndVerify().Count == 2);
+});
+
+Test("catalog: an interrupted delete is tombstoned, verifies, and is purged later", () =>
+{
+    var t = TwoProjects(); var c = new ProjectCatalog(t.Vault, counting);
+    c.OpenAndVerify();
+    var dir = Path.Combine(t.Vault, "projects", t.A.ProjectId.ToString("D"));
+    using (new FileStream(Path.Combine(dir, "LOCK"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+    {
+        Assert(!c.DeleteProject(t.A.ProjectId, "Alpha")); // a file in use: the directory survives
+        Assert(Directory.Exists(dir));
+        var during = new ProjectCatalog(t.Vault, counting);
+        Assert(during.OpenAndVerify().Select(p => p.Name).SequenceEqual(new[] { "Beta" })); // the leftover is allowed, not listed
+        Assert(during.PurgeDeleted() == 1);
+    }
+    // Restart: the leftover is still tombstoned; a purge removes it and clears the tombstone.
+    var restarted = new ProjectCatalog(t.Vault, counting);
+    Assert(restarted.OpenAndVerify().Count == 1 && restarted.PurgeDeleted() == 0 && !Directory.Exists(dir));
+    Assert(new ProjectCatalog(t.Vault, counting).OpenAndVerify().Count == 1);
+    // The tombstone is gone, so recreating that directory is a stray entry again.
+    Directory.CreateDirectory(dir);
+    RejectCatalog(CatalogFailure.Layout, () => new ProjectCatalog(t.Vault, counting).OpenAndVerify());
+});
+
+Test("catalog: a tombstone allows only its own directory", () =>
+{
+    var t = TwoProjects(); var c = new ProjectCatalog(t.Vault, counting);
+    c.OpenAndVerify();
+    var dir = Path.Combine(t.Vault, "projects", t.A.ProjectId.ToString("D"));
+    using (new FileStream(Path.Combine(dir, "LOCK"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None))
+        Assert(!c.DeleteProject(t.A.ProjectId, "Alpha"));
+    Directory.CreateDirectory(Path.Combine(t.Vault, "projects", Guid.NewGuid().ToString("D")));
+    RejectCatalog(CatalogFailure.Layout, () => new ProjectCatalog(t.Vault, counting).OpenAndVerify());
+});
+
+Test("catalog: a version 1 index (before deletion) still opens and upgrades on the next change", () =>
+{
+    var v = NewVault(); var id = Guid.NewGuid();
+    var index = new RevisionStore(Path.Combine(v, "index"), ProjectCatalog.IndexStoreId, counting);
+    index.Commit(index.Initialize().SnapshotId, "projects.json", Text($"{{\"version\":1,\"projects\":[{{\"projectId\":\"{id:D}\",\"name\":\"Legacy\"}}]}}"));
+    Directory.CreateDirectory(Path.Combine(v, "projects"));
+    new RevisionStore(Path.Combine(v, "projects", id.ToString("D")), id, counting).Initialize();
+    var c = new ProjectCatalog(v, counting);
+    Assert(c.OpenAndVerify().Single().Name == "Legacy");
+    c.CreateProject("Second");
+    Assert(c.DeleteProject(id, "Legacy"));
+    Assert(new ProjectCatalog(v, counting).OpenAndVerify().Select(p => p.Name).SequenceEqual(new[] { "Second" }));
+});
+
 foreach (var target in new[] { "LOCK", "HEAD", "blob", "root" })
 {
     var f = Fixture(); var s = f.Store.Initialize();

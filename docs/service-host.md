@@ -87,7 +87,7 @@ The validator therefore passed under the service account itself, including readi
 
 ## Project catalog at startup
 
-The vault root holds only `index\`, a `RevisionStore` with a fixed id containing one encrypted `projects.json` (project ids and names), and `projects\<projectId>\`, one store per project. Project names never appear outside the encrypted index. `SourceVault.Storage.ProjectCatalog` implements this with no record-format change.
+The vault root holds only `index\`, a `RevisionStore` with a fixed id containing one encrypted `projects.json` (project ids and names), and `projects\<projectId>\`, one store per project. Project names never appear outside the encrypted index. `SourceVault.Storage.ProjectCatalog` implements this with no record-format change. Deleted projects are tombstoned in the index until their directories are gone; after verification, startup retries any unfinished deletion (best effort) — see `contracts/storage-v1.md`.
 
 Normal start, before RUNNING, checks in order: identity, config, the trusted vault root (code 10), opening the key, the layout and index (code 11), then every project's authentication (code 12). By owner decision, any failure refuses the whole service. An empty vault root is a fresh vault with zero projects, and verification creates nothing. Cost: 2 TPM unwraps for the index plus 1 per project.
 

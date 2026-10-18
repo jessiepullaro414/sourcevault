@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace SourceVault.Editor.Host;
 
-internal enum VaultOperation { ListProjects, CreateProject, ListFiles, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
+internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, ListFiles, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
 internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text);
@@ -28,6 +28,7 @@ internal static class BridgePolicy
     {
         ["listProjects"] = (VaultOperation.ListProjects, []),
         ["createProject"] = (VaultOperation.CreateProject, ["name"]),
+        ["deleteProject"] = (VaultOperation.DeleteProject, ["projectId", "name"]), // name: the typed confirmation
         ["listFiles"] = (VaultOperation.ListFiles, ["projectId"]),
         ["openDocument"] = (VaultOperation.OpenDocument, ["projectId", "fileId"]),
         ["closeDocument"] = (VaultOperation.CloseDocument, ["projectId", "fileId"]),

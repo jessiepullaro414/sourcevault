@@ -107,10 +107,27 @@ export class VaultSession {
     await this.selectProject(created.projectId);
   }
 
+  /**
+   * Deletes a project and every revision in it. `confirmName` must be the project's exact name (checked here and by the
+   * service). Deleting the open project drops its files from this editor. Returns false if the service still has to
+   * remove some encrypted files later (they were in use); the project is gone from the list either way.
+   */
+  async deleteProject(projectId, confirmName) {
+    const target = this.projects.find(p => p.projectId === projectId);
+    if (!target) throw new VaultError('NotFound');
+    if (confirmName !== target.name) throw new VaultError('NameMismatch');
+    const current = this.project?.projectId === projectId;
+    if (current && this.dirtyIds.length) throw new VaultError('UnsavedChanges');
+    const result = await this.#call('deleteProject', { projectId, name: confirmName });
+    if (current) { this.project = null; this.files = new Map(); this.openIds = []; this.activeId = null; }
+    await this.refreshProjects();
+    return result.filesRemoved !== false;
+  }
+
   /** Switches project. Refused with unsaved edits; documents of the previous project are closed on the host. */
   async selectProject(projectId) {
     if (this.dirtyIds.length) throw new VaultError('UnsavedChanges');
-    for (const id of [...this.openIds]) await this.#call('closeDocument', { projectId: this.project.projectId, fileId: id });
+    if (this.project) for (const id of [...this.openIds]) await this.#call('closeDocument', { projectId: this.project.projectId, fileId: id });
     this.project = this.projects.find(p => p.projectId === projectId) ?? null;
     if (!this.project) throw new VaultError('NotFound');
     this.files = new Map(); this.openIds = []; this.activeId = null;

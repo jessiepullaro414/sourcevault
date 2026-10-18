@@ -3,10 +3,11 @@ using SourceVault.Client;
 using SourceVault.Import;
 
 // Imports a folder of source into a new SourceVault project. Run as an operator, from the installed copy:
-//   "C:\Program Files\SourceVault\client\SourceVault.Import.exe" <folder> --project "<new project name>" [--exclude <folder name>]... [--dry-run]
-// Prints paths and counts only, never file content. Your original folder is not changed.
+//   "C:\Program Files\SourceVault\client\SourceVault.Import.exe" <folder> --project "<new project name>" [--exclude <folder name>]... [--dry-run] [--delete-source]
+// Prints paths and counts only, never file content. Your original folder is not changed unless --delete-source is
+// given, and then only after every file verified and you type DELETE.
 string? folder = null, project = null;
-bool dryRun = false;
+bool dryRun = false, deleteSource = false;
 var excludes = new List<string>();
 for (int i = 0; i < args.Length; i++)
 {
@@ -15,6 +16,7 @@ for (int i = 0; i < args.Length; i++)
         case "--project" when i + 1 < args.Length: project = args[++i]; break;
         case "--exclude" when i + 1 < args.Length: excludes.Add(args[++i]); break;
         case "--dry-run": dryRun = true; break;
+        case "--delete-source": deleteSource = true; break;
         default:
             if (folder is null && !args[i].StartsWith("--", StringComparison.Ordinal)) folder = args[i];
             else return Usage();
@@ -27,8 +29,17 @@ try
 {
     var plan = ImportPlan.Scan(folder, excludes);
     Importer.PrintPlan(plan, Console.Out);
-    if (dryRun) { Console.WriteLine("Dry run: nothing was imported."); return 0; }
-    return Importer.Run(plan, project!.Trim(), VaultClient.ConnectInstalled, Console.Out);
+    if (dryRun)
+    {
+        Console.WriteLine("Dry run: nothing was imported.");
+        if (deleteSource) Console.WriteLine($"With --delete-source, up to {plan.Files.Count} imported file(s) would be deleted after verification (you will be asked to type DELETE).");
+        return 0;
+    }
+    if (deleteSource && Console.IsInputRedirected) { Console.Error.WriteLine("--delete-source needs an interactive console to type the confirmation."); return 2; }
+    int result = Importer.Run(plan, project!.Trim(), VaultClient.ConnectInstalled, Console.Out);
+    if (result == 0 && deleteSource) SourceCleanup.Run(plan, project!.Trim(), Console.ReadLine, Console.Out);
+    else if (deleteSource) Console.WriteLine("--delete-source: nothing was deleted because the import did not fully verify.");
+    return result;
 }
 catch (DirectoryNotFoundException) { Console.Error.WriteLine("Folder not found."); return 2; }
 catch (ImportException e) { Console.Error.WriteLine(e.Message); return 1; }
@@ -40,6 +51,6 @@ catch (Exception e) when (e is IOException or EndOfStreamException) { Console.Er
 
 static int Usage()
 {
-    Console.Error.WriteLine("usage: SourceVault.Import.exe <folder> --project \"<new project name>\" [--exclude <folder name>]... [--dry-run]");
+    Console.Error.WriteLine("usage: SourceVault.Import.exe <folder> --project \"<new project name>\" [--exclude <folder name>]... [--dry-run] [--delete-source]");
     return 2;
 }

@@ -96,6 +96,21 @@ public sealed class EditorVaultController : IDisposable
         return r.Ok ? new VaultResult<ProjectSummary>("Ok", new(Guid.Parse(r.Body.GetProperty("projectId").GetString()!), name, 0)) : Fail<ProjectSummary>(r.Code);
     });
 
+    /// <summary>
+    /// Deletes a project and every revision in it. <paramref name="confirmName"/> must be the project's exact name.
+    /// The value is false when some encrypted files were in use; the service removes them later.
+    /// </summary>
+    public Task<VaultResult<bool>> DeleteProjectAsync(Guid projectId, string confirmName, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("DeleteProject", w =>
+        {
+            w.WriteString("projectId", projectId.ToString("D")); w.WriteString("confirmName", confirmName);
+        }, null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<bool>(r.Code);
+        foreach (var key in opened.Keys.Where(k => k.Item1 == projectId).ToList()) opened.Remove(key);
+        return new("Ok", r.Body.GetProperty("filesRemoved").GetBoolean());
+    });
+
     public Task<VaultResult<IReadOnlyList<FileSummary>>> ListFilesAsync(Guid projectId, CancellationToken ct = default) => Guarded(async () =>
     {
         var r = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);

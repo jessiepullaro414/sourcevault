@@ -109,12 +109,16 @@ internal sealed class ScmHost
         try
         {
             var catalog = new ProjectCatalog(VaultRoot.Path, key);
-            try { return (key, catalog, catalog.OpenAndVerify()); }
+            IReadOnlyList<ProjectInfo> projects;
+            try { projects = catalog.OpenAndVerify(); }
             catch (VaultCatalogException e)
             {
                 throw new StartupRefusedException(e.Failure == CatalogFailure.Project
                     ? StartupRefusedException.ProjectUntrusted : StartupRefusedException.CatalogUntrusted);
             }
+            // Finish any deletion a crash or a file in use interrupted. Best effort: a pending tombstone stays allowed.
+            try { catalog.PurgeDeleted(); } catch (Exception e) when (e is not OutOfMemoryException) { }
+            return (key, catalog, projects);
         }
         catch { key.Dispose(); throw; }
     }

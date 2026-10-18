@@ -26,6 +26,7 @@ const FAILURES = {
   InvalidRequest: 'The vault rejected that name or content.',
   AlreadyExists: 'That name is already taken (names are not case-sensitive).',
   UnsavedChanges: 'Save or reload the edited files first.',
+  NameMismatch: 'The typed name does not match the project name exactly. Nothing was deleted.',
   Timeout: 'The editor host did not answer. Nothing was changed.',
 };
 
@@ -37,6 +38,7 @@ export async function startVault(transport, metadata, onSession) {
   const viewStates = new Map();
   const keepEditing = new Set(); // files whose conflict banner was dismissed
   let editor, suppress = false, busy = false, picking = false, unlockError = null;
+  let deleting = null; // { projectId, typed } while a delete confirmation is open in the picker
   const active = () => (session.activeId ? session.files.get(session.activeId) : null);
 
   document.title = 'SourceVault — Vault editor';
@@ -115,18 +117,53 @@ export async function startVault(transport, metadata, onSession) {
     const list = $('project-list');
     list.replaceChildren();
     if (!session.projects.length) { const p = document.createElement('p'); p.className = 'project-empty'; p.textContent = 'No projects yet. Create one below.'; list.append(p); }
+    if (deleting && !session.projects.some(p => p.projectId === deleting.projectId)) deleting = null;
     for (const project of session.projects) {
+      const row = document.createElement('div'); row.className = 'project-row';
       const button = document.createElement('button'); button.className = 'project-option'; button.disabled = busy;
       const name = document.createElement('strong'); name.textContent = project.name;
       const count = document.createElement('span'); count.textContent = `${project.fileCount} file${project.fileCount === 1 ? '' : 's'}`;
       button.append(name, count);
       button.onclick = () => act(async () => {
         if (session.project?.projectId !== project.projectId) { await session.selectProject(project.projectId); disposeAllModels(); keepEditing.clear(); }
-        picking = false;
+        picking = false; deleting = null;
         return `Opened project "${project.name}".`;
       });
-      list.append(button);
+      const remove = document.createElement('button'); remove.className = 'project-delete'; remove.textContent = 'Delete…'; remove.disabled = busy;
+      remove.title = `Delete ${project.name}`; remove.setAttribute('aria-label', `Delete project ${project.name}`);
+      remove.onclick = () => { deleting = { projectId: project.projectId, typed: '' }; render(); $('delete-confirm-name')?.focus(); };
+      row.append(button, remove);
+      list.append(row);
+      if (deleting?.projectId === project.projectId) list.append(deleteForm(project));
     }
+  }
+
+  // Deleting needs the exact name typed (paste is blocked in this window, so it is always typed).
+  function deleteForm(project) {
+    const form = document.createElement('form'); form.className = 'delete-confirm';
+    const text = document.createElement('p');
+    text.textContent = `Permanently delete "${project.name}" and all ${project.fileCount} file${project.fileCount === 1 ? '' : 's'} with their history? This cannot be undone. Type the project name to confirm.`;
+    const input = document.createElement('input'); input.id = 'delete-confirm-name'; input.autocomplete = 'off'; input.spellcheck = false;
+    input.maxLength = 64; input.setAttribute('aria-label', `Type ${project.name} to confirm`); input.value = deleting.typed;
+    const confirm = document.createElement('button'); confirm.type = 'submit'; confirm.className = 'danger'; confirm.textContent = 'Delete project';
+    confirm.disabled = busy || input.value !== project.name;
+    input.oninput = () => { deleting.typed = input.value; confirm.disabled = busy || input.value !== project.name; };
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel';
+    cancel.onclick = () => { deleting = null; render(); };
+    form.onsubmit = event => {
+      event.preventDefault();
+      if (input.value !== project.name) return;
+      const wasOpen = session.project?.projectId === project.projectId;
+      act(async () => {
+        const complete = await session.deleteProject(project.projectId, input.value);
+        deleting = null;
+        if (wasOpen) { disposeAllModels(); keepEditing.clear(); }
+        return complete ? `Deleted project "${project.name}".` : `Deleted project "${project.name}". Some encrypted files were in use; the service removes them later.`;
+      });
+    };
+    const actions = document.createElement('div'); actions.className = 'delete-actions'; actions.append(confirm, cancel);
+    form.append(text, input, actions);
+    return form;
   }
 
   // ---- Monaco models: one per opened file; hidden (not disposed) while locked ------------------------------------

@@ -20,10 +20,11 @@ SourceVault keeps source code encrypted on disk with a key that never leaves thi
 
 1. Copy `SourceVault-Setup-<date>.zip` to the computer.
 2. Right-click the zip → **Properties** → tick **Unblock** (if shown) → **OK**. Then extract it.
-3. Open **Windows PowerShell as administrator** (Start → type *PowerShell* → *Run as administrator*) and go to the extracted folder:
+3. Open **Windows PowerShell as administrator** (Start → type *PowerShell* → *Run as administrator*) and go to the **extracted package folder**, the one containing `Setup-SourceVault.ps1` and `payload`:
    ```powershell
    cd "C:\path\to\SourceVault-Setup"
    ```
+   Every Setup and Uninstall command below runs from this folder. If you built the package yourself, it is `artifacts\installer\SourceVault-Setup` in the source checkout, not the checkout's root or `installer` folder.
 4. Optional: run the pre-flight check, which changes nothing:
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -CheckOnly
@@ -101,6 +102,17 @@ If you see a lock screen instead, it explains why:
 - **Save** with **Ctrl+S** or the Save button. Each save becomes a new encrypted, unchangeable revision in the vault. Until you save, your edits exist only in the editor; a dot on the tab means unsaved changes.
 - Limits: 256 KiB per file (UTF-8 text), 1,024 files per project, 256 projects.
 
+### Delete a project
+
+In the project list (**Switch project**), click **Delete…** next to the project, **type its exact name** (letter case matters), and click **Delete project**.
+
+- This permanently deletes the project and **every saved revision** of every file in it, for everyone. There is no undo and no recycle bin.
+- Save or reload any edited files of that project first.
+- Anyone else who has the project open gets "no longer exists" on their next action.
+- If some encrypted files were in use, the project disappears at once and the service removes the leftover files later (at the latest when it next starts).
+- Like any deletion, it doesn't securely erase data from an SSD. The leftover data is encrypted, though, and the service no longer lists it.
+- Files can't be deleted or renamed individually yet.
+
 ### Import an existing folder
 
 Use the importer to bring a folder of code into a **new** project. Copy/paste is blocked, so this is how existing code gets in. Run it from a normal (not administrator) PowerShell, as an operator, while the service is running:
@@ -121,8 +133,22 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 - **Always a new project:** it never adds to or overwrites an existing one. If the name is taken, choose another.
 - **Verified:** after importing, it decrypts **every** file through the service and compares it byte for byte with your original. It ends with "all N decrypted and matched the originals" or lists any file that didn't.
 - **Changed files:** if a file changes while the import runs, the import stops. Run it again into a new project name.
-- **Your original folder is not changed.** Once you've checked the project in the editor, deleting the originals is your decision. Deleting does **not** securely erase files from an SSD, so copies may remain recoverable.
-- **No deletes yet:** projects can't be deleted, so a half-finished import stays in the list. Re-run into a new name.
+- **Your original folder is not changed** unless you add `--delete-source` (below).
+- **A half-finished import** (stopped or failed) stays in the project list. Delete it in the editor (see "Delete a project") and import again.
+
+#### Removing the originals: `--delete-source`
+
+```powershell
+& "C:\Program Files\SourceVault\client\SourceVault.Import.exe" "C:\code\my-app" --project "My app" --delete-source
+```
+
+- It runs **only after every file has verified**. If anything fails to verify, nothing is deleted.
+- It then explains what will happen and asks you to **type `DELETE`**. Anything else keeps everything.
+- It deletes **only the files it imported**, and only those still byte-for-byte identical to the vault's copy. Each is opened exclusively, overwritten with zeros, then deleted. Folders left empty are removed; the top folder itself is kept.
+- **Kept, and listed with a reason:** skipped files (binaries, large files and so on), excluded folders, files changed since the import, read-only files, files in use, files with other hard links, and anything reached through a link or junction.
+- **`.git` is kept.** Its history still contains your source. Delete or move it yourself if that matters.
+- **Not a secure erase.** SSDs, backups, shadow copies, OneDrive/Dropbox sync and the recycle bin of other tools may keep earlier copies.
+- After this, **the vault project is the only copy**: readable only on this computer, with no recovery if the TPM is cleared. Think twice before using it on code you can't recreate.
 
 ### When someone else changed the file
 
@@ -168,4 +194,4 @@ Different files never conflict: two people can edit different files of the same 
 - **No recovery, no backup, no migration** to another computer yet.
 - **Not yet verified:** that everything works after a reboot (automatic start at boot), and an independent security review.
 - **Builds are not available yet.** The vault stores and edits files only.
-- **No delete or rename** of files or projects yet.
+- **Projects can be deleted; files can't** be deleted or renamed yet, and projects can't be renamed.

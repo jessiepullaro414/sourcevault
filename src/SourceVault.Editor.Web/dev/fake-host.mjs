@@ -8,7 +8,7 @@
 const REQUEST_TYPE = 'sourcevault.vault.request';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ARGS = {
-  listProjects: [], createProject: ['name'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
+  listProjects: [], createProject: ['name'], deleteProject: ['projectId', 'name'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
   closeDocument: ['projectId', 'fileId'], saveDocument: ['projectId', 'fileId', 'text'], createFile: ['projectId', 'name', 'text'],
   lock: [], unlock: [],
 };
@@ -96,6 +96,12 @@ export class FakeVaultHost {
         const projectId = crypto.randomUUID();
         this.#projects.set(projectId, { name: args.name, files: new Map() });
         return reply('Ok', { projectId, name: args.name });
+      }
+      case 'deleteProject': {
+        if (args.name !== project.name) return reply('InvalidRequest'); // exact, case-sensitive confirmation
+        this.#projects.delete(args.projectId);
+        for (const k of [...this.#opened.keys()]) if (k.startsWith(`${args.projectId}/`)) this.#opened.delete(k);
+        return reply('Ok', { filesRemoved: true });
       }
       case 'listFiles':
         return reply('Ok', { files: [...project.files].map(([fileId, f]) => ({ fileId, name: f.name, byteLength: bytes(f.text) })) });

@@ -82,6 +82,25 @@ test('create file and project; duplicate names are AlreadyExists; switching proj
   await rejectsWith(session.createProject('second'), 'AlreadyExists');
 });
 
+test('deleting a project needs its exact name, refuses drafts in it, and clears it when open', async () => {
+  const { host, session, projectId, byName } = await opened();
+  const other = host.projectIdByName('Lab client check');
+  await rejectsWith(session.deleteProject(other, 'lab client check'), 'NameMismatch');
+  assert.equal(await session.deleteProject(other, 'Lab client check'), true);
+  assert.ok(!session.projects.some(p => p.projectId === other)); assert.equal(host.projectIdByName('Lab client check'), null);
+  await rejectsWith(session.deleteProject(other, 'Lab client check'), 'NotFound');
+  const main = byName('main.ts');
+  await session.open(main.id);
+  session.edit(main.id, '// draft\n');
+  await rejectsWith(session.deleteProject(projectId, session.project.name), 'UnsavedChanges');
+  session.edit(main.id, main.saved);
+  await session.deleteProject(projectId, 'Synthetic demo 1');
+  assert.equal(session.project, null); assert.equal(session.files.size, 0); assert.equal(session.activeId, null);
+  assert.deepEqual(session.projects, []);
+  await session.createProject('Fresh');
+  assert.equal(session.project.name, 'Fresh');
+});
+
 test('user lock keeps drafts hidden; unlock reports files changed meanwhile as conflicts', async () => {
   const { host, session, projectId, byName } = await opened();
   const main = byName('main.ts');

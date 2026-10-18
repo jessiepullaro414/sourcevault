@@ -312,6 +312,8 @@ Check("bridge accepts every operation with its exact arguments", () =>
 {
     Assert(Parsed(Req("listProjects", "{}")).Operation == VaultOperation.ListProjects, "listProjects");
     Assert(Parsed(Req("createProject", "{\"name\":\"Demo\"}")).Name == "Demo", "createProject");
+    var delete = Parsed(Req("deleteProject", $"{{\"projectId\":\"{P}\",\"name\":\"Demo\"}}"));
+    Assert(delete.Operation == VaultOperation.DeleteProject && delete.ProjectId == Guid.Parse(P) && delete.Name == "Demo", "deleteProject");
     Assert(Parsed(Req("listFiles", $"{{\"projectId\":\"{P}\"}}")).ProjectId == Guid.Parse(P), "listFiles");
     var open = Parsed(Req("openDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"));
     Assert(open.Operation == VaultOperation.OpenDocument && open.FileId == Guid.Parse(F), "openDocument");
@@ -324,7 +326,7 @@ Check("bridge accepts every operation with its exact arguments", () =>
 
 Check("bridge rejects wrong envelopes, unknown operations and duplicate keys", () => Rejects(Vault,
     null, "", "[]", "\"x\"", "{}", Req("listProjects", "{}", type: "sourcevault.preview.status"),
-    Req("ListProjects", "{}"), Req("deleteProject", "{}"), Req("openDocument ", "{}"), Req("listProjects", "[]"), Req("listProjects", "null"),
+    Req("ListProjects", "{}"), Req("deleteFile", "{}"), Req("renameProject", "{}"), Req("openDocument ", "{}"), Req("listProjects", "[]"), Req("listProjects", "null"),
     Req("listProjects", "{}").Replace("\"args\":{}", "\"args\":{},\"extra\":1"),
     Req("listProjects", "{}").Replace("\"type\":", "\"type\":\"sourcevault.vault.request\",\"type\":"),
     Req("listProjects", "{}").Replace("{\"type\"", "{\"capability\":\"x\",\"type\""),
@@ -338,7 +340,9 @@ Check("bridge rejects missing, extra, duplicate and mistyped arguments", () => R
     Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"), Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":null}}"),
     Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":[\"x\"]}}"),
     Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\",\"expectedSnapshotId\":\"{P}\"}}"),
-    Req("lock", "{\"reason\":\"x\"}")));
+    Req("lock", "{\"reason\":\"x\"}"),
+    Req("deleteProject", "{}"), Req("deleteProject", $"{{\"projectId\":\"{P}\"}}"), Req("deleteProject", "{\"name\":\"Demo\"}"),
+    Req("deleteProject", $"{{\"projectId\":\"{P}\",\"name\":\"\"}}"), Req("deleteProject", $"{{\"projectId\":\"{P}\",\"confirmName\":\"Demo\"}}")));
 
 Check("bridge rejects non-canonical, empty and malformed ids", () => Rejects(Vault,
     Req("listProjects", "{}", id: Guid1.ToUpperInvariant()), Req("listProjects", "{}", id: "{" + Guid1 + "}"),

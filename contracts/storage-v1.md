@@ -39,3 +39,12 @@ A store instance may cache its last authenticated manifest in memory (no documen
 Logical names may now be relative paths of `/`-separated segments: at most 32 segments and 260 characters, each segment a valid basename under the earlier rules. No path may be a folder prefix of another file (case-insensitive). Readers reject manifests that break this.
 
 `RevisionStore.CommitMany` writes many documents and one manifest in a single all-or-nothing commit. The record format and manifest schema 2 are unchanged.
+
+## Addition: project deletion (owner request, 2026-10-18)
+
+The record format, manifest schema and store layout are unchanged. Only the plaintext schema of the encrypted catalog index document `projects.json` changes:
+
+- **Version 2:** `{version: 2, projects: [{projectId, name}], deleted: [projectId]}`. `deleted` lists tombstones: projects removed from the catalog whose directories may still exist.
+- **Readers** accept versions 1 and 2. An id may appear only once across `projects` and `deleted`. Writers always write version 2, so a version 1 vault upgrades on its next change.
+- **Verification:** every listed project's directory must exist. A directory under `projects\` must belong to a listed project or a tombstone; anything else fails closed as a layout failure, as before.
+- **Delete order:** (1) the index moves the project to `deleted`; (2) its directory is removed without following links; (3) the tombstone is cleared. A crash or a file in use between the steps leaves a tombstone, and the service retries step 2 at startup.
