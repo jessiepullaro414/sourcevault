@@ -1,30 +1,55 @@
 # Next implementation tasks
 
-The record codec, revision store, Windows adapter, and SCM host foundation are implemented and covered by synthetic tests. A synthetic-only editor preview (WPF/WebView2 host, offline Monaco, memory-only revisions) is implemented with pinned, vendored packages; see [editor preview checks](editor-preview-checks.md). These are distinct from passing hardware/deployment gates. Do not introduce a software key provider to bypass those gates.
+Updated 2026-10-18. The vault service, encrypted store, editor vault mode, importer, file operations, history, merge and container builds are implemented, and `scripts/Verify.ps1` passes (see [status](status.md)). Owner-run lab checks have passed for the installed service, key provisioning, vault root, catalog tamper checks, pipe DACL and lab client. Everything added since then is tested in process only. Do not introduce a software key provider to bypass the hardware gates, and use synthetic inputs only.
 
-## Next worker wave
+## Owner lab steps (next)
 
-1. **Service-host lab integration (T01/T02 continuation).** Service-identity key provisioning (`provision-key`) and owner-run lab scripts (`scripts/lab`) now exist and passed on this machine (2026-10-17): key created under the service identity, export refused, start/stop clean. Remaining: rerun `Test-ServiceLab.ps1` after a reboot; test wrong/missing key and config behavior. Vault-root gate and `New-VaultRoot.ps1` passed on this machine (refused without the root, RUNNING with it, unelevated access denied). Store performance fix (schema 2) and the project catalog with startup verification are built; both passed on this machine (synthetic project created under the service identity; tamper drill refused 11 and 12 and restored). Protocol v2 pipe endpoints are built (in-process tested). Next: owner runs `New-OperatorsGroup.ps1` (then sign out/in), `Update-ServiceLab.ps1`, `Test-ServiceLab.ps1 -LeaveRunning` and `Test-PipeAccess.ps1`; the lab client passed end to end as an operator, and the executable check refused PowerShell and a copied client. Next: design step 3, the editor host on protocol v2 (`docs/editor-vault-design.md`). Its steps 1-3 (client library, host vault mode, renderer vault mode) are done; next is step 4: install the editor (`Install-Editor.ps1`, or `Setup-SourceVault.ps1 -Update` from the built package) and run the owner smoke checklist with `SourceVault.Editor.exe --vault`, including project deletion and `SourceVault.Import.exe --delete-source` on a synthetic folder. Use the implemented SCM-compatible metadata host and existing-key adapter. Validate actual `NT SERVICE\SourceVault` identity, service profile/key provisioning, service/key/vault DACLs, restart/shutdown timing, and mutual pipe checks on a TPM-equipped test machine. Implement reviewed provisioning; the current console key spike is not itself an SCM service. Do not enable source endpoints until identity and trusted storage-root policy pass.
-2. **Storage hardening and service integration (T04/T05).** Review `contracts/storage-v1.md` and the tested implementation. A read-only trusted-root validator (`SourceVault.Windows/TrustedStorageRoot.cs`) now exists; gate service readiness on it when the service first opens a store, and write the reviewed provisioning that applies `ExpectedRootSddl`; implement key rotation/recovery decisions; measure hardware unwrap throughput; run power-loss tests; execute skipped reparse cases in a suitable lab. Then integrate bounded authorized document operations with the service. Current test protectors remain confined to test assemblies. No production import until the TPM gate passes.
-3. **Editor native validation (T06 continuation).** The synthetic preview shell exists. Run and record the interactive native checklist in `docs/editor-preview-checks.md`: export paths, devtools/accelerators, navigation/resource/message rejection, registry/policy WebView2 overrides, and WebView2 profile/cache/crash-dump inspection with unique synthetic markers. Confirm the stricter `PreviewPolicy` still loads every Monaco asset, worker and the codicon font. Exercise capture exclusion only in an explicit, separately reviewed mode and report it as best effort. (Policy extraction with hostile-input tests and the package signature check are done.)
-4. **Editor against the service protocol (T06).** The renderer already talks to an in-memory protocol-v1 mock. Next, move the mock behind the native host over the real framing, still synthetic-only, so the host owns the capability and the renderer never sees it. Expose no decryption shortcut or generic IPC passthrough; keep document text out of the bridge until the protocol message set is reviewed. Real service connection waits on item 1.
+These need an installed service, administrator rights or real hardware, so they are owner-run.
 
-## Owner lab steps for 2026-10-18 work
-
-1. Rebuild and run `Setup-SourceVault.ps1 -Update` from the package folder, then smoke-test in the editor:
-   - rename and move files, delete and restore files, rename a project;
-   - History (compare and restore), Merge after a conflict;
-   - deleting a project, and `--delete-source` on a synthetic folder.
-2. Builds:
-   1. Run `-Update -WithBuilds`, write `build.json` from the example, then run `Grant-BuildDockerAccess.ps1`.
+1. **Install and smoke-test the editor** (step 4 of `docs/editor-vault-design.md`). Rebuild the package (`scripts\Build-Installer.ps1`) and run `Setup-SourceVault.ps1 -Update` from it. Then, in `SourceVault.Editor.exe --vault` from the Start menu:
+   - open a synthetic project, edit and save;
+   - make a conflict with the lab client, then Merge and Reload;
+   - rename and move files and folders, delete and restore files, rename a project;
+   - History: compare and restore;
+   - Windows lock (Win+L), the capture check, and a profile canary scan after exit;
+   - delete a project, and run `SourceVault.Import.exe --delete-source` on a synthetic folder.
+2. **Builds.**
+   1. Run `-Update -WithBuilds`, write `build.json` from `installer/build.example.json`, then run `Grant-BuildDockerAccess.ps1`.
    2. For WSL, run `New-WslDockerTls.ps1 -Distro <name>` and apply the printed dockerd settings.
    3. Run `-Update -WithBuilds` again, then build a synthetic project on each target.
-   4. Record what works, especially the Windows-container archive copy.
-3. Run `scripts/Verify.ps1` once from an elevated PowerShell so the 5 symlink checks run instead of being skipped.
+   4. Record what works, especially the Windows-container archive copy (copying into a running Hyper-V-isolated container may be unsupported).
+3. **Reboot and failure cases.** Reboot, then rerun `Test-ServiceLab.ps1` (does the service start at boot and still open its key?). Test a missing key and a missing or invalid configuration.
+4. Run `scripts/Verify.ps1` once from an elevated PowerShell so the 5 symlink checks run instead of being skipped.
+
+## Development work
+
+1. **Editor native validation (T06).** Run and record the rest of the native checklist in `docs/editor-preview-checks.md`. Clipboard blocking and one persistence canary are already recorded. Still to do:
+   - developer tools and browser accelerators;
+   - registry/policy WebView2 overrides;
+   - rejecting bad navigations, resources and messages;
+   - recording the capture-exclusion result in vault mode;
+   - confirming the stricter `PreviewPolicy` loads every Monaco asset, worker and the codicon font;
+   - a fuller persistence inspection (compressed Chromium stores, pagefile and hibernation are not yet covered).
+2. **Pipe and client identity.** The editor refuses a pipe not owned by `NT SERVICE\SourceVault`, and the service accepts only its installed client executables by path. Still open:
+   - a signer/version check on the client executable;
+   - process-lifetime and PID-reuse races;
+   - genuine separate-account and remote-client denial on a lab machine;
+   - lock/revocation behavior across several editors.
+3. **Storage hardening (T04/T05).**
+   - power-loss tests (exception fault injection exists; real interruption does not);
+   - the skipped reparse-point cases, run in a suitable lab;
+   - TPM throughput beyond 200 files;
+   - key rotation, within the no-recovery decision.
+4. **Build hardening.** Builds publish validated artifacts straight to `artifactRoot`. Still open:
+   - a quarantine/release step for artifacts;
+   - a policy for source maps, debug/PDB files, archives and build metadata;
+   - a real initial compiler.
+   Builds remain an intentional export path, whatever the policy (see `docs/files-history-builds-design.md`).
+5. **Release.** Offline installer and update signing, a supported hardware/OS matrix, and an independent security review.
 
 ## Builder continuation
 
-T03 requires a supported Hyper-V lab host, verified Linux image/toolchain and dedicated identities. Implement and test the narrow VM-management helper and authenticated guest channel before transferring confidential content. The current synthetic CLI is not that broker. The supplied guest wrapper is untested. Establish the practical encrypted-storage profile first; defer RAM-only claims.
+Builds now use administrator-configured Docker containers through `NT SERVICE\SourceVaultBuild` (owner decisions D3/D4, 2026-10-18). The original T03 plan was a dedicated Hyper-V Linux VM with an authenticated guest channel and VM-management helper. It is not built, and `spikes/builder` stays a synthetic spike with an untested guest wrapper. Decide whether T03 is retired or kept as a stronger later profile. Until then, make no RAM-only or isolation claims for builds.
 
 ## Decisions before real source or public release
 
@@ -32,5 +57,6 @@ T03 requires a supported Hyper-V lab host, verified Linux image/toolchain and de
 - ~~Confirm device-only loss policy versus an owner recovery envelope.~~ Decided 2026-10-18: device-only, no recovery. Do not add a recovery envelope, escrow or key export.
 - Approve supported hardware/OS/runtime and offline update strategy.
 - Choose a real initial compiler and artifact policy. Readable JavaScript output does not conceal implementation.
-- Signing/release ownership. (License: MIT, chosen by the owner in the GitHub repository, 2026-10-18.)
-- Per-project permissions: decided 2026-10-18, none. Every member of *SourceVault Operators* can open every project; access is limited by that group alone.
+- Signing/release ownership.
+- ~~License.~~ Decided 2026-10-18: MIT, chosen by the owner in the GitHub repository (`LICENSE`).
+- ~~Per-project permissions.~~ Decided 2026-10-18: none. Every member of *SourceVault Operators* can open every project; access is limited by that group alone.
