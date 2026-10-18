@@ -183,7 +183,7 @@ Different files never conflict: two people can edit different files of the same 
 **Don't**
 - **Don't clear or reset the TPM**, reinstall Windows, or replace the motherboard on a vault computer. The key exists only in this TPM, there is **no recovery key**, and the vault would become permanently unreadable. Check with your administrator before BIOS/UEFI or TPM firmware changes.
 - **Don't try to copy `C:\ProgramData\SourceVault` to another computer as a backup.** The files can only be decrypted by this computer's TPM. There is no supported backup or migration yet.
-- Don't add people to *SourceVault Operators* who shouldn't read every project: there are no per-project permissions yet.
+- Don't add people to *SourceVault Operators* who shouldn't read every project: every operator can open every project, by design (owner decision 2026-10-18).
 - Don't run the editor from anywhere except the Start menu shortcut. Other copies are rejected.
 - Don't screen-share the editor and expect the viewer to see it. Capture exclusion blanks it, though not reliably for every tool, so don't rely on it either way.
 

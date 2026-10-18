@@ -19,4 +19,5 @@ T03 requires a supported Hyper-V lab host, verified Linux image/toolchain and de
 - ~~Confirm device-only loss policy versus an owner recovery envelope.~~ Decided 2026-10-18: device-only, no recovery. Do not add a recovery envelope, escrow or key export.
 - Approve supported hardware/OS/runtime and offline update strategy.
 - Choose a real initial compiler and artifact policy. Readable JavaScript output does not conceal implementation.
-- Choose an open-source license and signing/release ownership. No license is assumed automatically.
+- Signing/release ownership. (License: MIT, chosen by the owner in the GitHub repository, 2026-10-18.)
+- Per-project permissions: decided 2026-10-18, none. Every member of *SourceVault Operators* can open every project; access is limited by that group alone.

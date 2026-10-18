@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "artifactRoot": "D:\\SourceVault\\artifacts",
+  "targets": [
+    {
+      "name": "linux",
+      "engine": "tcp://127.0.0.1:2376",
+      "tls": {
+        "caFile": "C:\\ProgramData\\SourceVault\\config\\wsl-docker-ca.pem",
+        "clientCertificateThumbprint": "REPLACE-WITH-THUMBPRINT-IN-LocalMachine-My"
+      },
+      "container": "sourcevault-build-linux",
+      "platform": "linux",
+      "sourcePath": "/sourcevault/src",
+      "command": ["/bin/sh", "-c", "./build.sh"],
+      "artifactPath": "/sourcevault/out",
+      "timeoutSeconds": 900,
+      "maxArtifactMegabytes": 512,
+      "allowNetwork": false
+    },
+    {
+      "name": "windows",
+      "engine": "npipe://./pipe/docker_engine",
+      "container": "sourcevault-build-windows",
+      "platform": "windows",
+      "sourcePath": "C:\\sourcevault\\src",
+      "command": ["cmd.exe", "/c", "build.cmd"],
+      "artifactPath": "C:\\sourcevault\\out",
+      "timeoutSeconds": 900,
+      "maxArtifactMegabytes": 512,
+      "allowNetwork": false
+    }
+  ]
+}
