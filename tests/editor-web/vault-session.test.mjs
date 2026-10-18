@@ -101,6 +101,47 @@ test('deleting a project needs its exact name, refuses drafts in it, and clears 
   assert.equal(session.project.name, 'Fresh');
 });
 
+test('rename and move files and folders; tabs and drafts follow the file', async () => {
+  const { host, session, projectId, byName } = await opened();
+  const main = byName('main.ts');
+  await session.open(main.id);
+  session.edit(main.id, '// draft survives a rename\n');
+  await session.renameFile(main.id, 'src/main.tsx');
+  assert.equal(main.path, 'src/main.tsx'); assert.equal(main.language, 'typescript'); assert.equal(session.activeId, main.id);
+  assert.equal(session.dirty(main.id), true, 'draft kept');
+  await rejectsWith(session.renameFile(byName('util.ts').id, 'SRC/MAIN.TSX'), 'AlreadyExists');
+  await rejectsWith(session.renameFile(byName('util.ts').id, 'src'), 'AlreadyExists');
+  await session.save(main.id);
+  assert.equal(await session.renameFolder('src', 'app/source'), 1);
+  assert.equal(session.file(main.id).path, 'app/source/main.tsx');
+  await rejectsWith(session.renameFolder('nowhere', 'x'), 'NotFound');
+  await session.renameProject(projectId, 'Renamed demo');
+  assert.equal(session.project.name, 'Renamed demo');
+  await rejectsWith(session.renameProject(projectId, 'lab client check'), 'AlreadyExists');
+  assert.equal(host.textOf(projectId, main.id), '// draft survives a rename\n');
+});
+
+test('delete files; a draft of a file deleted elsewhere can be discarded or saved as a new file', async () => {
+  const { host, session, projectId, byName } = await opened();
+  const util = byName('util.ts'), main = byName('main.ts');
+  await session.open(util.id);
+  session.edit(util.id, '// unsaved\n');
+  await rejectsWith(session.deleteFile(util.id), 'UnsavedChanges');
+  session.edit(util.id, util.saved);
+  const before = session.project.fileCount;
+  await session.deleteFile(util.id);
+  assert.ok(!session.files.has(util.id)); assert.equal(session.activeId, null); assert.equal(session.project.fileCount, before - 1);
+  await session.open(main.id);
+  session.edit(main.id, '// my version\n');
+  host.externalDelete(projectId, main.id);
+  await session.lock(); await session.unlock(); // the unlock re-check lists files again
+  const kept = session.files.get(main.id);
+  assert.equal(kept.deleted, true); assert.equal(kept.text, '// my version\n');
+  const newId = await session.saveAsNew(main.id);
+  assert.notEqual(newId, main.id); assert.equal(host.textOf(projectId, newId), '// my version\n');
+  assert.equal(session.file(newId).path, 'main.ts');
+});
+
 test('user lock keeps drafts hidden; unlock reports files changed meanwhile as conflicts', async () => {
   const { host, session, projectId, byName } = await opened();
   const main = byName('main.ts');

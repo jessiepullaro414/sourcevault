@@ -48,3 +48,7 @@ The record format, manifest schema and store layout are unchanged. Only the plai
 - **Readers** accept versions 1 and 2. An id may appear only once across `projects` and `deleted`. Writers always write version 2, so a version 1 vault upgrades on its next change.
 - **Verification:** every listed project's directory must exist. A directory under `projects\` must belong to a listed project or a tombstone; anything else fails closed as a layout failure, as before.
 - **Delete order:** (1) the index moves the project to `deleted`; (2) its directory is removed without following links; (3) the tombstone is cleared. A crash or a file in use between the steps leaves a tombstone, and the service retries step 2 at startup.
+
+## Addition: renames and deletes in a commit (2026-10-18)
+
+`RevisionStore.CommitChanges` applies writes, renames and deletes in one all-or-nothing commit: deletes first, then renames, then writes. Renames apply together, so two names can be swapped. A rename keeps the file id and its revision record; only the manifest changes. Name and tree checks run before any record is written. The record format and manifest schema 2 are unchanged.

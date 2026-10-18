@@ -8,7 +8,8 @@
 const REQUEST_TYPE = 'sourcevault.vault.request';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ARGS = {
-  listProjects: [], createProject: ['name'], deleteProject: ['projectId', 'name'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
+  listProjects: [], createProject: ['name'], deleteProject: ['projectId', 'name'], renameProject: ['projectId', 'newName'],
+  renameFile: ['projectId', 'fileId', 'newName'], renameFolder: ['projectId', 'name', 'newName'], deleteFile: ['projectId', 'fileId'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
   closeDocument: ['projectId', 'fileId'], saveDocument: ['projectId', 'fileId', 'text'], createFile: ['projectId', 'name', 'text'],
   lock: [], unlock: [],
 };
@@ -103,6 +104,37 @@ export class FakeVaultHost {
         for (const k of [...this.#opened.keys()]) if (k.startsWith(`${args.projectId}/`)) this.#opened.delete(k);
         return reply('Ok', { filesRemoved: true });
       }
+      case 'renameProject': {
+        if (args.newName.length > 64 || args.newName.trim() !== args.newName) return reply('InvalidRequest');
+        if ([...this.#projects].some(([id, p]) => id !== args.projectId && p.name.toLowerCase() === args.newName.toLowerCase())) return reply('AlreadyExists');
+        project.name = args.newName;
+        return reply('Ok', {});
+      }
+      case 'renameFile': {
+        const file = project.files.get(args.fileId);
+        if (!file) return reply('NotFound');
+        if (!validFileName(args.newName)) return reply('InvalidRequest');
+        if (!this.#treeOk(project, new Map([[args.fileId, args.newName]]))) return reply('AlreadyExists');
+        file.name = args.newName;
+        return reply('Ok', {});
+      }
+      case 'renameFolder': {
+        if (!validFileName(args.name) || !validFileName(args.newName)) return reply('InvalidRequest');
+        const prefix = args.name.toLowerCase() + '/';
+        const moved = new Map([...project.files].filter(([, f]) => f.name.toLowerCase().startsWith(prefix)).map(([id, f]) => [id, args.newName + f.name.slice(args.name.length)]));
+        if (!moved.size) return reply('NotFound');
+        if ([...moved.values()].some(n => n.length > 260 || !validFileName(n))) return reply('InvalidRequest');
+        if (!this.#treeOk(project, moved)) return reply('AlreadyExists');
+        for (const [id, name] of moved) project.files.get(id).name = name;
+        return reply('Ok', { renamed: moved.size });
+      }
+      case 'deleteFile': {
+        const file = project.files.get(args.fileId);
+        if (!file) return reply('NotFound');
+        if (this.#opened.has(key) && this.#opened.get(key) !== file.rev) return reply('Conflict');
+        project.files.delete(args.fileId); this.#opened.delete(key);
+        return reply('Ok', {});
+      }
       case 'listFiles':
         return reply('Ok', { files: [...project.files].map(([fileId, f]) => ({ fileId, name: f.name, byteLength: bytes(f.text) })) });
       case 'openDocument': {
@@ -130,6 +162,15 @@ export class FakeVaultHost {
       }
     }
   }
+
+  // Names after the given renames: unique (case-insensitive) and no path that is both a file and a folder.
+  #treeOk(project, renames) {
+    const names = [...project.files].map(([id, f]) => (renames.get(id) ?? f.name).toLowerCase());
+    const set = new Set(names);
+    return set.size === names.length && !names.some(n => n.split('/').slice(0, -1).some((_, i, parts) => set.has(parts.slice(0, i + 1).join('/'))));
+  }
+  /** Someone else deletes a file (another editor). */
+  externalDelete(projectId, fileId) { return this.#projects.get(projectId)?.files.delete(fileId) ?? false; }
 
   #unlock() {
     if (this.failNextUnlock) { const code = this.failNextUnlock; this.failNextUnlock = null; return [code, null]; }

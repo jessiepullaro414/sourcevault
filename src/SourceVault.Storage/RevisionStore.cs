@@ -9,6 +9,17 @@ namespace SourceVault.Storage;
 
 public sealed record StoreFile(Guid FileId, string LogicalName, Guid RevisionId, int ByteLength);
 public sealed record StoreSnapshot(Guid SnapshotId, IReadOnlyList<StoreFile> Files);
+
+/// <summary>One change in <see cref="RevisionStore.CommitChanges"/>.</summary>
+public abstract record StoreChange
+{
+    private StoreChange() { }
+    /// <summary>Creates a file, or replaces the file with this name (case-insensitive), keeping its file ID.</summary>
+    public sealed record Write(string Name, byte[] Content) : StoreChange;
+    /// <summary>Renames or moves a file; its ID and current revision are kept.</summary>
+    public sealed record Rename(Guid FileId, string NewName) : StoreChange;
+    public sealed record Delete(Guid FileId) : StoreChange;
+}
 public sealed class RevisionConflictException : Exception
 {
     public RevisionConflictException() : base("Snapshot has changed.") { }
@@ -103,33 +114,57 @@ public sealed class RevisionStore
     /// Creates or replaces several documents in one snapshot: one new manifest, all or nothing. A name that matches an
     /// existing file (case-insensitively) replaces it and keeps its file ID. Callers zero their buffers afterwards.
     /// </summary>
-    public StoreSnapshot CommitMany(Guid expectedSnapshotId, IReadOnlyList<(string Name, byte[] Content)> documents)
+    public StoreSnapshot CommitMany(Guid expectedSnapshotId, IReadOnlyList<(string Name, byte[] Content)> documents) =>
+        CommitChanges(expectedSnapshotId, documents.Select(d => (StoreChange)new StoreChange.Write(d.Name, d.Content)).ToList());
+
+    /// <summary>
+    /// Applies writes, renames and deletes in one snapshot: one new manifest, all or nothing. Deletes apply first,
+    /// then renames (all at once, so names can be swapped), then writes. A write whose name matches a file after the
+    /// renames replaces it and keeps its file ID. A rename keeps the file ID and its current revision record, so no
+    /// content is re-encrypted. Unknown file IDs throw <see cref="KeyNotFoundException"/>; a resulting duplicate name or
+    /// file/folder clash throws <see cref="NameExistsException"/>, before anything is written. Callers zero their buffers.
+    /// </summary>
+    public StoreSnapshot CommitChanges(Guid expectedSnapshotId, IReadOnlyList<StoreChange> changes)
     {
-        if (documents.Count == 0 || documents.Count > MaximumFiles) throw new ArgumentException("Invalid document count.");
-        foreach (var (name, content) in documents) { ValidateName(name); ValidateContent(content); }
-        if (documents.Select(d => d.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != documents.Count) throw new ArgumentException("Duplicate names in one commit.");
+        if (changes.Count == 0 || changes.Count > MaximumFiles) throw new ArgumentException("Invalid change count.");
+        var writes = changes.OfType<StoreChange.Write>().ToList();
+        var renames = changes.OfType<StoreChange.Rename>().ToList();
+        var deletes = changes.OfType<StoreChange.Delete>().ToList();
+        if (writes.Count + renames.Count + deletes.Count != changes.Count) throw new ArgumentException("Unknown change.");
+        foreach (var w in writes) { ValidateName(w.Name); ValidateContent(w.Content); }
+        foreach (var r in renames) ValidateName(r.NewName);
+        if (writes.Select(w => w.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != writes.Count) throw new ArgumentException("Duplicate names in one commit.");
+        var targeted = renames.Select(r => r.FileId).Concat(deletes.Select(d => d.FileId)).ToList();
+        if (targeted.Contains(Guid.Empty) || targeted.Distinct().Count() != targeted.Count) throw new ArgumentException("A file can change only once per commit.");
         using var lease = AcquireLock();
         var manifest = ReadCurrent();
         var current = manifest.Snapshot;
         if (current.SnapshotId != expectedSnapshotId) throw new RevisionConflictException();
-        var byName = current.Files.ToDictionary(f => f.LogicalName, StringComparer.OrdinalIgnoreCase);
+        var byId = current.Files.ToDictionary(f => f.FileId);
+        foreach (var id in targeted) if (!byId.ContainsKey(id)) throw new KeyNotFoundException("Document not found.");
+        foreach (var d in deletes) byId.Remove(d.FileId);
+        foreach (var r in renames) byId[r.FileId] = byId[r.FileId] with { LogicalName = r.NewName };
+        var byName = new Dictionary<string, StoreFile>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in byId.Values) if (!byName.TryAdd(f.LogicalName, f)) throw new NameExistsException(); // renamed onto another file
+        // Every name and count check happens before any record is written.
+        var planned = writes.Select(w => (Write: w, Existing: byName.GetValueOrDefault(w.Name))).ToList();
+        var finalNames = byId.Values.Where(f => !planned.Any(p => p.Existing?.FileId == f.FileId)).Select(f => f.LogicalName).Concat(writes.Select(w => w.Name)).ToList();
+        if (finalNames.Count > MaximumFiles) throw new InvalidDataException("Document count exceeded.");
+        if (!IsValidTree(finalNames)) throw new NameExistsException(); // a file where a folder is, or vice versa
         var replaced = new HashSet<Guid>();
         var added = new List<StoreFile>();
         var hashes = new Dictionary<Guid, byte[]>();
-        foreach (var (name, content) in documents)
+        foreach (var (write, existing) in planned)
         {
-            byName.TryGetValue(name, out var existing);
             if (existing is not null) replaced.Add(existing.FileId);
-            var entry = new StoreFile(existing?.FileId ?? Guid.NewGuid(), name, Guid.NewGuid(), content.Length);
-            var record = RecordCodec.Encrypt(new(projectId, entry.FileId, entry.RevisionId, RecordKind.Document), content, protector);
+            var entry = new StoreFile(existing?.FileId ?? Guid.NewGuid(), write.Name, Guid.NewGuid(), write.Content.Length);
+            var record = RecordCodec.Encrypt(new(projectId, entry.FileId, entry.RevisionId, RecordKind.Document), write.Content, protector);
             WriteBlob(entry.RevisionId, record);
             hashes[entry.RevisionId] = SHA256.HashData(record);
             added.Add(entry);
         }
-        FaultInjection?.Invoke(CommitStage.DocumentFlushed);
-        var entries = current.Files.Where(f => !replaced.Contains(f.FileId)).Concat(added).ToArray();
-        if (entries.Length > MaximumFiles) throw new InvalidDataException("Document count exceeded.");
-        if (!IsValidTree(entries.Select(f => f.LogicalName))) throw new NameExistsException(); // a file where a folder is, or vice versa
+        if (writes.Count > 0) FaultInjection?.Invoke(CommitStage.DocumentFlushed);
+        var entries = byId.Values.Where(f => !replaced.Contains(f.FileId)).Concat(added).ToArray();
         foreach (var f in entries) if (!hashes.ContainsKey(f.RevisionId)) hashes[f.RevisionId] = manifest.DocumentSha256[f.RevisionId];
         var next = Snapshot(Guid.NewGuid(), entries);
         var written = WriteManifest(next, hashes);

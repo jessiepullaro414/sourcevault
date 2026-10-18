@@ -4,10 +4,10 @@ using System.Text.Json;
 
 namespace SourceVault.Editor.Host;
 
-internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, ListFiles, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
+internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
-internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text);
+internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null);
 
 /// <summary>
 /// Bridge v2 (docs/editor-vault-design.md): pure, UI-free validation of renderer-to-host vault requests and
@@ -29,6 +29,10 @@ internal static class BridgePolicy
         ["listProjects"] = (VaultOperation.ListProjects, []),
         ["createProject"] = (VaultOperation.CreateProject, ["name"]),
         ["deleteProject"] = (VaultOperation.DeleteProject, ["projectId", "name"]), // name: the typed confirmation
+        ["renameProject"] = (VaultOperation.RenameProject, ["projectId", "newName"]),
+        ["renameFile"] = (VaultOperation.RenameFile, ["projectId", "fileId", "newName"]),
+        ["renameFolder"] = (VaultOperation.RenameFolder, ["projectId", "name", "newName"]), // name: the folder path
+        ["deleteFile"] = (VaultOperation.DeleteFile, ["projectId", "fileId"]),
         ["listFiles"] = (VaultOperation.ListFiles, ["projectId"]),
         ["openDocument"] = (VaultOperation.OpenDocument, ["projectId", "fileId"]),
         ["closeDocument"] = (VaultOperation.CloseDocument, ["projectId", "fileId"]),
@@ -55,12 +59,13 @@ internal static class BridgePolicy
             var args = root.GetProperty("args");
             if (!ExactFields(args, op.Args)) return false;
             Guid projectId = Guid.Empty, fileId = Guid.Empty;
-            string? name = null, text = null;
+            string? name = null, text = null, newName = null;
             if (op.Args.Contains("projectId") && !TryId(args.GetProperty("projectId"), out projectId)) return false;
             if (op.Args.Contains("fileId") && !TryId(args.GetProperty("fileId"), out fileId)) return false;
             if (op.Args.Contains("name") && !TryName(args.GetProperty("name"), out name)) return false;
             if (op.Args.Contains("text") && !TryText(args.GetProperty("text"), out text)) return false;
-            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text);
+            if (op.Args.Contains("newName") && !TryName(args.GetProperty("newName"), out newName)) return false;
+            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName);
             return true;
         }
         catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException)

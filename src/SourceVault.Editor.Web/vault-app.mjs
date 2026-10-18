@@ -39,6 +39,8 @@ export async function startVault(transport, metadata, onSession) {
   const keepEditing = new Set(); // files whose conflict banner was dismissed
   let editor, suppress = false, busy = false, picking = false, unlockError = null;
   let deleting = null; // { projectId, typed } while a delete confirmation is open in the picker
+  let renaming = null; // { projectId, value } while a project rename is open in the picker
+  let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
   const active = () => (session.activeId ? session.files.get(session.activeId) : null);
 
   document.title = 'SourceVault — Vault editor';
@@ -88,7 +90,13 @@ export async function startVault(transport, metadata, onSession) {
         if (file.conflict) { const mark = document.createElement('span'); mark.className = 'file-conflict'; mark.textContent = '!'; mark.setAttribute('aria-label', 'Changed by someone else'); button.append(mark); }
         else if (session.dirty(file.id)) { const dot = document.createElement('span'); dot.className = 'file-dirty'; dot.setAttribute('aria-label', 'Unsaved changes'); button.append(dot); }
         button.onclick = () => act(async () => { await session.open(file.id); });
-        $('root-files').append(button);
+        const more = document.createElement('button'); more.className = 'file-more'; more.textContent = '⋯'; more.disabled = locked || busy;
+        more.title = `Actions for ${file.path}`; more.setAttribute('aria-label', `Rename, move or delete ${file.path}`);
+        more.setAttribute('aria-expanded', String(fileMenu?.id === file.id));
+        more.onclick = () => { fileMenu = fileMenu?.id === file.id ? null : { id: file.id, mode: 'menu' }; render(); };
+        const row = document.createElement('div'); row.className = 'file-row'; row.append(button, more);
+        $('root-files').append(row);
+        if (fileMenu?.id === file.id && !locked) $('root-files').append(filePanel(file));
       }
       for (const id of session.openIds) {
         const file = session.files.get(id); if (!file) continue;
@@ -103,7 +111,7 @@ export async function startVault(transport, metadata, onSession) {
       }
     }
     $('breadcrumb-file').textContent = f ? f.path : 'No file selected';
-    $('document-state').textContent = !f ? '' : f.conflict ? 'Changed by someone else' : session.dirty(f.id) ? 'Unsaved edits' : 'Saved in vault';
+    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : session.dirty(f.id) ? 'Unsaved edits' : 'Saved in vault';
     $('conflict-banner').hidden = locked || !f || !f.conflict || keepEditing.has(f.id);
     $('save').disabled = !editor || locked || busy || !f || !session.dirty(f.id);
     $('revision-count').textContent = String(session.savedCount).padStart(2, '0');
@@ -131,11 +139,91 @@ export async function startVault(transport, metadata, onSession) {
       });
       const remove = document.createElement('button'); remove.className = 'project-delete'; remove.textContent = 'Delete…'; remove.disabled = busy;
       remove.title = `Delete ${project.name}`; remove.setAttribute('aria-label', `Delete project ${project.name}`);
-      remove.onclick = () => { deleting = { projectId: project.projectId, typed: '' }; render(); $('delete-confirm-name')?.focus(); };
-      row.append(button, remove);
+      remove.onclick = () => { renaming = null; deleting = { projectId: project.projectId, typed: '' }; render(); $('delete-confirm-name')?.focus(); };
+      const rename = document.createElement('button'); rename.className = 'project-delete'; rename.textContent = 'Rename…'; rename.disabled = busy;
+      rename.setAttribute('aria-label', `Rename project ${project.name}`);
+      rename.onclick = () => { deleting = null; renaming = { projectId: project.projectId, value: project.name }; render(); $('rename-project-name')?.select(); };
+      row.append(button, rename, remove);
       list.append(row);
+      if (renaming?.projectId === project.projectId) list.append(renameProjectForm(project));
       if (deleting?.projectId === project.projectId) list.append(deleteForm(project));
     }
+  }
+
+  // ---- file actions (right-click menus are blocked, so each explorer row has a ⋯ panel) ----------------------------
+  function filePanel(file) {
+    const panel = document.createElement('div'); panel.className = 'file-panel';
+    const folder = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : null;
+    const close = () => { fileMenu = null; render(); };
+    const button = (label, onclick, className = '') => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.className = className; b.disabled = busy; b.onclick = onclick; return b; };
+    const textForm = (label, initial, submitLabel, submit) => {
+      const form = document.createElement('form'); form.className = 'file-form';
+      const caption = document.createElement('label'); caption.textContent = label;
+      const input = document.createElement('input'); input.value = fileMenu.value ?? initial; input.maxLength = 260; input.autocomplete = 'off'; input.spellcheck = false; input.setAttribute('aria-label', label);
+      input.oninput = () => { fileMenu.value = input.value; };
+      form.onsubmit = event => { event.preventDefault(); const value = input.value.trim(); if (!value || value === initial) { close(); return; } act(async () => { const message = await submit(value); fileMenu = null; return message; }); };
+      const actions = document.createElement('div'); actions.className = 'delete-actions';
+      const ok = button(submitLabel, null); ok.type = 'submit'; ok.onclick = null;
+      actions.append(ok, button('Cancel', close));
+      form.append(caption, input, actions);
+      if (!fileMenu.focused) { fileMenu.focused = true; queueMicrotask(() => { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }); }
+      return form;
+    };
+    switch (fileMenu.mode) {
+      case 'menu': {
+        const actions = document.createElement('div'); actions.className = 'file-menu';
+        actions.append(button('Rename / move', () => { fileMenu = { id: file.id, mode: 'rename' }; render(); }));
+        if (folder) actions.append(button(`Rename folder ${folder}/`, () => { fileMenu = { id: file.id, mode: 'folder' }; render(); }));
+        actions.append(button('Delete', () => { fileMenu = { id: file.id, mode: 'delete' }; render(); }, 'danger-text'));
+        panel.append(actions);
+        break;
+      }
+      case 'rename':
+        panel.append(textForm('New path (use / for folders)', file.path, 'Rename', async value => {
+          await session.renameFile(file.id, value); retitleModel(file.id);
+          return `Renamed to ${value}.`;
+        }));
+        break;
+      case 'folder': {
+        const count = [...session.files.values()].filter(f => f.path.toLowerCase().startsWith(folder.toLowerCase() + '/')).length;
+        panel.append(textForm(`Rename folder ${folder}/ (${count} file${count === 1 ? '' : 's'})`, folder, 'Rename folder', async value => {
+          const moved = await session.renameFolder(folder, value); for (const id of models.keys()) retitleModel(id);
+          return `Moved ${moved} file${moved === 1 ? '' : 's'} to ${value}/.`;
+        }));
+        break;
+      }
+      case 'delete': {
+        const text = document.createElement('p');
+        text.textContent = file.deleted ? `Discard your unsaved version of ${file.path}? Someone else already deleted it.` : session.dirty(file.id) ? `Save or reload ${file.path} before deleting it.` : `Delete ${file.path} from the vault?`;
+        const actions = document.createElement('div'); actions.className = 'delete-actions';
+        const confirm = button('Delete file', () => act(async () => { await session.deleteFile(file.id); dropModel(file.id); fileMenu = null; return `Deleted ${file.path}.`; }), 'danger');
+        confirm.disabled = busy || (!file.deleted && session.dirty(file.id));
+        actions.append(confirm, button('Cancel', close));
+        panel.classList.add('file-panel-danger'); panel.append(text, actions);
+        break;
+      }
+    }
+    return panel;
+  }
+  // A rename keeps the model (and its undo history); only the language follows the new extension.
+  function retitleModel(id) { const model = models.get(id), file = session.files.get(id); if (model && file) monaco.editor.setModelLanguage(model, file.language); }
+
+  function renameProjectForm(project) {
+    const form = document.createElement('form'); form.className = 'delete-confirm rename-confirm';
+    const input = document.createElement('input'); input.id = 'rename-project-name'; input.maxLength = 64; input.autocomplete = 'off'; input.spellcheck = false;
+    input.value = renaming.value; input.setAttribute('aria-label', `New name for ${project.name}`);
+    input.oninput = () => { renaming.value = input.value; };
+    const ok = document.createElement('button'); ok.type = 'submit'; ok.textContent = 'Rename project'; ok.disabled = busy;
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.onclick = () => { renaming = null; render(); };
+    form.onsubmit = event => {
+      event.preventDefault();
+      const name = input.value.trim();
+      if (!name || name === project.name) { renaming = null; render(); return; }
+      act(async () => { await session.renameProject(project.projectId, name); renaming = null; return `Renamed project to "${name}".`; });
+    };
+    const actions = document.createElement('div'); actions.className = 'delete-actions'; actions.append(ok, cancel);
+    form.append(input, actions);
+    return form;
   }
 
   // Deleting needs the exact name typed (paste is blocked in this window, so it is always typed).
@@ -205,6 +293,7 @@ export async function startVault(transport, metadata, onSession) {
   function save() {
     const f = active();
     if (!f || session.locked || !session.dirty(f.id)) return;
+    if (f.deleted) { act(async () => { await session.saveAsNew(f.id); dropModel(f.id); return `${f.path} was deleted by someone else; saved your version as a new file.`; }); return; }
     act(async () => (await session.save(f.id)) ? `Saved ${f.path} to the vault as a new encrypted revision.` : 'No unsaved edits.');
   }
   $('unlock').onclick = unlock;

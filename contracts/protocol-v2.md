@@ -72,4 +72,25 @@ Not in v2: deleting or renaming files and projects (project deletion was added l
 - `confirmName` must equal the project's name exactly, including letter case. A mismatch returns `InvalidRequest`, and the error never echoes the name.
 - The project and all its revisions are deleted for every connection. Later requests for it return `NotFound`, and its name can be reused.
 - `filesRemoved` is false when some encrypted files were in use. The project is already gone from the catalog, and the service removes the files later, at the latest on its next start. See `contracts/storage-v1.md`.
-- Deleting or renaming files, and renaming projects, are still not in v2.
+- Deleting or renaming files and renaming projects were added later; see below.
+
+## Addition: file and project rename, file delete (owner request, 2026-10-18)
+
+See `docs/files-history-builds-design.md`, section 1. Every operation also takes `capability`.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| RenameFile | `projectId`, `fileId`, `newName`, `expectedSnapshotId` | `snapshotId` |
+| RenameFolder | `projectId`, `oldPrefix`, `newPrefix`, `expectedSnapshotId` | `snapshotId`, `renamed` |
+| DeleteFile | `projectId`, `fileId`, `expectedSnapshotId` | `snapshotId` |
+| RenameProject | `projectId`, `newName` | `{}` |
+
+- **RenameFile** moves a file to any valid path. Its file id and current revision are kept: only the encrypted manifest changes, and no content is re-encrypted.
+- **RenameFolder** moves every file whose path starts with `oldPrefix/` (case-insensitive) in one commit. No such file returns `NotFound`; a resulting path that is too long or too deep returns `InvalidRequest`.
+- **DeleteFile** removes the file from the snapshot. Until per-file history exists, a deleted file can't be restored through the protocol. Its encrypted records stay on disk until the project is deleted, as before.
+- **Errors:**
+  - a name taken (case-insensitive) or a file/folder clash: `AlreadyExists`;
+  - an unknown file: `NotFound`;
+  - a stale `expectedSnapshotId`: `RevisionConflict`.
+
+  Errors never echo names.

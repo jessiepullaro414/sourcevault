@@ -137,6 +137,23 @@ public sealed class ProjectCatalog
         }
     }
 
+    /// <summary>Renames a project. Only the encrypted index changes. A letter-case-only change of its own name is allowed.</summary>
+    public void RenameProject(Guid projectId, string newName)
+    {
+        ValidateProjectName(newName);
+        lock (createGate)
+        {
+            var state = ReadIndex() ?? throw new KeyNotFoundException();
+            int index = state.Projects.FindIndex(p => p.ProjectId == projectId);
+            if (index < 0) throw new KeyNotFoundException();
+            if (state.Projects.Any(p => p.ProjectId != projectId && StringComparer.OrdinalIgnoreCase.Equals(p.Name, newName))) throw new NameExistsException();
+            if (state.Projects[index].Name == newName) return;
+            var projects = state.Projects.ToList();
+            projects[index] = (projectId, newName);
+            WriteIndex(state with { Projects = projects });
+        }
+    }
+
     /// <summary>Removes directories of deleted projects and clears their tombstones. Returns how many remain pending.</summary>
     public int PurgeDeleted()
     {

@@ -98,6 +98,13 @@ If you see a lock screen instead, it explains why:
 - **Choose a project** from the list, or type a name and **Create project**. Names are 1–64 characters.
 - **Open a file** from the Explorer. Only files you open are decrypted; closing a tab removes its text from the editor.
 - **+ New file** creates a file. Use `/` for folders (`src/app/main.ts`), up to 260 characters and 32 levels. Names can't contain `\ : * ? " < > |`. Names aren't case-sensitive, so `Main.ts` and `main.ts` count as the same name.
+- **Rename, move or delete a file:** click **⋯** on its row in the Explorer.
+  - **Rename / move** takes a full path, so `src/a.ts` → `lib/a.ts` moves it.
+  - **Rename folder** moves every file in that file's folder at once.
+  - **Delete** asks first, and is refused while the file has unsaved edits. Deleted files can't be restored yet; history is coming.
+  - Open tabs and unsaved edits follow a renamed file.
+- **If someone else deletes a file you have unsaved edits in,** it shows *Deleted by someone else*. **Save** creates it again with your text, or **⋯ → Delete** discards your version.
+- **Rename a project:** **Switch project** → **Rename…** next to it.
 - **Switch project** returns to the project list. Save or reload edited files first.
 - **Save** with **Ctrl+S** or the Save button. Each save becomes a new encrypted, unchangeable revision in the vault. Until you save, your edits exist only in the editor; a dot on the tab means unsaved changes.
 - Limits: 256 KiB per file (UTF-8 text), 1,024 files per project, 256 projects.
@@ -111,7 +118,6 @@ In the project list (**Switch project**), click **Delete…** next to the projec
 - Anyone else who has the project open gets "no longer exists" on their next action.
 - If some encrypted files were in use, the project disappears at once and the service removes the leftover files later (at the latest when it next starts).
 - Like any deletion, it doesn't securely erase data from an SSD. The leftover data is encrypted, though, and the service no longer lists it.
-- Files can't be deleted or renamed individually yet.
 
 ### Import an existing folder
 
@@ -194,4 +200,4 @@ Different files never conflict: two people can edit different files of the same 
 - **No recovery, by design.** No backup tool and no migration to another computer either: if this computer's TPM is cleared or the computer is lost, the vault is gone.
 - **Not yet verified:** that everything works after a reboot (automatic start at boot), and an independent security review.
 - **Builds are not available yet.** The vault stores and edits files only.
-- **Projects can be deleted; files can't** be deleted or renamed yet, and projects can't be renamed.
+- **No file history yet:** a deleted file or an overwritten version can't be brought back. Per-file history and merging are next.

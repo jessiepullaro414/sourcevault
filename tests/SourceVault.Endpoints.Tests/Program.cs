@@ -116,6 +116,45 @@ Test("DeleteProject: exact name required, other connections then get NotFound, t
     }
 });
 
+Test("RenameFile, RenameFolder, DeleteFile and RenameProject over the pipe", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var created = c.Ok("CreateProject", ("name", "Ops"));
+        var project = created.GetProperty("projectId").GetString()!;
+        string snap = created.GetProperty("snapshotId").GetString()!;
+        string Create(string name) { var r = c.Ok("CreateFile", ("projectId", project), ("name", name), ("expectedSnapshotId", snap), ("contentBase64", B64("synthetic " + name))); snap = r.GetProperty("snapshotId").GetString()!; return r.GetProperty("fileId").GetString()!; }
+        var a = Create("src/app/a.ts"); var b = Create("src/app/b.ts"); var readme = Create("README.md");
+        Assert(c.Code("RenameFile", ("projectId", project), ("fileId", a), ("newName", "src/app/b.ts"), ("expectedSnapshotId", snap)) == "AlreadyExists", "rename onto a file");
+        Assert(c.Code("RenameFile", ("projectId", project), ("fileId", a), ("newName", "../a.ts"), ("expectedSnapshotId", snap)) == "InvalidRequest", "bad name");
+        Assert(c.Code("RenameFile", ("projectId", project), ("fileId", Guid.NewGuid().ToString("D")), ("newName", "z.ts"), ("expectedSnapshotId", snap)) == "NotFound", "unknown file");
+        Assert(c.Code("RenameFile", ("projectId", project), ("fileId", a), ("newName", "z.ts"), ("expectedSnapshotId", Guid.NewGuid().ToString("D"))) == "RevisionConflict", "stale");
+        snap = c.Ok("RenameFile", ("projectId", project), ("fileId", readme), ("newName", "docs/README.md"), ("expectedSnapshotId", snap)).GetProperty("snapshotId").GetString()!;
+        var folder = c.Ok("RenameFolder", ("projectId", project), ("oldPrefix", "SRC/app"), ("newPrefix", "lib"), ("expectedSnapshotId", snap));
+        Assert(folder.GetProperty("renamed").GetInt32() == 2, "two files moved");
+        snap = folder.GetProperty("snapshotId").GetString()!;
+        Assert(c.Code("RenameFolder", ("projectId", project), ("oldPrefix", "nothing"), ("newPrefix", "x"), ("expectedSnapshotId", snap)) == "NotFound", "empty folder");
+        Assert(c.Code("RenameFolder", ("projectId", project), ("oldPrefix", "lib"), ("newPrefix", "docs/README.md"), ("expectedSnapshotId", snap)) == "AlreadyExists", "folder onto a file");
+        var files = c.Ok("ListFiles", ("projectId", project)).GetProperty("files").EnumerateArray().ToDictionary(f => f.GetProperty("fileId").GetString()!, f => f.GetProperty("name").GetString()!);
+        Assert(files[a] == "lib/a.ts" && files[b] == "lib/b.ts" && files[readme] == "docs/README.md", "names after moves");
+        var opened = c.Ok("OpenDocument", ("projectId", project), ("fileId", a), ("expectedSnapshotId", snap));
+        Assert(Encoding.UTF8.GetString(opened.GetProperty("contentBase64").GetBytesFromBase64()) == "synthetic src/app/a.ts", "content unchanged by moves");
+        snap = c.Ok("DeleteFile", ("projectId", project), ("fileId", b), ("expectedSnapshotId", snap)).GetProperty("snapshotId").GetString()!;
+        Assert(c.Code("OpenDocument", ("projectId", project), ("fileId", b), ("expectedSnapshotId", snap)) == "NotFound", "deleted");
+        Assert(c.Code("DeleteFile", ("projectId", project), ("fileId", b), ("expectedSnapshotId", snap)) == "NotFound", "deleted twice");
+        var raw = c.Raw("RenameProject", ("projectId", project), ("newName", "Ops"));
+        Assert(raw.Contains("\"Ok\""), "same name is fine");
+        c.Ok("CreateProject", ("name", "Other"));
+        raw = c.Raw("RenameProject", ("projectId", project), ("newName", "OTHER"));
+        Assert(raw.Contains("\"AlreadyExists\"") && !raw.Contains("Other", StringComparison.OrdinalIgnoreCase), "project name clash, no name echoed");
+        c.Ok("RenameProject", ("projectId", project), ("newName", "Ops renamed"));
+        Assert(c.Ok("ListProjects").GetProperty("projects").EnumerateArray().Any(p => p.GetProperty("name").GetString() == "Ops renamed"), "renamed project listed");
+    }
+});
+
 Test("authorization: no session, wrong capability and a second BeginSession", () =>
 {
     var (server, pipe) = StartServer();
@@ -361,6 +400,28 @@ Test("controller: deleting a project forgets its opened files", () =>
         Assert(Run(ctl.DeleteProjectAsync(project, "Gone")) is { Ok: true, Value: true }, "deleted");
         Assert(Run(ctl.SaveDocumentAsync(project, a, "A2")).Code == "NotOpen", "opened entry dropped");
         Assert(Run(ctl.ListProjectsAsync()).Value!.Count == 0, "listing empty");
+    }
+});
+
+Test("controller: rename keeps an open file saveable; deleting a file someone else changed is Conflict", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("FileOps")).Value!.ProjectId;
+        var a = Run(ctl.CreateFileAsync(project, "src/a.ts", "A1")).Value!.FileId;
+        var b = Run(ctl.CreateFileAsync(project, "src/b.ts", "B1")).Value!.FileId;
+        Assert(Run(ctl.RenameFileAsync(project, a, "lib/a.ts")).Ok, "rename");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A2")).Ok, "still saves after a rename");
+        Assert(Run(ctl.RenameFolderAsync(project, "src", "old")) is { Ok: true, Value: 1 }, "folder rename");
+        Assert(Run(ctl.RenameProjectAsync(project, "FileOps 2")).Ok, "project rename");
+        ExternalEdit(pipe, project, b, "B-by-someone-else");
+        Assert(Run(ctl.DeleteFileAsync(project, b)).Code == "Conflict", "changed elsewhere since opened");
+        Assert(Run(ctl.DeleteFileAsync(project, a)).Ok, "delete");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "A3")).Code == "NotOpen", "deleted file forgotten");
+        Assert(Run(ctl.ListFilesAsync(project)).Value!.Select(f => f.Name).SequenceEqual(new[] { "old/b.ts" }), "remaining");
     }
 });
 

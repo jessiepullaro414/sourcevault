@@ -111,6 +111,54 @@ public sealed class EditorVaultController : IDisposable
         return new("Ok", r.Body.GetProperty("filesRemoved").GetBoolean());
     });
 
+    public Task<VaultResult<bool>> RenameProjectAsync(Guid projectId, string newName, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("RenameProject", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteString("newName", newName); }, null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<bool>("Ok", true) : Fail<bool>(r.Code);
+    });
+
+    /// <summary>Renames or moves a file. Its content and revision are unchanged, so an open copy stays valid.</summary>
+    public Task<VaultResult<bool>> RenameFileAsync(Guid projectId, Guid fileId, string newName, CancellationToken ct = default) => Guarded(() =>
+        ProjectChangeAsync(projectId, "RenameFile", null, w => { w.WriteString("fileId", fileId.ToString("D")); w.WriteString("newName", newName); }, _ => true, ct));
+
+    /// <summary>Renames every file under a folder. Returns how many files moved.</summary>
+    public Task<VaultResult<int>> RenameFolderAsync(Guid projectId, string oldPrefix, string newPrefix, CancellationToken ct = default) => Guarded(() =>
+        ProjectChangeAsync(projectId, "RenameFolder", null, w => { w.WriteString("oldPrefix", oldPrefix); w.WriteString("newPrefix", newPrefix); },
+            body => body.GetProperty("renamed").GetInt32(), ct));
+
+    /// <summary>Deletes a file. <c>Conflict</c>: it is open here and someone else changed it since it was opened.</summary>
+    public Task<VaultResult<bool>> DeleteFileAsync(Guid projectId, Guid fileId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var result = await ProjectChangeAsync(projectId, "DeleteFile", files =>
+        {
+            var file = files.FirstOrDefault(f => f.FileId == fileId);
+            if (file is null) return "NotFound";
+            return opened.TryGetValue((projectId, fileId), out var basedOn) && file.RevisionId != basedOn ? "Conflict" : null;
+        }, w => w.WriteString("fileId", fileId.ToString("D")), _ => true, ct).ConfigureAwait(false);
+        if (result.Ok) opened.Remove((projectId, fileId));
+        return result;
+    });
+
+    // List, optionally check the listing, then commit against that snapshot; a commit racing in between is retried once.
+    private async Task<VaultResult<T>> ProjectChangeAsync<T>(Guid projectId, string operation, Func<IReadOnlyList<FileSummary>, string?>? check,
+        Action<Utf8JsonWriter> fields, Func<JsonElement, T> result, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+            if (!list.Ok) return Fail<T>(list.Code);
+            if (check?.Invoke(list.Value!.Files) is { } refused) return Fail<T>(refused);
+            var r = await client!.CallAsync(operation, w =>
+            {
+                w.WriteString("projectId", projectId.ToString("D")); fields(w);
+                w.WriteString("expectedSnapshotId", list.Value!.SnapshotId.ToString("D"));
+            }, null, ct).ConfigureAwait(false);
+            if (r.Code == "RevisionConflict") continue;
+            return r.Ok ? new VaultResult<T>("Ok", result(r.Body)) : Fail<T>(r.Code);
+        }
+        return Fail<T>("RevisionConflict");
+    }
+
     public Task<VaultResult<IReadOnlyList<FileSummary>>> ListFilesAsync(Guid projectId, CancellationToken ct = default) => Guarded(async () =>
     {
         var r = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);

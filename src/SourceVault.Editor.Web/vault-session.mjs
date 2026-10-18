@@ -140,10 +140,11 @@ export class VaultSession {
     const next = new Map();
     for (const info of listed) {
       const existing = this.files.get(info.fileId);
-      next.set(info.fileId, existing ? { ...existing, path: info.name, byteLength: info.byteLength }
-        : { id: info.fileId, path: info.name, language: languageFor(info.name), byteLength: info.byteLength, loaded: false, text: null, saved: null, revision: 0, conflict: false });
+      next.set(info.fileId, existing ? { ...existing, path: info.name, language: languageFor(info.name), byteLength: info.byteLength, deleted: false }
+        : { id: info.fileId, path: info.name, language: languageFor(info.name), byteLength: info.byteLength, loaded: false, text: null, saved: null, revision: 0, conflict: false, deleted: false });
     }
-    for (const [id, f] of this.files) if (!next.has(id) && this.dirty(id)) next.set(id, f);
+    // Someone else deleted a file this editor holds a draft of: keep the draft, marked, so it can be saved as a new file.
+    for (const [id, f] of this.files) if (!next.has(id) && this.dirty(id)) next.set(id, { ...f, deleted: true });
     this.files = next;
     this.openIds = this.openIds.filter(id => this.files.has(id));
     if (this.activeId && !this.files.has(this.activeId)) this.activeId = this.openIds.at(-1) ?? null;
@@ -199,10 +200,53 @@ export class VaultSession {
     }
   }
 
+  async renameProject(projectId, newName) {
+    await this.#call('renameProject', { projectId, newName });
+    await this.refreshProjects();
+  }
+
+  /** Renames or moves a file. Its text, draft and tab stay as they are; only the path changes. */
+  async renameFile(id, newName) {
+    const f = this.file(id);
+    await this.#call('renameFile', { projectId: this.project.projectId, fileId: id, newName });
+    f.path = newName; f.language = languageFor(newName);
+  }
+
+  /** Renames every file under `folder` ("src/app") to `newFolder`. Returns how many files moved. */
+  async renameFolder(folder, newFolder) {
+    const result = await this.#call('renameFolder', { projectId: this.project.projectId, name: folder, newName: newFolder });
+    await this.#refreshFiles();
+    return result.renamed;
+  }
+
+  /** Deletes a file from the vault. Refused with unsaved edits; Conflict if someone else changed it since it was opened. */
+  async deleteFile(id) {
+    const f = this.file(id);
+    if (!f.deleted && this.dirty(id)) throw new VaultError('UnsavedChanges'); // a draft of a file deleted elsewhere may be discarded
+    if (!f.deleted) await this.#call('deleteFile', { projectId: this.project.projectId, fileId: id });
+    this.#forget(id);
+  }
+
+  /** A draft whose file someone else deleted: saves it as a new file at the same path. */
+  async saveAsNew(id) {
+    const f = this.file(id);
+    if (!f.deleted) throw new VaultError('NotDeleted');
+    const text = f.text;
+    this.#forget(id);
+    return this.createFile(f.path, text);
+  }
+
+  #forget(id) {
+    this.files.delete(id);
+    this.openIds = this.openIds.filter(x => x !== id);
+    if (this.activeId === id) this.activeId = this.openIds.at(-1) ?? null;
+    if (this.project) this.project = { ...this.project, fileCount: Math.max(0, this.project.fileCount - 1) };
+  }
+
   async createFile(name, text = '') {
     const created = await this.#call('createFile', { projectId: this.project.projectId, name, text });
     this.files.set(created.fileId, { id: created.fileId, path: created.name, language: languageFor(created.name),
-      byteLength: new TextEncoder().encode(text).length, loaded: true, text, saved: text, revision: 0, conflict: false });
+      byteLength: new TextEncoder().encode(text).length, loaded: true, text, saved: text, revision: 0, conflict: false, deleted: false });
     this.openIds.push(created.fileId); this.activeId = created.fileId;
     if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + 1 };
     return created.fileId;

@@ -378,6 +378,69 @@ Test("catalog: a version 1 index (before deletion) still opens and upgrades on t
     Assert(new ProjectCatalog(v, counting).OpenAndVerify().Select(p => p.Name).SequenceEqual(new[] { "Second" }));
 });
 
+Test("changes: rename keeps the file id, revision and content; names can be swapped; folders move", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    s = f.Store.CommitMany(s.SnapshotId, [("a.ts", Text("synthetic-a")), ("b.ts", Text("synthetic-b")), ("src/x.ts", Text("synthetic-x"))]);
+    var a = s.Files.Single(x => x.LogicalName == "a.ts"); var b = s.Files.Single(x => x.LogicalName == "b.ts");
+    int records = Directory.GetFiles(f.Path, "*.svr").Length;
+    var swapped = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "b.ts"), new StoreChange.Rename(b.FileId, "a.ts")]);
+    Assert(Directory.GetFiles(f.Path, "*.svr").Length == records + 1); // only a new manifest: nothing re-encrypted
+    var a2 = swapped.Files.Single(x => x.FileId == a.FileId);
+    Assert(a2.LogicalName == "b.ts" && a2.RevisionId == a.RevisionId && Encoding.UTF8.GetString(f.Store.Open(swapped.SnapshotId, a.FileId)) == "synthetic-a");
+    var x = swapped.Files.Single(e => e.LogicalName == "src/x.ts");
+    var moved = f.Store.CommitChanges(swapped.SnapshotId, [new StoreChange.Rename(x.FileId, "lib/deep/x.ts")]);
+    Assert(moved.Files.Single(e => e.FileId == x.FileId).LogicalName == "lib/deep/x.ts");
+    var cased = f.Store.CommitChanges(moved.SnapshotId, [new StoreChange.Rename(a.FileId, "B.ts")]); // letter case only
+    Assert(cased.Files.Single(e => e.FileId == a.FileId).LogicalName == "B.ts");
+});
+
+Test("changes: delete, and rename/write/delete together in one commit", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    s = f.Store.CommitMany(s.SnapshotId, [("a.ts", Text("synthetic-a")), ("b.ts", Text("synthetic-b"))]);
+    var a = s.Files.Single(x => x.LogicalName == "a.ts"); var b = s.Files.Single(x => x.LogicalName == "b.ts");
+    var gone = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Delete(a.FileId)]);
+    Assert(gone.Files.Count == 1 && gone.Files[0].FileId == b.FileId);
+    Reject<KeyNotFoundException>(() => f.Store.Open(gone.SnapshotId, a.FileId));
+    // Delete b, then a write takes over its old name as a new file.
+    var mixed = f.Store.CommitChanges(gone.SnapshotId, [new StoreChange.Delete(b.FileId), new StoreChange.Write("b.ts", Text("synthetic-new"))]);
+    Assert(mixed.Files.Single().FileId != b.FileId && Encoding.UTF8.GetString(f.Store.Open(mixed.SnapshotId, mixed.Files[0].FileId)) == "synthetic-new");
+    var empty = f.Store.CommitChanges(mixed.SnapshotId, [new StoreChange.Delete(mixed.Files[0].FileId)]);
+    Assert(empty.Files.Count == 0 && f.Store.List().SnapshotId == empty.SnapshotId);
+});
+
+Test("changes: clashes, unknown ids and stale snapshots are refused before anything is written", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    s = f.Store.CommitMany(s.SnapshotId, [("a.ts", Text("synthetic-a")), ("b.ts", Text("synthetic-b")), ("dir/c.ts", Text("synthetic-c"))]);
+    var a = s.Files.Single(x => x.LogicalName == "a.ts");
+    int records = Directory.GetFiles(f.Path, "*.svr").Length;
+    Reject<NameExistsException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "B.TS")]));
+    Reject<NameExistsException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "dir")])); // a file where a folder is
+    Reject<NameExistsException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "b.ts/inner.ts")])); // a folder where a file is
+    Reject<NameExistsException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "z.ts"), new StoreChange.Write("dir", Text("synthetic"))]));
+    Reject<KeyNotFoundException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Delete(Guid.NewGuid())]));
+    Reject<ArgumentException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "x.ts"), new StoreChange.Delete(a.FileId)]));
+    Reject<ArgumentException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "../x.ts")]));
+    Reject<ArgumentException>(() => f.Store.CommitChanges(s.SnapshotId, []));
+    Reject<RevisionConflictException>(() => f.Store.CommitChanges(Guid.NewGuid(), [new StoreChange.Delete(a.FileId)]));
+    Assert(Directory.GetFiles(f.Path, "*.svr").Length == records && f.Store.List().SnapshotId == s.SnapshotId);
+});
+
+Test("catalog: rename project; names stay unique; letter-case change of its own name allowed", () =>
+{
+    var t = TwoProjects(); var c = new ProjectCatalog(t.Vault, counting);
+    c.OpenAndVerify();
+    Reject<NameExistsException>(() => c.RenameProject(t.A.ProjectId, "BETA"));
+    Reject<KeyNotFoundException>(() => c.RenameProject(Guid.NewGuid(), "Gamma"));
+    Reject<ArgumentException>(() => c.RenameProject(t.A.ProjectId, " padded"));
+    c.RenameProject(t.A.ProjectId, "ALPHA");
+    c.RenameProject(t.B.ProjectId, "Gamma");
+    var after = new ProjectCatalog(t.Vault, counting).OpenAndVerify();
+    Assert(after.Select(p => p.Name).SequenceEqual(new[] { "ALPHA", "Gamma" }) && after[0].ProjectId == t.A.ProjectId && after[0].Snapshot.Files.Count == 1);
+});
+
 foreach (var target in new[] { "LOCK", "HEAD", "blob", "root" })
 {
     var f = Fixture(); var s = f.Store.Initialize();

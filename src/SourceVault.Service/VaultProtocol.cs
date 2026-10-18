@@ -79,6 +79,10 @@ internal sealed class VaultProtocol
                 "CreateFile" => CreateFile(request),
                 "ImportFiles" => ImportFiles(request),
                 "DeleteProject" => DeleteProject(request),
+                "RenameProject" => RenameProject(request),
+                "RenameFile" => RenameFile(request),
+                "RenameFolder" => RenameFolder(request),
+                "DeleteFile" => DeleteFile(request),
                 "ApplyEdits" => ApplyEdits(request),
                 "RequestBuild" or "GetBuildStatus" => Error(request, "Unavailable"),
                 _ => Error(request, "UnsupportedOperation"),
@@ -153,6 +157,65 @@ internal sealed class VaultProtocol
         catch (KeyNotFoundException) { projects.TryRemove(id, out _); throw; }
         projects.TryRemove(id, out _);
         return Ok(request, w => w.WriteBoolean("filesRemoved", removed));
+    }
+
+    private ProtocolResponse RenameProject(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "newName");
+        var id = Id(request.Body, "projectId");
+        var name = Text(request.Body, "newName");
+        try { ProjectCatalog.ValidateProjectName(name); } catch (ArgumentException) { throw new RequestException("InvalidRequest"); }
+        if (!projects.ContainsKey(id)) throw new KeyNotFoundException();
+        catalog.RenameProject(id, name);
+        return Ok(request, _ => { });
+    }
+
+    /// <summary>Renames or moves one file. Its id and revision are kept; only the encrypted manifest changes.</summary>
+    private ProtocolResponse RenameFile(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "newName", "expectedSnapshotId");
+        var store = Project(request.Body);
+        var fileId = Id(request.Body, "fileId");
+        var name = Text(request.Body, "newName");
+        if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest");
+        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Rename(fileId, name)], null);
+    }
+
+    /// <summary>Renames every file under a folder path in one commit ("src/app" to "lib/app").</summary>
+    private ProtocolResponse RenameFolder(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "oldPrefix", "newPrefix", "expectedSnapshotId");
+        var store = Project(request.Body);
+        var oldPrefix = Text(request.Body, "oldPrefix");
+        var newPrefix = Text(request.Body, "newPrefix");
+        if (!RevisionStore.IsValidLogicalName(oldPrefix) || !RevisionStore.IsValidLogicalName(newPrefix)) throw new RequestException("InvalidRequest");
+        var expected = Id(request.Body, "expectedSnapshotId");
+        var current = store.List();
+        if (current.SnapshotId != expected) throw new RevisionConflictException();
+        var moved = current.Files.Where(f => f.LogicalName.StartsWith(oldPrefix + "/", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (moved.Count == 0) throw new KeyNotFoundException();
+        var changes = new List<StoreChange>();
+        foreach (var f in moved)
+        {
+            var name = newPrefix + f.LogicalName[oldPrefix.Length..];
+            if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest"); // too long or too deep
+            changes.Add(new StoreChange.Rename(f.FileId, name));
+        }
+        return Changed(request, store, expected, changes, w => w.WriteNumber("renamed", moved.Count));
+    }
+
+    private ProtocolResponse DeleteFile(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "expectedSnapshotId");
+        var store = Project(request.Body);
+        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Delete(Id(request.Body, "fileId"))], null);
+    }
+
+    // The store re-checks the expected snapshot under its lock; unknown ids are NotFound and clashes AlreadyExists.
+    private ProtocolResponse Changed(ParsedRequest request, RevisionStore store, Guid expected, IReadOnlyList<StoreChange> changes, Action<Utf8JsonWriter>? extra)
+    {
+        var next = store.CommitChanges(expected, changes);
+        return Ok(request, w => { w.WriteString("snapshotId", next.SnapshotId.ToString("D")); extra?.Invoke(w); });
     }
 
     private ProtocolResponse ListFiles(ParsedRequest request)
