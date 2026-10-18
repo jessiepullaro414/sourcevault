@@ -197,6 +197,28 @@ test('merge after a conflict: clean changes combine; overlaps are chosen; the sa
   assert.equal(session.file(util.id).mergedOnto, null, 'merge again from the latest version');
 });
 
+test('builds: targets, queue a build, it finishes with a log and an output folder; unknown targets; not set up', async () => {
+  const { host, session } = await opened();
+  host.buildMs = 20;
+  assert.deepEqual(await session.listBuildTargets(), ['linux', 'windows']);
+  await rejectsWith(session.requestBuild('mac'), 'NotFound');
+  const number = await session.requestBuild('linux');
+  assert.equal(number, 1);
+  assert.equal((await session.listBuilds())[0].state, 'running');
+  await new Promise(r => setTimeout(r, 60));
+  const status = await session.buildStatus(1);
+  assert.equal(status.state, 'succeeded'); assert.equal(status.artifactFiles, 3); assert.ok(status.artifactFolder.endsWith('\\1-linux'));
+  assert.match(await session.openBuildLog(1), /compiling 3 fictional file/);
+  host.buildFails = true;
+  await session.requestBuild('windows');
+  await new Promise(r => setTimeout(r, 60));
+  const builds = await session.listBuilds();
+  assert.deepEqual(builds.map(b => [b.buildNumber, b.state]), [[2, 'failed'], [1, 'succeeded']]);
+  await rejectsWith(session.openBuildLog(9), 'NotFound');
+  host.buildTargets = [];
+  await rejectsWith(session.listBuildTargets(), 'Unavailable');
+});
+
 test('user lock keeps drafts hidden; unlock reports files changed meanwhile as conflicts', async () => {
   const { host, session, projectId, byName } = await opened();
   const main = byName('main.ts');

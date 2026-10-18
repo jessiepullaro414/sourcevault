@@ -20,6 +20,19 @@ if ($DeleteVaultData) {
     if ((Read-Host 'Type DELETE VAULT to continue') -ne 'DELETE VAULT') { throw 'Not confirmed; nothing was removed.' }
 }
 
+$build = Get-Service -Name 'SourceVaultBuild' -ErrorAction SilentlyContinue
+if ($build) {
+    if ($build.Status -ne 'Stopped') {
+        & sc.exe stop SourceVaultBuild | Out-Null
+        $deadline = (Get-Date).AddSeconds(60)
+        do { Start-Sleep -Milliseconds 300; $build.Refresh() } while ($build.Status -ne 'Stopped' -and (Get-Date) -lt $deadline)
+        if ($build.Status -ne 'Stopped') { throw 'The build service did not stop (a build may be running); nothing was removed.' }
+    }
+    & sc.exe delete SourceVaultBuild | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe delete SourceVaultBuild failed with exit $LASTEXITCODE." }
+    Write-Output 'Removed the SourceVault build service. Build artifact folders are kept; remove them yourself if wanted.'
+}
+
 $service = Get-Service -Name 'SourceVault' -ErrorAction SilentlyContinue
 if ($service) {
     if ($service.Status -ne 'Stopped') {

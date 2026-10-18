@@ -38,6 +38,15 @@ The editor is not connected to the encrypted store. The editor preview holds syn
 
 Project deletion and importer source cleanup were added on 2026-10-18 (owner request). Vault projects are deleted with a typed exact-name confirmation through protocol v2 `DeleteProject`, using index tombstones so an interrupted deletion fails neither verification nor startup (index document version 2; version 1 still opens). `SourceVault.Import.exe --delete-source` deletes only imported files still identical to the verified vault copy, after a typed `DELETE`, overwriting each first; `.git`, skipped files and anything behind a link are kept. Both are covered by synthetic in-process tests only. They have not yet run against the installed service, and overwriting is not a secure erase on SSDs.
 
+File operations, history, merge and container builds were added on 2026-10-18 (owner-approved design: docs/files-history-builds-design.md).
+
+- **Files:** rename and move files and folders, delete files (restorable from the deleted list), and rename projects.
+- **History:** every save is recorded in per-file encrypted history (manifest schema 3; no record-format change), with a read-only comparison view and restore-as-draft. Schema 2 vaults upgrade on their next commit.
+- **Merge:** a three-way line merge resolves save conflicts; the merged save lands only on the revision it was merged with.
+- **Builds:** a separate build service, NT SERVICE\SourceVaultBuild (same binary, build-service role), holds Docker access. It runs builds in already-running, named containers configured by an administrator in build.json, publishes checked artifacts to an admin-set host folder, and returns logs that the vault service stores encrypted.
+- **Tests:** all of this is tested in process: the store, the protocol over real named pipes, the renderer, and builds against an in-memory container and a fake Docker Engine HTTP server on a named pipe.
+- **Not yet run on a real machine:** the installed build service, Docker group membership, real Docker engines (Windows containers: copying into a running Hyper-V-isolated container may be unsupported), and the WSL TLS script.
+
 ## Gates still open
 
 - Actual service host/virtual identity, key/vault/service ACLs, hardware key operations, restart/reboot, export denial, and cross-machine binding.

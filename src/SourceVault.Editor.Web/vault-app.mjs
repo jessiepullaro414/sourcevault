@@ -2,7 +2,7 @@
 // names and the text of files it opens. Nothing here logs or posts document text anywhere but the host bridge.
 import { VaultSession, languageFor as languageOf } from './vault-session.mjs';
 import { resolve } from './merge.mjs';
-import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, wireChrome, showLoadFailure } from './shell.mjs';
+import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure } from './shell.mjs';
 
 const UNLOCK_FAILURES = {
   ServiceNotInstalled: 'The SourceVault service is not installed on this computer.',
@@ -22,6 +22,18 @@ const LOCK_SCREENS = {
   closed: ['DISCONNECTED', 'The vault connection closed', KEPT],
 };
 const ACTIONS = { created: 'Created', edited: 'Saved', imported: 'Imported', restored: 'Restored', 'before-history': 'Version when history began' };
+const STATE_TEXT = { queued: 'queued', running: 'running', succeeded: 'succeeded', failed: 'failed', timedOut: 'timed out', rejected: 'refused', unavailable: 'could not run' };
+const BUILD_REASONS = {
+  ContainerNotRunning: 'the build container is not running', ContainerNotFound: 'the build container does not exist',
+  EngineUnavailable: 'the Docker engine could not be reached', EngineFailed: 'the Docker engine reported an error',
+  NetworkNotDisabled: 'the container has network access, which the build configuration does not allow',
+  PlatformMismatch: 'the container is not the configured platform', CleanupFailed: 'the container folders could not be emptied',
+  TimedOut: 'the build ran longer than allowed and was stopped', Artifacts: 'the output was refused (links, unsafe names, or too large)',
+  NotRunning: 'the SourceVault build service is not running', ConfigInvalid: 'the build configuration is invalid; ask your administrator',
+  UnknownTarget: 'that build target no longer exists', VaultError: 'the vault could not read the project',
+};
+const duration = (from, to) => { const s = Math.max(0, (new Date(to) - new Date(from)) / 1000); return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`; };
+const formatBytes = n => n < 1024 ? `${n} bytes` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
 const FAILURES = {
   NotFound: 'That item no longer exists in the vault.',
   LimitExceeded: 'Files are limited to 256 KiB.',
@@ -43,6 +55,7 @@ export async function startVault(transport, metadata, onSession) {
   let deleting = null; // { projectId, typed } while a delete confirmation is open in the picker
   let renaming = null; // { projectId, value } while a project rename is open in the picker
   let history = null, diffEditor = null; // the open history view: { fileId, path, language, deleted, revisions, more, page, selected, latestText, models }
+  let buildsView = null, buildTimer = null, logViewer = null, logModel = null; // the open builds view
   let merging = null; // the open merge view: { id, path, segments, conflicts, choices, theirsRevisionId }
   let showDeleted = false, deletedFiles = [], restoring = null; // the deleted-files view; restoring: { fileId, value } when the old path is taken
   let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
@@ -77,10 +90,10 @@ export async function startVault(transport, metadata, onSession) {
     $('unlock').disabled = busy;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
-    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging;
+    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging || !!buildsView;
     $('workspace-name').textContent = $('breadcrumb-root').textContent = session.project?.name ?? 'No project';
     $('project-heading').textContent = (session.project?.name ?? 'No project').toUpperCase();
-    $('new-file').disabled = $('switch-project').disabled = $('deleted-files').disabled = locked || busy || !hasProject;
+    $('new-file').disabled = $('switch-project').disabled = $('deleted-files').disabled = $('builds').disabled = locked || busy || !hasProject;
     $('lock').disabled = locked || busy;
 
     $('tabs').replaceChildren(); $('source-files').replaceChildren(); $('root-files').replaceChildren();
@@ -123,7 +136,7 @@ export async function startVault(transport, metadata, onSession) {
     $('files-detail').textContent = hasProject ? `${session.files.size} in project` : '—';
     $('language-detail').textContent = $('language-status').textContent = f ? languageLabel(f.language) : '—';
     document.body.classList.toggle('locked', locked);
-    renderHistory(); renderDeleted(); renderMerge();
+    renderHistory(); renderDeleted(); renderMerge(); renderBuilds();
     postStatus(session.metadata); // four numeric/boolean fields only; also drives the host's keep-alive
   }
 
@@ -342,6 +355,95 @@ export async function startVault(transport, metadata, onSession) {
     announce(`Merged ${path}. Review the result, then Save.`);
   };
 
+  // ---- builds: run the administrator's build targets on the saved project; output stays in the vault -------------
+  function openBuilds() {
+    act(async () => {
+      closeHistory(); showDeleted = false; merging = null;
+      let targets = [], note = null;
+      try { targets = await session.listBuildTargets(); }
+      catch (e) { if (e?.code === 'Unavailable') note = 'Builds are not set up on this computer, or the build service is not running. Ask your administrator.'; else throw e; }
+      buildsView = { targets, note, builds: targets.length ? await session.listBuilds() : [], selected: null, logText: null };
+      pollBuilds();
+    }, () => renderBuilds());
+  }
+  function closeBuilds() {
+    clearTimeout(buildTimer); buildTimer = null;
+    logViewer?.setModel(null); logModel?.dispose(); logModel = null;
+    buildsView = null;
+  }
+  // While a build is queued or running, refresh every 2 seconds (each refresh counts as session activity).
+  function pollBuilds() {
+    clearTimeout(buildTimer);
+    if (!buildsView || !buildsView.builds.some(b => b.state === 'queued' || b.state === 'running')) return;
+    buildTimer = setTimeout(async () => {
+      if (!buildsView || session.locked) return;
+      try {
+        const before = buildsView.builds;
+        buildsView.builds = await session.listBuilds();
+        const done = buildsView.builds.find(b => before.some(o => o.buildNumber === b.buildNumber && (o.state === 'queued' || o.state === 'running')) && b.state !== 'queued' && b.state !== 'running');
+        if (done) announce(`Build #${done.buildNumber} ${STATE_TEXT[done.state] ?? done.state}.`);
+      } catch { /* the next refresh or an explicit action reports problems */ }
+      renderBuilds(); pollBuilds();
+    }, 2000);
+  }
+  function selectBuild(build) {
+    act(async () => {
+      buildsView.selected = build.buildNumber;
+      const text = build.logAvailable ? await session.openBuildLog(build.buildNumber) : null;
+      logViewer ??= createLogViewer($('build-log'), 'Build output, read-only');
+      logViewer.setModel(null); logModel?.dispose();
+      logModel = monaco.editor.createModel(text ?? (build.state === 'queued' || build.state === 'running' ? 'The build has not finished yet.' : 'No output was recorded.'), 'plaintext');
+      logViewer.setModel(logModel);
+    }, () => renderBuilds());
+  }
+  function renderBuilds() {
+    const open = !!buildsView && !session.locked && !picking && !!session.project;
+    $('builds-view').hidden = !open;
+    if (!open) return;
+    $('builds-title').textContent = `Builds of ${session.project.name}`;
+    $('builds-caption').textContent = buildsView.note ?? 'Builds use the saved files in the vault (not unsaved edits). Output files go to the folder your administrator set; the build log stays encrypted here.';
+    const select = $('build-target');
+    if (select.options.length !== buildsView.targets.length) {
+      select.replaceChildren(...buildsView.targets.map(t => { const o = document.createElement('option'); o.value = o.textContent = t; return o; }));
+    }
+    select.disabled = $('build-start').disabled = busy || !buildsView.targets.length;
+    const list = $('builds-list'); list.replaceChildren();
+    if (!buildsView.builds.length) { const empty = document.createElement('li'); empty.className = 'project-empty'; empty.textContent = buildsView.targets.length ? 'No builds yet.' : ''; list.append(empty); }
+    for (const build of buildsView.builds) {
+      const item = document.createElement('li');
+      const button = document.createElement('button'); button.className = `history-item${build.buildNumber === buildsView.selected ? ' active' : ''}`; button.disabled = busy;
+      const title = document.createElement('strong');
+      const state = document.createElement('span'); state.className = `build-state ${build.state}`; state.textContent = STATE_TEXT[build.state] ?? build.state;
+      title.append(`#${build.buildNumber} · ${build.target} `, state);
+      const detail = document.createElement('span');
+      detail.textContent = [new Date(build.requestedAt).toLocaleString(), build.requestedBy, build.finishedAt ? duration(build.requestedAt, build.finishedAt) : null].filter(Boolean).join(' · ');
+      button.append(title, detail);
+      button.onclick = () => selectBuild(build);
+      item.append(button); list.append(item);
+    }
+    const selected = buildsView.builds.find(b => b.buildNumber === buildsView.selected);
+    const summary = $('build-summary'); summary.replaceChildren();
+    if (selected) {
+      const line = (label, value) => { const p = document.createElement('div'); const s = document.createElement('strong'); s.textContent = label + ': '; p.append(s, value); summary.append(p); };
+      line('Result', `${STATE_TEXT[selected.state] ?? selected.state}${selected.exitCode != null ? ` (exit code ${selected.exitCode})` : ''}${selected.reason ? ` — ${BUILD_REASONS[selected.reason] ?? BUILD_REASONS[selected.reason.replace(/^Artifacts.*/, 'Artifacts')] ?? selected.reason}` : ''}`);
+      if (selected.artifactFolder) { const code = document.createElement('code'); code.textContent = selected.artifactFolder; line(`Output (${selected.artifactFiles} file${selected.artifactFiles === 1 ? '' : 's'}, ${formatBytes(selected.artifactBytes)})`, code); }
+      if (selected.logTruncated) line('Log', 'only the end of the output was kept');
+    } else summary.textContent = buildsView.builds.length ? 'Choose a build to see its result and output.' : '';
+  }
+  $('builds').onclick = openBuilds;
+  $('builds-close').onclick = () => { closeBuilds(); render(); };
+  $('build-start').onclick = () => {
+    const target = $('build-target').value;
+    if (!target || !buildsView) return;
+    act(async () => {
+      const number = await session.requestBuild(target);
+      buildsView.builds = await session.listBuilds();
+      buildsView.selected = number;
+      pollBuilds();
+      return `Build #${number} queued on ${target}. It uses the saved files${session.dirtyIds.length ? '; your unsaved edits are not included' : ''}.`;
+    });
+  };
+
   // ---- deleted files ---------------------------------------------------------------------------------------------
   function renderDeleted() {
     $('deleted-view').hidden = !showDeleted || session.locked || picking || !session.project;
@@ -381,7 +483,7 @@ export async function startVault(transport, metadata, onSession) {
       return `Restored ${name}.`;
     });
   }
-  $('deleted-files').onclick = () => act(async () => { deletedFiles = await session.listDeleted(); closeHistory(); showDeleted = true; restoring = null; });
+  $('deleted-files').onclick = () => act(async () => { deletedFiles = await session.listDeleted(); closeHistory(); closeBuilds(); showDeleted = true; restoring = null; });
   $('deleted-close').onclick = () => { showDeleted = false; restoring = null; render(); };
 
   // A rename keeps the model (and its undo history); only the language follows the new extension.
@@ -482,7 +584,7 @@ export async function startVault(transport, metadata, onSession) {
   $('conflict-keep').onclick = () => { const f = active(); if (f) { keepEditing.add(f.id); render(); announce('Keeping your edits. Saving will still conflict; reload to take their version.'); } };
   $('switch-project').onclick = () => {
     if (session.dirtyIds.length) { announce(FAILURES.UnsavedChanges); return; }
-    act(async () => { await session.refreshProjects(); closeHistory(); showDeleted = false; merging = null; picking = true; });
+    act(async () => { await session.refreshProjects(); closeHistory(); closeBuilds(); showDeleted = false; merging = null; picking = true; });
   };
   $('new-file').onclick = () => { $('new-file-form').hidden = false; $('new-file-name').value = ''; $('new-file-name').focus(); };
   $('new-file-form').onsubmit = event => {
@@ -499,7 +601,7 @@ export async function startVault(transport, metadata, onSession) {
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { closeHistory(); showDeleted = false; merging = null; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { closeHistory(); closeBuilds(); showDeleted = false; merging = null; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
   wireChrome(() => editor, { onSave: save, isLocked: () => session.locked });
 

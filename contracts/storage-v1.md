@@ -70,3 +70,10 @@ See `docs/files-history-builds-design.md`, section 2. The record format and code
 - **Readers** accept schema 2 and 3. Writers always write schema 3.
 - History records are verified when read, not on every operation: a missing or altered history record fails only operations that read that file's history.
 - **Cost:** the first save of an existing file in a store instance decrypts its newest history record, which is one TPM unwrap. Later saves use the cached copy.
+
+## Addition: build logs (2026-10-18)
+
+- **Layout:** the vault root may also hold `builds\<projectId>\`, one `RevisionStore` per project, created on its first build. Its store id is derived from the project id (SHA-256 of a fixed label and the id, first 16 bytes), so its records cannot be mistaken for the project's own.
+- **Contents:** `builds.json` (version 1: the 100 newest build records) and `logs/<n>.log`. Both are ordinary encrypted documents, so the record format is unchanged.
+- **Verification:** a build-log folder must belong to a listed or tombstoned project; anything else fails as a layout failure. Its contents are verified when read.
+- **Deletion:** deleting a project removes its build-log folder along with the project folder, under the same tombstone.

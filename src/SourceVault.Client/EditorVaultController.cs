@@ -14,6 +14,8 @@ public sealed record HistoryListing(IReadOnlyList<RevisionSummary> Revisions, bo
 public sealed record DeletedSummary(Guid FileId, string Name, int ByteLength, DateTimeOffset DeletedAt, string? DeletedBy);
 /// <summary>Inputs for a three-way merge: the text the editor's copy is based on, and the current text and revision.</summary>
 public sealed record MergeSources(string BaseText, string TheirsText, Guid TheirsRevision);
+public sealed record BuildSummary(int Number, string Target, string State, string? Reason, int? ExitCode, string? RequestedBy, DateTimeOffset RequestedAt,
+    DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated);
 
 /// <summary>Outcome of a controller call: a protocol code, or <c>Conflict</c> / <c>Locked</c> / <c>NotOpen</c>.</summary>
 public sealed record VaultResult<T>(string Code, T? Value)
@@ -214,6 +216,52 @@ public sealed class EditorVaultController : IDisposable
         if (!opened.ContainsKey((projectId, fileId))) return Fail<FileSummary>("NotOpen");
         return await SaveCoreAsync(projectId, fileId, text, theirsRevision, ct).ConfigureAwait(false);
     });
+
+    // ---- builds ---------------------------------------------------------------------------------------------------
+    public Task<VaultResult<IReadOnlyList<string>>> ListBuildTargetsAsync(CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("ListBuildTargets", null, null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<IReadOnlyList<string>>("Ok", r.Body.GetProperty("targets").EnumerateArray().Select(t => t.GetString()!).ToList()) : Fail<IReadOnlyList<string>>(r.Code);
+    });
+
+    /// <summary>Queues a build of the project's current saved files. Returns the build number.</summary>
+    public Task<VaultResult<int>> RequestBuildAsync(Guid projectId, string target, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("RequestBuild", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteString("target", target); }, null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<int>("Ok", r.Body.GetProperty("buildNumber").GetInt32()) : Fail<int>(r.Code);
+    });
+
+    public Task<VaultResult<IReadOnlyList<BuildSummary>>> ListBuildsAsync(Guid projectId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("ListBuilds", w => w.WriteString("projectId", projectId.ToString("D")), null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<IReadOnlyList<BuildSummary>>("Ok", r.Body.GetProperty("builds").EnumerateArray().Select(ReadBuild).ToList()) : Fail<IReadOnlyList<BuildSummary>>(r.Code);
+    });
+
+    public Task<VaultResult<BuildSummary>> GetBuildStatusAsync(Guid projectId, int buildNumber, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("GetBuildStatus", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteNumber("buildNumber", buildNumber); }, null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<BuildSummary>("Ok", ReadBuild(r.Body)) : Fail<BuildSummary>(r.Code);
+    });
+
+    /// <summary>A finished build's output. It may contain source text, like any open file.</summary>
+    public Task<VaultResult<string>> OpenBuildLogAsync(Guid projectId, int buildNumber, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("OpenBuildLog", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteNumber("buildNumber", buildNumber); }, null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<string>(r.Code);
+        var bytes = r.Body.GetProperty("contentBase64").GetBytesFromBase64();
+        try { return new VaultResult<string>("Ok", Encoding.UTF8.GetString(bytes)); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    });
+
+    private static BuildSummary ReadBuild(JsonElement e)
+    {
+        static string? S(JsonElement e, string n) => e.GetProperty(n).ValueKind == JsonValueKind.String ? e.GetProperty(n).GetString() : null;
+        static DateTimeOffset? T(JsonElement e, string n) => S(e, n) is { } t ? DateTimeOffset.Parse(t, System.Globalization.CultureInfo.InvariantCulture) : null;
+        return new BuildSummary(e.GetProperty("buildNumber").GetInt32(), S(e, "target")!, S(e, "state")!, S(e, "reason"),
+            e.GetProperty("exitCode").ValueKind == JsonValueKind.Number ? e.GetProperty("exitCode").GetInt32() : null, S(e, "requestedBy"),
+            T(e, "requestedAt")!.Value, T(e, "finishedAt"), S(e, "artifactFolder"), e.GetProperty("artifactFiles").GetInt32(), e.GetProperty("artifactBytes").GetInt64(),
+            e.GetProperty("logAvailable").GetBoolean(), e.GetProperty("logTruncated").GetBoolean());
+    }
 
     // List, optionally check the listing, then commit against that snapshot; a commit racing in between is retried once.
     private async Task<VaultResult<T>> ProjectChangeAsync<T>(Guid projectId, string operation, Func<IReadOnlyList<FileSummary>, string?>? check,

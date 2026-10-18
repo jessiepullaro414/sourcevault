@@ -37,7 +37,8 @@ if (Test-Path -LiteralPath (Join-Path $payload 'editor\assets\dev')) { throw 'Th
 Get-ChildItem -LiteralPath (Join-Path $payload 'service') -Filter 'sourcevault.service.json' -Recurse | Remove-Item -Force # setup writes its own
 
 # 4. Scripts, guide and third-party licenses.
-Copy-Item -LiteralPath (Join-Path $repoRoot 'installer\Setup-SourceVault.ps1'), (Join-Path $repoRoot 'installer\Uninstall-SourceVault.ps1') -Destination $package
+Copy-Item -LiteralPath (Join-Path $repoRoot 'installer\Setup-SourceVault.ps1'), (Join-Path $repoRoot 'installer\Uninstall-SourceVault.ps1'),
+    (Join-Path $repoRoot 'installer\Grant-BuildDockerAccess.ps1'), (Join-Path $repoRoot 'installer\New-WslDockerTls.ps1'), (Join-Path $repoRoot 'installer\build.example.json') -Destination $package
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\user-guide.md') -Destination (Join-Path $package 'README.md')
 $licenses = Join-Path $package 'licenses'
 New-Item -ItemType Directory -Path $licenses | Out-Null

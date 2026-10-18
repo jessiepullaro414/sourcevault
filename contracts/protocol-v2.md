@@ -113,3 +113,30 @@ See `docs/files-history-builds-design.md`, section 2. Every operation also takes
 - **DeleteFile** now keeps the file's history, and the file can be restored.
 
 Merging needs no new protocol operation. The editor host fetches the text its copy was based on, and the current text, with `ListFiles` and `OpenRevision`. It saves the merge with `ApplyEdits` only if the file is still at the revision that was merged with; otherwise the save reports `Conflict` and the merge is redone.
+
+## Addition: builds (owner-approved, 2026-10-18)
+
+See `docs/files-history-builds-design.md`, section 4. Every operation also takes `capability`. If no build service is configured, every build operation returns `Unavailable`, whatever its body.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| ListBuildTargets | — | `targets[]`: names from the administrator's `build.json` |
+| RequestBuild | `projectId`, `target` | `buildNumber` (1, 2, … per project) |
+| GetBuildStatus | `projectId`, `buildNumber` | a build |
+| ListBuilds | `projectId` | `builds[]`, newest first (the 100 newest stored, plus queued and running) |
+| OpenBuildLog | `projectId`, `buildNumber` | `contentBase64` (UTF-8, ≤ 250 KiB; the end of the output is kept) |
+
+- **A build** has these fields: `buildNumber`, `target`, `state` (`queued` / `running` / `succeeded` / `failed` / `timedOut` / `rejected` / `unavailable`), `reason` (a fixed code or null), `exitCode`, `requestedBy`, `requestedAt`, `finishedAt`, `artifactFolder` (a host path or null), `artifactFiles`, `artifactBytes`, `logAvailable` and `logTruncated`.
+- **Errors:** an unknown target or build returns `NotFound`. A full queue (1 running and 4 waiting for that target) returns `LimitExceeded`. A build service that isn't reachable returns `Unavailable`.
+- **What is built:** the project's current saved snapshot, decrypted by the vault service and sent to the build service over the private build pipe below. The buffers are zeroed afterwards.
+
+### The private build pipe `\.\pipe\SourceVault.Build.v1`
+
+- **Access:** owned by `NT SERVICE\SourceVaultBuild`. Its protected DACL gives that account full access and `NT SERVICE\SourceVault` exactly `0x00120083`; nobody else has access, and remote clients are rejected.
+- **Identity checks:** the vault service verifies the pipe owner before sending anything, and the build service checks the client token's user on every connection.
+- **Framing:** frames are the same as above (≤ 1 MiB), with one request per connection:
+  - `{op: "targets"}`
+  - `{op: "build", target, projectId, buildNumber, fileCount}`, followed by `fileCount` frames of `{name, contentBase64}`.
+
+  The reply is `{ok, …}`; the build reply carries `state`, `reason`, `exitCode`, `logBase64` (≤ 512 KiB), `logTruncated`, `artifactFolder`, `artifactFiles` and `artifactBytes`.
+- **The build service** never receives project names and never opens the vault or the TPM key.

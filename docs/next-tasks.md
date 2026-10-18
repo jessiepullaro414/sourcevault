@@ -9,6 +9,19 @@ The record codec, revision store, Windows adapter, and SCM host foundation are i
 3. **Editor native validation (T06 continuation).** The synthetic preview shell exists. Run and record the interactive native checklist in `docs/editor-preview-checks.md`: export paths, devtools/accelerators, navigation/resource/message rejection, registry/policy WebView2 overrides, and WebView2 profile/cache/crash-dump inspection with unique synthetic markers. Confirm the stricter `PreviewPolicy` still loads every Monaco asset, worker and the codicon font. Exercise capture exclusion only in an explicit, separately reviewed mode and report it as best effort. (Policy extraction with hostile-input tests and the package signature check are done.)
 4. **Editor against the service protocol (T06).** The renderer already talks to an in-memory protocol-v1 mock. Next, move the mock behind the native host over the real framing, still synthetic-only, so the host owns the capability and the renderer never sees it. Expose no decryption shortcut or generic IPC passthrough; keep document text out of the bridge until the protocol message set is reviewed. Real service connection waits on item 1.
 
+## Owner lab steps for 2026-10-18 work
+
+1. Rebuild and run `Setup-SourceVault.ps1 -Update` from the package folder, then smoke-test in the editor:
+   - rename and move files, delete and restore files, rename a project;
+   - History (compare and restore), Merge after a conflict;
+   - deleting a project, and `--delete-source` on a synthetic folder.
+2. Builds:
+   1. Run `-Update -WithBuilds`, write `build.json` from the example, then run `Grant-BuildDockerAccess.ps1`.
+   2. For WSL, run `New-WslDockerTls.ps1 -Distro <name>` and apply the printed dockerd settings.
+   3. Run `-Update -WithBuilds` again, then build a synthetic project on each target.
+   4. Record what works, especially the Windows-container archive copy.
+3. Run `scripts/Verify.ps1` once from an elevated PowerShell so the 5 symlink checks run instead of being skipped.
+
 ## Builder continuation
 
 T03 requires a supported Hyper-V lab host, verified Linux image/toolchain and dedicated identities. Implement and test the narrow VM-management helper and authenticated guest channel before transferring confidential content. The current synthetic CLI is not that broker. The supplied guest wrapper is untested. Establish the practical encrypted-storage profile first; defer RAM-only claims.

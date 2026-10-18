@@ -5,6 +5,7 @@
 #   Setup-SourceVault.ps1 [-Operators user1,user2]    new install (default operator: you)
 #   Setup-SourceVault.ps1 -Update                     replace program files, keep key, vault and settings
 #   Setup-SourceVault.ps1 -Status                     health check of an installed vault
+#   Setup-SourceVault.ps1 -Update -WithBuilds         also install/refresh the build service (Docker builds; see README)
 #
 # DEVELOPMENT BUILD: use synthetic data only until an independent security review says otherwise.
 param(
@@ -13,7 +14,8 @@ param(
     [switch]$CheckOnly,
     [switch]$Status,
     [switch]$WithSyntheticDemo,
-    [switch]$ManualStart
+    [switch]$ManualStart,
+    [switch]$WithBuilds
 )
 $ErrorActionPreference = 'Stop'
 $package = $PSScriptRoot
@@ -26,12 +28,18 @@ $keyName = 'SourceVault.Lab.Service01'
 $vaultParent = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault'
 $vaultRoot = Join-Path $vaultParent 'vault'
 $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'SourceVault Editor.lnk'
+$buildServiceName = 'SourceVaultBuild'
+$buildAccount = 'NT SERVICE\SourceVaultBuild'
+$configDir = Join-Path $vaultParent 'config'
+$buildConfig = Join-Path $configDir 'build.json'
 $exitReasons = @{
     10 = 'vault folder missing or its permissions are not locked down'
     11 = 'unexpected item in the vault folder, or the project index failed authentication'
     12 = 'a project failed authentication (possible tampering or damage)'
     13 = "the local group '$groupName' is missing"
     14 = 'the service pipe could not be created (name already taken?)'
+    15 = 'the vault service account NT SERVICE\SourceVault does not exist (install the vault first)'
+    16 = 'the build service is not running as NT SERVICE\SourceVaultBuild'
 }
 
 $script:reported = $false
@@ -85,8 +93,8 @@ function Test-Machine {
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
 
 # ---- helpers ----------------------------------------------------------------------------------------------------
-function Wait-Service([string[]]$states, [int]$seconds) {
-    $service = Get-Service -Name $serviceName
+function Wait-Service([string[]]$states, [int]$seconds, [string]$name = $serviceName) {
+    $service = Get-Service -Name $name
     $deadline = (Get-Date).AddSeconds($seconds)
     do { Start-Sleep -Milliseconds 300; $service.Refresh() } while ($states -notcontains [string]$service.Status -and (Get-Date) -lt $deadline)
     return [string]$service.Status
@@ -98,7 +106,14 @@ function Stop-VaultService {
         if ((Wait-Service 'Stopped' 30) -ne 'Stopped') { Fail 'The service did not stop within 30 seconds.' }
     }
 }
-function Get-ExitInfo { $s = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"; return @{ Win32 = [int]$s.ExitCode; Specific = [int]$s.ServiceSpecificExitCode } }
+function Stop-BuildService {
+    $service = Get-Service -Name $buildServiceName -ErrorAction SilentlyContinue
+    if ($service -and $service.Status -ne 'Stopped') {
+        & sc.exe stop $buildServiceName | Out-Null
+        if ((Wait-Service 'Stopped' 60 $buildServiceName) -ne 'Stopped') { Fail 'The build service did not stop within 60 seconds (a build may be running).' }
+    }
+}
+function Get-ExitInfo([string]$name = $serviceName) { $s = Get-CimInstance Win32_Service -Filter "Name='$name'"; return @{ Win32 = [int]$s.ExitCode; Specific = [int]$s.ServiceSpecificExitCode } }
 function Invoke-ServiceOnce([string]$parameter) {
     $output = & sc.exe start $serviceName $parameter
     if ($LASTEXITCODE -ne 0) { $output | Write-Host; Fail "Could not start the service ($parameter): sc.exe exit $LASTEXITCODE." }
@@ -184,6 +199,17 @@ function Show-Status {
         $reason = if ($exit.Win32 -eq 1066 -and $exitReasons.ContainsKey($exit.Specific)) { $exitReasons[$exit.Specific] } elseif ($exit.Win32 -eq 0) { 'stopped normally' } else { "Win32 exit $($exit.Win32)" }
         Warn "service is $($service.Status): $reason"
     }
+    $build = Get-Service -Name $buildServiceName -ErrorAction SilentlyContinue
+    if ($build) {
+        $config = Invoke-ServiceTool 'build-config-check'
+        if ($config.Exit -eq 0) { Ok "build configuration valid ($(($config.Output -split "`r?`n") -join '; '))" } else { Warn "build configuration: $($config.Output)" }
+        if ($build.Status -eq 'Running') { Ok 'build service RUNNING' }
+        else {
+            $exit = Get-ExitInfo $buildServiceName
+            $reason = if ($exit.Win32 -eq 1066 -and $exitReasons.ContainsKey($exit.Specific)) { $exitReasons[$exit.Specific] } elseif ($exit.Win32 -eq 0) { 'stopped normally' } else { "Win32 exit $($exit.Win32)" }
+            Warn "build service is $($build.Status): $reason"
+        }
+    } else { Ok 'build service not installed (builds unavailable)' }
 }
 
 # ---- main -------------------------------------------------------------------------------------------------------
@@ -215,7 +241,7 @@ foreach ($operator in $Operators) {
 }
 
 Step "Program files ($installRoot)"
-if ($Update) { Stop-VaultService } else { if (Test-Path -LiteralPath $installRoot) { Fail "$installRoot already exists without a registered service. Remove it, then run setup again." }; New-Item -ItemType Directory -Path $installRoot | Out-Null }
+if ($Update) { Stop-BuildService; Stop-VaultService } else { if (Test-Path -LiteralPath $installRoot) { Fail "$installRoot already exists without a registered service. Remove it, then run setup again." }; New-Item -ItemType Directory -Path $installRoot | Out-Null }
 Copy-Payload -keepConfig ([bool]$Update)
 Ok "installed; $(Write-InstallManifest) files hashed in install-manifest.sha256"
 
@@ -278,6 +304,64 @@ if ($state -ne 'Running') {
 Start-Sleep -Milliseconds 500
 if (!([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -like '*\SourceVault.v1' })) { Fail 'The service is running but its pipe is missing.' }
 Ok "RUNNING as $serviceAccount and listening"
+
+# ---- builds (optional) ------------------------------------------------------------------------------------------
+$buildExisting = Get-Service -Name $buildServiceName -ErrorAction SilentlyContinue
+if ($WithBuilds -or $buildExisting) {
+    Step "Build service $buildAccount"
+    $buildBin = '"{0}" "{1}" build-service' -f (Join-Path $installRoot 'runtime\dotnet.exe'), (Join-Path $installRoot 'service\SourceVault.Service.dll')
+    if (!$buildExisting) {
+        New-Service -Name $buildServiceName -BinaryPathName $buildBin -DisplayName 'SourceVault Build' -StartupType Manual `
+            -Description 'SourceVault build service (development build). Runs builds in the configured Docker containers for the SourceVault service; never opens the vault or its key.' | Out-Null
+        & sc.exe config $buildServiceName obj= $buildAccount | Out-Null
+        if ($LASTEXITCODE -ne 0) { & sc.exe delete $buildServiceName | Out-Null; Fail "Could not set the build service account (sc.exe exit $LASTEXITCODE)." }
+        & sc.exe sidtype $buildServiceName unrestricted | Out-Null
+        & sc.exe config $buildServiceName start= $(if ($ManualStart) { 'demand' } else { 'delayed-auto' }) | Out-Null
+        $info = Get-CimInstance Win32_Service -Filter "Name='$buildServiceName'"
+        if ($info.StartName -ne $buildAccount -or $info.PathName -ne $buildBin) { & sc.exe delete $buildServiceName | Out-Null; Fail 'Build service registration did not match the expected account or path.' }
+        Ok 'registered'
+    } else { Ok 'already registered' }
+    $buildSid = ([Security.Principal.NTAccount]$buildAccount).Translate([Security.Principal.SecurityIdentifier]).Value
+
+    # Admin-only configuration: Administrators and SYSTEM change it; the build service only reads it; operators can't see it.
+    if (!(Test-Path -LiteralPath $configDir)) {
+        New-Item -ItemType Directory -Path $configDir | Out-Null
+        Set-ExactSecurity $configDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$buildSid)"
+        Ok "created $configDir (administrators only; the build service can read it)"
+    } else { Ok "$configDir kept" }
+    $example = Join-Path $package 'build.example.json'
+    if (Test-Path -LiteralPath $example) { Copy-Item -LiteralPath $example -Destination (Join-Path $configDir 'build.example.json') -Force }
+
+    $check = Invoke-ServiceTool 'build-config-check'
+    if ($check.Exit -eq 0) {
+        $artifactRoot = ($check.Output -split "`r?`n" | Where-Object { $_ -like 'artifactRoot=*' }) -replace '^artifactRoot=', ''
+        Ok "build.json is valid ($(($check.Output -split "`r?`n" | Where-Object { $_ -like 'targets=*' }) -replace '^targets=', 'targets: '))"
+        if (!(Test-Path -LiteralPath $artifactRoot)) {
+            New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
+            $operatorsSid = (New-Object Security.Principal.NTAccount($groupName)).Translate([Security.Principal.SecurityIdentifier]).Value
+            # The build service writes artifacts; operators read them; ordinary users get nothing.
+            Set-ExactSecurity $artifactRoot "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$buildSid)(A;OICI;0x1200a9;;;$operatorsSid)"
+            Ok "created artifact folder $artifactRoot (build service writes; '$groupName' can read)"
+        } else { Warn "artifact folder $artifactRoot already exists; its permissions were not changed (the build service needs Modify, operators Read)" }
+        Stop-BuildService
+        & sc.exe start $buildServiceName | Out-Null
+        $state = Wait-Service 'Running', 'Stopped' 60 $buildServiceName
+        if ($state -ne 'Running') {
+            $exit = Get-ExitInfo $buildServiceName
+            $reason = if ($exit.Win32 -eq 1066 -and $exitReasons.ContainsKey($exit.Specific)) { $exitReasons[$exit.Specific] } else { "Win32 exit $($exit.Win32)" }
+            Fail "The build service refused to start: $reason."
+        }
+        Start-Sleep -Milliseconds 500
+        if (!([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -like '*\SourceVault.Build.v1' })) { Fail 'The build service is running but its pipe is missing.' }
+        Ok "RUNNING as $buildAccount"
+        Warn "Builds also need Docker access for $buildAccount (administrator-equivalent on this PC): run Grant-BuildDockerAccess.ps1 from this package. For a WSL engine, run New-WslDockerTls.ps1 first."
+    } elseif (!(Test-Path -LiteralPath $buildConfig)) {
+        Warn "No build configuration yet. Copy $configDir\build.example.json to build.json, edit it (container names, paths, artifactRoot), then run setup -Update -WithBuilds again. The build service is not started until then."
+    } else {
+        Write-Host "   $($check.Output)" -ForegroundColor Yellow
+        Warn "build.json is invalid; fix it and run setup -Update -WithBuilds again. The build service was not started."
+    }
+}
 
 Step 'Start menu shortcut'
 $shell = New-Object -ComObject WScript.Shell

@@ -292,6 +292,22 @@ export class VaultSession {
     if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + 1 };
   }
 
+  // ---- builds: names of the administrator's build targets, queued builds of the saved project, and their logs -------
+  async listBuildTargets() { return (await this.#call('listBuildTargets', {})).targets ?? []; }
+
+  /** Queues a build of the project's saved files (unsaved edits are not included). Returns the build number. */
+  async requestBuild(target) {
+    return (await this.#call('requestBuild', { projectId: this.project.projectId, name: target })).buildNumber;
+  }
+
+  /** The project's builds, newest first: { buildNumber, target, state, reason, exitCode, requestedBy, requestedAt, finishedAt, artifactFolder, artifactFiles, artifactBytes, logAvailable, logTruncated }. */
+  async listBuilds() { return (await this.#call('listBuilds', { projectId: this.project.projectId })).builds ?? []; }
+
+  async buildStatus(buildNumber) { return this.#call('buildStatus', { projectId: this.project.projectId, buildNumber }); }
+
+  /** A finished build's output text. It can contain source, so it is shown only in the editor, like files. */
+  async openBuildLog(buildNumber) { return (await this.#call('openBuildLog', { projectId: this.project.projectId, buildNumber })).text; }
+
   #forget(id) {
     this.files.delete(id);
     this.openIds = this.openIds.filter(x => x !== id);

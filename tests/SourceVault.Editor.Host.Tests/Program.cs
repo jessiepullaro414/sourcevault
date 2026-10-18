@@ -327,6 +327,12 @@ Check("bridge accepts every operation with its exact arguments", () =>
     Assert(Parsed(Req("mergeSources", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}")).Operation == VaultOperation.MergeSources, "mergeSources");
     var merged = Parsed(Req("saveMerged", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\",\"revisionId\":\"{F}\"}}"));
     Assert(merged.Operation == VaultOperation.SaveMerged && merged.Text == "x" && merged.RevisionId == Guid.Parse(F), "saveMerged");
+    Assert(Parsed(Req("listBuildTargets", "{}")).Operation == VaultOperation.ListBuildTargets, "listBuildTargets");
+    var build = Parsed(Req("requestBuild", $"{{\"projectId\":\"{P}\",\"name\":\"linux\"}}"));
+    Assert(build.Operation == VaultOperation.RequestBuild && build.Name == "linux", "requestBuild");
+    Assert(Parsed(Req("listBuilds", $"{{\"projectId\":\"{P}\"}}")).Operation == VaultOperation.ListBuilds, "listBuilds");
+    Assert(Parsed(Req("buildStatus", $"{{\"projectId\":\"{P}\",\"buildNumber\":12}}")).BuildNumber == 12, "buildStatus");
+    Assert(Parsed(Req("openBuildLog", $"{{\"projectId\":\"{P}\",\"buildNumber\":1}}")).Operation == VaultOperation.OpenBuildLog, "openBuildLog");
     Assert(Parsed(Req("listFiles", $"{{\"projectId\":\"{P}\"}}")).ProjectId == Guid.Parse(P), "listFiles");
     var open = Parsed(Req("openDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"));
     Assert(open.Operation == VaultOperation.OpenDocument && open.FileId == Guid.Parse(F), "openDocument");
@@ -365,7 +371,10 @@ Check("bridge rejects missing, extra, duplicate and mistyped arguments", () => R
     Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":1.5}}"), Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":\"0\"}}"),
     Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":10001}}"),
     Req("openRevision", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"), Req("openRevision", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"revisionId\":\"x\"}}"),
-    Req("saveMerged", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\"}}"), Req("restoreFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}")));
+    Req("saveMerged", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\"}}"), Req("restoreFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"),
+    Req("listBuildTargets", $"{{\"projectId\":\"{P}\"}}"), Req("requestBuild", $"{{\"projectId\":\"{P}\"}}"), Req("requestBuild", $"{{\"projectId\":\"{P}\",\"target\":\"linux\"}}"),
+    Req("buildStatus", $"{{\"projectId\":\"{P}\",\"buildNumber\":0}}"), Req("buildStatus", $"{{\"projectId\":\"{P}\",\"buildNumber\":\"1\"}}"),
+    Req("openBuildLog", $"{{\"projectId\":\"{P}\"}}"), Req("openBuildLog", $"{{\"projectId\":\"{P}\",\"buildNumber\":-3}}")));
 
 Check("bridge rejects non-canonical, empty and malformed ids", () => Rejects(Vault,
     Req("listProjects", "{}", id: Guid1.ToUpperInvariant()), Req("listProjects", "{}", id: "{" + Guid1 + "}"),

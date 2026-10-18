@@ -80,7 +80,7 @@ Owner-run lab, 2026-10-17:
 | `Update-ServiceLab.ps1` | New binaries installed; config, runtime, registration and key kept; 202 files re-hashed. |
 | `Test-ServiceLab.ps1` with no vault root | Refused as designed: never reached RUNNING, stopped with 1066/10. |
 | `New-VaultRoot.ps1` | First run applied the ACLs, but a verification bug (raw SID vs alias comparison) stopped it before the check. Fixed in `aa1722d`. The rerun re-applied the ACLs over the empty leftovers, and `vault-root-check` reported `trusted=yes`. |
-| `Test-ServiceLab.ps1` with the vault root | RUNNING after 1.6 s as `NT SERVICESourceVault`; stopped in 0.9 s with exit 0; process exited. |
+| `Test-ServiceLab.ps1` with the vault root | RUNNING after 1.6 s as `NT SERVICE\SourceVault`; stopped in 0.9 s with exit 0; process exited. |
 | Unelevated session (same user, admin token filtered) | Listing and file creation denied on both `C:ProgramDataSourceVault` and `vault`. |
 
 The validator therefore passed under the service account itself, including reading the ancestor chain. No store has been created in the root yet.
@@ -98,7 +98,7 @@ Owner-run lab, 2026-10-17:
 | Step | Result |
 |---|---|
 | `Update-ServiceLab.ps1`, then `Test-ServiceLab.ps1` on the empty vault | RUNNING in 2.0 s: a fresh vault is accepted with zero projects. |
-| `New-SyntheticProject.ps1` | Created a three-file synthetic project under `NT SERVICESourceVault` with its TPM key, and re-verified the vault (1 project folder). |
+| `New-SyntheticProject.ps1` | Created a three-file synthetic project under `NT SERVICE\SourceVault` with its TPM key, and re-verified the vault (1 project folder). |
 | `Test-ServiceLab.ps1` with the project | RUNNING in 1.3 s with the index and project authenticated at startup; clean stop, exit 0. |
 | `Test-VaultTamper.ps1` | A stray file in the vault root was refused with 1066/11; one flipped bit in the project manifest was refused with 1066/12; the restored vault reached RUNNING. The vault was restored byte-for-byte (SHA-256 verified). |
 
@@ -120,7 +120,7 @@ Owner-run lab, 2026-10-17:
 | Step | Result |
 |---|---|
 | `New-OperatorsGroup.ps1` | Created *SourceVault Operators* and added the owner. The first run failed parameter validation (description over 48 characters) before changing anything; fixed in `3895916`. |
-| `Update-ServiceLab.ps1`, then `Test-ServiceLab.ps1 -LeaveRunning` | RUNNING in 2.6 s as `NT SERVICESourceVault`, and `\.pipeSourceVault.v1` was listening. |
+| `Update-ServiceLab.ps1`, then `Test-ServiceLab.ps1 -LeaveRunning` | RUNNING in 2.6 s as `NT SERVICE\SourceVault`, and `\.pipeSourceVault.v1` was listening. |
 | `Test-PipeAccess.ps1` from a normal window, in a sign-in that predates the group | The pipe DACL refused the connection. |
 
 Still to run: `Test-PipeAccess.ps1` after signing out and in, which should show the executable check closing the connection without an answer; and a real installed client, the lab client (next step).
@@ -146,9 +146,19 @@ Owner-run lab, 2026-10-17, after signing out and in as an operator:
 
 | Step | Result |
 |---|---|
-| `Test-ServiceLab.ps1 -LeaveRunning` (admin) | RUNNING in 1.5 s as `NT SERVICESourceVault`; the pipe was listening. |
+| `Test-ServiceLab.ps1 -LeaveRunning` (admin) | RUNNING in 1.5 s as `NT SERVICE\SourceVault`; the pipe was listening. |
 | `SourceVault.LabClient.exe check` (installed, normal window) | All 9 steps passed. It listed 1 project, created "Lab client check" (210 ms) and `check.txt` (107 bytes, 41 ms), and reopened and decrypted it with matching bytes (83 ms). A stale edit was refused with `RevisionConflict`. It decrypted `README.md` (101 bytes) from the service-created "Synthetic demo 1". EndSession closed the connection, and a forged capability was refused and closed. |
 | `Test-PipeAccess.ps1` (operator, normal window) | PowerShell connected but the service closed without answering: the executable check. |
 | A byte-identical copy of the client and runtime under `artifacts` (operator, unelevated) | Refused: the service closed the connection. The installed client then listed both projects. The check keys on the admin-owned install path, not on file contents. |
 
 The owner sign-in now holds the operators group. Still open: a reboot test, and the editor (design step 3).
+
+## Build service role (2026-10-18)
+
+The same service program also runs as a second service, **SourceVaultBuild**, under its own virtual account `NT SERVICE\SourceVaultBuild`, started with the argument `build-service`. Setup registers it only with `-WithBuilds`.
+
+- **What it never touches:** the vault, the TPM key and the operator pipe. Its account has no access to the vault folder or the key.
+- **What it serves:** only `\.\pipe\SourceVault.Build.v1`, for `NT SERVICE\SourceVault`. It reads `%ProgramData%\SourceVault\config\build.json` on every request, so edits apply without a restart.
+- **Docker:** it talks to the configured Docker engines directly (Docker Engine API v1.41 over the engine's named pipe, or loopback TLS with a client certificate) and writes artifacts under `artifactRoot`.
+- **Startup refusal codes:** 15 means `NT SERVICE\SourceVault` doesn't exist; 16 means the service isn't running as `NT SERVICE\SourceVaultBuild`; 14 means its pipe couldn't be created.
+- **Not verified on a real machine yet:** service registration, Docker group membership of the virtual account, and the Docker Engine API against real engines (Windows containers in particular, where copying into a running Hyper-V-isolated container may not be supported; process isolation is recommended).

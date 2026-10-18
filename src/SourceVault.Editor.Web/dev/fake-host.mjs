@@ -11,7 +11,8 @@ const ARGS = {
   listProjects: [], createProject: ['name'], deleteProject: ['projectId', 'name'], renameProject: ['projectId', 'newName'],
   renameFile: ['projectId', 'fileId', 'newName'], renameFolder: ['projectId', 'name', 'newName'], deleteFile: ['projectId', 'fileId'],
   listHistory: ['projectId', 'fileId', 'page'], openRevision: ['projectId', 'fileId', 'revisionId'], listDeleted: ['projectId'],
-  restoreFile: ['projectId', 'fileId', 'newName'], mergeSources: ['projectId', 'fileId'], saveMerged: ['projectId', 'fileId', 'text', 'revisionId'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
+  restoreFile: ['projectId', 'fileId', 'newName'], mergeSources: ['projectId', 'fileId'], saveMerged: ['projectId', 'fileId', 'text', 'revisionId'],
+  listBuildTargets: [], requestBuild: ['projectId', 'name'], listBuilds: ['projectId'], buildStatus: ['projectId', 'buildNumber'], openBuildLog: ['projectId', 'buildNumber'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
   closeDocument: ['projectId', 'fileId'], saveDocument: ['projectId', 'fileId', 'text'], createFile: ['projectId', 'name', 'text'],
   lock: [], unlock: [],
 };
@@ -44,6 +45,10 @@ export class FakeVaultHost {
   #opened = new Map();     // `${projectId}/${fileId}` -> rev the editor's copy is based on
   #listeners = new Set();
   requests = [];           // operations received (names only), for tests
+  buildTargets = ['linux', 'windows']; // [] rehearses 'builds not set up'
+  buildMs = 1500;          // how long a fake build runs
+  buildFails = false;
+  #builds = new Map();     // projectId -> [build], newest last
 
   constructor({ latencyMs = 0, seed = SEED } = {}) {
     this.latencyMs = latencyMs;
@@ -186,6 +191,32 @@ export class FakeVaultHost {
         if (file.history.at(-1).revisionId !== args.revisionId) return reply('Conflict');
         this.#save(file, args.text, 'edited'); this.#opened.set(key, file.rev);
         return reply('Ok', { byteLength: bytes(args.text) });
+      }
+      case 'listBuildTargets':
+        return this.buildTargets.length ? reply('Ok', { targets: this.buildTargets }) : reply('Unavailable');
+      case 'requestBuild': {
+        if (!this.buildTargets.includes(args.name)) return reply('NotFound');
+        const list = this.#builds.get(args.projectId) ?? []; this.#builds.set(args.projectId, list);
+        const build = { buildNumber: list.length + 1, target: args.name, state: 'running', reason: null, exitCode: null, requestedBy: this.actor,
+          requestedAt: new Date().toISOString(), finishedAt: null, artifactFolder: null, artifactFiles: 0, artifactBytes: 0, logAvailable: false, logTruncated: false, log: null };
+        list.push(build);
+        const files = [...project.files.values()];
+        setTimeout(() => Object.assign(build, this.buildFails
+          ? { state: 'failed', exitCode: 1, finishedAt: new Date().toISOString(), logAvailable: true, log: `$ ./build.sh\nerror: fictional failure in ${files[0]?.name ?? 'nothing'}\n` }
+          : { state: 'succeeded', exitCode: 0, finishedAt: new Date().toISOString(), logAvailable: true,
+              artifactFolder: ['D:', 'SourceVault', 'artifacts', args.projectId, `${build.buildNumber}-${args.name}`].join('\\'),
+              artifactFiles: files.length, artifactBytes: files.reduce((n, f) => n + bytes(f.text), 0), log: `$ ./build.sh\ncompiling ${files.length} fictional file(s)\ndone\n` }), this.buildMs);
+        return reply('Ok', { buildNumber: build.buildNumber });
+      }
+      case 'listBuilds':
+        return reply('Ok', { builds: [...(this.#builds.get(args.projectId) ?? [])].reverse().map(({ log, ...b }) => b) });
+      case 'buildStatus':
+      case 'openBuildLog': {
+        if (!Number.isInteger(args.buildNumber) || args.buildNumber < 1) return;
+        const build = (this.#builds.get(args.projectId) ?? []).find(b => b.buildNumber === args.buildNumber);
+        if (!build) return reply('NotFound');
+        if (operation === 'buildStatus') { const { log, ...b } = build; return reply('Ok', b); }
+        return build.logAvailable ? reply('Ok', { text: build.log }) : reply('NotFound');
       }
       case 'listFiles':
         return reply('Ok', { files: [...project.files].map(([fileId, f]) => ({ fileId, name: f.name, byteLength: bytes(f.text) })) });

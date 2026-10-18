@@ -4,10 +4,10 @@ using System.Text.Json;
 
 namespace SourceVault.Editor.Host;
 
-internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
+internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
-internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0);
+internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0);
 
 /// <summary>
 /// Bridge v2 (docs/editor-vault-design.md): pure, UI-free validation of renderer-to-host vault requests and
@@ -41,6 +41,11 @@ internal static class BridgePolicy
         ["restoreFile"] = (VaultOperation.RestoreFile, ["projectId", "fileId", "newName"]),
         ["mergeSources"] = (VaultOperation.MergeSources, ["projectId", "fileId"]),
         ["saveMerged"] = (VaultOperation.SaveMerged, ["projectId", "fileId", "text", "revisionId"]), // revisionId: theirs, from mergeSources
+        ["listBuildTargets"] = (VaultOperation.ListBuildTargets, []),
+        ["requestBuild"] = (VaultOperation.RequestBuild, ["projectId", "name"]), // name: the target
+        ["listBuilds"] = (VaultOperation.ListBuilds, ["projectId"]),
+        ["buildStatus"] = (VaultOperation.BuildStatus, ["projectId", "buildNumber"]),
+        ["openBuildLog"] = (VaultOperation.OpenBuildLog, ["projectId", "buildNumber"]),
         ["listFiles"] = (VaultOperation.ListFiles, ["projectId"]),
         ["openDocument"] = (VaultOperation.OpenDocument, ["projectId", "fileId"]),
         ["closeDocument"] = (VaultOperation.CloseDocument, ["projectId", "fileId"]),
@@ -67,7 +72,7 @@ internal static class BridgePolicy
             var args = root.GetProperty("args");
             if (!ExactFields(args, op.Args)) return false;
             Guid projectId = Guid.Empty, fileId = Guid.Empty, revisionId = Guid.Empty;
-            int page = 0;
+            int page = 0, buildNumber = 0;
             string? name = null, text = null, newName = null;
             if (op.Args.Contains("projectId") && !TryId(args.GetProperty("projectId"), out projectId)) return false;
             if (op.Args.Contains("fileId") && !TryId(args.GetProperty("fileId"), out fileId)) return false;
@@ -76,7 +81,8 @@ internal static class BridgePolicy
             if (op.Args.Contains("newName") && !TryName(args.GetProperty("newName"), out newName)) return false;
             if (op.Args.Contains("revisionId") && !TryId(args.GetProperty("revisionId"), out revisionId)) return false;
             if (op.Args.Contains("page") && !TryPage(args.GetProperty("page"), out page)) return false;
-            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page);
+            if (op.Args.Contains("buildNumber") && !TryBuildNumber(args.GetProperty("buildNumber"), out buildNumber)) return false;
+            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber);
             return true;
         }
         catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException)
@@ -141,6 +147,12 @@ internal static class BridgePolicy
     {
         page = 0;
         return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out page) && page is >= 0 and <= 10000;
+    }
+
+    private static bool TryBuildNumber(JsonElement value, out int number)
+    {
+        number = 0;
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out number) && number >= 1;
     }
 
     private static bool TryText(JsonElement value, out string? text)

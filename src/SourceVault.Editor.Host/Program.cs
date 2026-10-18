@@ -262,6 +262,15 @@ internal sealed class EditorWindow : Window
                 }),
                 VaultOperation.SaveMerged => Respond(request, await controller.SaveMergedAsync(request.ProjectId, request.FileId, request.Text!, request.RevisionId), (w, f) =>
                     w.WriteNumber("byteLength", f.ByteLength)),
+                VaultOperation.ListBuildTargets => Respond(request, await controller.ListBuildTargetsAsync(), (w, targets) =>
+                    { w.WriteStartArray("targets"); foreach (var t in targets) w.WriteStringValue(t); w.WriteEndArray(); }),
+                VaultOperation.RequestBuild => Respond(request, await controller.RequestBuildAsync(request.ProjectId, request.Name!), (w, number) =>
+                    w.WriteNumber("buildNumber", number)),
+                VaultOperation.ListBuilds => Respond(request, await controller.ListBuildsAsync(request.ProjectId), (w, builds) =>
+                    { w.WriteStartArray("builds"); foreach (var b in builds) { w.WriteStartObject(); WriteBuild(w, b); w.WriteEndObject(); } w.WriteEndArray(); }),
+                VaultOperation.BuildStatus => Respond(request, await controller.GetBuildStatusAsync(request.ProjectId, request.BuildNumber), WriteBuild),
+                VaultOperation.OpenBuildLog => Respond(request, await controller.OpenBuildLogAsync(request.ProjectId, request.BuildNumber), (w, text) =>
+                    w.WriteString("text", text)),
                 VaultOperation.ListFiles => Respond(request, await controller.ListFilesAsync(request.ProjectId), (w, files) =>
                 {
                     // Revision ids stay in the host.
@@ -286,6 +295,19 @@ internal sealed class EditorWindow : Window
             response = BridgePolicy.BuildResponse(request.RequestId, "InternalError", null); // never reflect details
         }
         if (!closing) webView.CoreWebView2?.PostWebMessageAsJson(response);
+    }
+
+    private static void WriteBuild(System.Text.Json.Utf8JsonWriter w, BuildSummary b)
+    {
+        w.WriteNumber("buildNumber", b.Number); w.WriteString("target", b.Target); w.WriteString("state", b.State);
+        if (b.Reason is null) w.WriteNull("reason"); else w.WriteString("reason", b.Reason);
+        if (b.ExitCode is { } exit) w.WriteNumber("exitCode", exit); else w.WriteNull("exitCode");
+        if (b.RequestedBy is null) w.WriteNull("requestedBy"); else w.WriteString("requestedBy", b.RequestedBy);
+        w.WriteString("requestedAt", b.RequestedAt.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+        if (b.FinishedAt is { } done) w.WriteString("finishedAt", done.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)); else w.WriteNull("finishedAt");
+        if (b.ArtifactFolder is null) w.WriteNull("artifactFolder"); else w.WriteString("artifactFolder", b.ArtifactFolder);
+        w.WriteNumber("artifactFiles", b.ArtifactFiles); w.WriteNumber("artifactBytes", b.ArtifactBytes);
+        w.WriteBoolean("logAvailable", b.LogAvailable); w.WriteBoolean("logTruncated", b.LogTruncated);
     }
 
     private static string Respond<T>(VaultBridgeRequest request, VaultResult<T> result, Action<System.Text.Json.Utf8JsonWriter, T> write) =>

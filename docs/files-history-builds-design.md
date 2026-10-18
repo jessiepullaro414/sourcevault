@@ -13,7 +13,7 @@ Owner decisions already made:
 - **Build logs** are stored encrypted in the vault.
 - **Only an administrator** sets the artifact paths.
 
-Status: steps 1 (file and project rename, file delete), 2 (history, deleted files) and 3 (merge) are built and tested in process; step 4 is not built yet. The owner's decisions are at the end.
+Status: all four steps are built and tested in process (step 4 against a simulated Docker engine). Not yet run on a real machine: the installed services, Docker engines, the WSL TLS setup. The owner's decisions are at the end.
 
 ---
 

@@ -73,6 +73,40 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
   - `-RemoveOperatorsGroup` also removes the group.
   - The TPM key itself is never deleted.
 
+### Builds (optional): run builds in your Docker containers
+
+SourceVault can send a project's saved files to an **already-running, named Docker container**, run the build command there, and copy the build's output to a folder on this PC. A separate service, **SourceVault Build** (`NT SERVICE\SourceVaultBuild`), does this; the vault service never gets Docker access.
+
+1. **Install the build service** (as administrator, from the package folder):
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update -WithBuilds
+   ```
+   This registers the service and creates `C:\ProgramData\SourceVault\config\`. Only administrators can change it, and operators can't read it. It also puts `build.example.json` there.
+2. **Write the configuration.** Copy `build.example.json` to `build.json` in that folder and edit it. For each target, set:
+   - `name`: what operators pick;
+   - `engine`: the Windows engine's pipe, or the WSL engine's TLS port;
+   - `container`: its name;
+   - `platform`: `linux` or `windows`;
+   - `sourcePath`: where the project goes inside the container;
+   - `command`: what runs there;
+   - `artifactPath`: the folder whose contents are the build output.
+
+   Also set `artifactRoot`: where output lands on this PC. Only an administrator can set these paths. Every field is described in `docs/files-history-builds-design.md`.
+3. **Give the build service Docker access:**
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1            # Docker Desktop: group docker-users
+   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1 -Group docker   # standalone dockerd with "group": "docker"
+   ```
+   **Docker access is administrator-equivalent** on this PC. That's why only the build service gets it.
+4. **For a Docker engine inside WSL**, set up TLS client certificates:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\New-WslDockerTls.ps1 -Distro Ubuntu-24.04
+   ```
+   It prints the Docker settings to apply in the distro and the `tls` block for `build.json`. Plain TCP without TLS is refused. The Linux target works only while that WSL distro and its Docker engine are running.
+5. **Apply:** run `Setup-SourceVault.ps1 -Update -WithBuilds` again. It validates `build.json` and creates the artifact folder (the build service can write, *SourceVault Operators* can read, nobody else has access), then starts the build service. `-Status` reports the build service and the configuration.
+
+Containers should have **no network** (`--network none`). Builds are refused otherwise, unless a target sets `"allowNetwork": true`.
+
 ---
 
 ## Part 2: Using SourceVault
@@ -157,6 +191,20 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 - **Not a secure erase.** SSDs, backups, shadow copies, OneDrive/Dropbox sync and the recycle bin of other tools may keep earlier copies.
 - After this, **the vault project is the only copy**: readable only on this computer, with no recovery if the TPM is cleared. Think twice before using it on code you can't recreate.
 
+### Build a project
+
+**Builds** in the Explorer opens the build view (only if your administrator set up builds).
+
+- Pick a **target** and click **Build saved files**. The build uses the files **as saved in the vault**; unsaved edits are not included. One build per target runs at a time; up to 4 more wait.
+- The list shows each build with when, who and how long. It refreshes while a build is queued or running.
+- Click a build to see its result, its **output folder** on this PC (*Output (N files)*), and its **log**. The log is stored encrypted in the vault and shown read-only here, like files; copying is blocked.
+- **Output files are ordinary, unencrypted files** in that folder, readable by every operator. That is their purpose.
+- Common results:
+  - *failed*: the build command returned an error (see the log);
+  - *timed out*: it ran longer than allowed and was stopped;
+  - *refused*: unsafe output such as links or bad names, or a container that has network access when it shouldn't;
+  - *could not run*: the container, the Docker engine or the build service isn't available; ask your administrator.
+
 ### When someone else changed the file
 
 If the file changed in the vault since you opened it, Save does **not** overwrite it. A yellow banner appears:
@@ -201,5 +249,6 @@ Different files never conflict: two people can edit different files of the same 
 - **Text of open files** is in the editor's memory, and Windows may write memory to the pagefile or hibernation file. Capture exclusion is best effort; cameras and some tools bypass it.
 - **No recovery, by design.** No backup tool and no migration to another computer either: if this computer's TPM is cleared or the computer is lost, the vault is gone.
 - **Not yet verified:** that everything works after a reboot (automatic start at boot), and an independent security review.
-- **Builds are not available yet.** The vault stores and edits files only.
+- **Builds are an export path.** A build runs the project's own scripts, so anyone who can edit a project can make its build copy the source into the output folder, which holds ordinary files. With network access a build could also send it elsewhere. The build containers hold plain source while a build runs, and caches or copies a build makes can stay in the container. The administrator-only paths control *where* output comes from, not *what* it contains.
+- **Builds are not yet verified against a real Docker engine.** They were tested against a simulated engine; the first real run is a lab step.
 - **History is kept forever** for the life of a project: every saved version stays encrypted on disk until the project is deleted. Files saved before this version start their history at the version they had then.

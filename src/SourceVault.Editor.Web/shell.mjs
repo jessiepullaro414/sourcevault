@@ -64,6 +64,11 @@ export function createDiffEditor(container, ariaLabel) {
   return monaco.editor.createDiffEditor(container, { theme: 'sourcevault', readOnly: true, originalEditable: false, automaticLayout: true, editContext: false, renderSideBySide: true, fontFamily: 'Cascadia Code, Consolas, monospace', fontSize: 13, lineHeight: 21, minimap: { enabled: false }, scrollBeyondLastLine: false, contextmenu: false, dragAndDrop: false, dropIntoEditor: { enabled: false }, links: false, renderOverviewRuler: false, ariaLabel });
 }
 
+/** A read-only plain-text viewer (build output), with the same blocked context menu and drag paths. */
+export function createLogViewer(container, ariaLabel) {
+  return monaco.editor.create(container, { theme: 'sourcevault', model: null, readOnly: true, automaticLayout: true, editContext: false, fontFamily: 'Cascadia Code, Consolas, monospace', fontSize: 12, lineHeight: 19, minimap: { enabled: false }, scrollBeyondLastLine: false, contextmenu: false, dragAndDrop: false, dropIntoEditor: { enabled: false }, links: false, wordWrap: 'on', renderLineHighlight: 'none', ariaLabel });
+}
+
 /** Explorer/inspector/activity panel toggles, find, and blocked browser shortcuts (Ctrl+S calls onSave). */
 export function wireChrome(getEditor, { onSave, isLocked }) {
   $('find').onclick = () => { if (!isLocked()) getEditor()?.getAction('actions.find').run(); };
