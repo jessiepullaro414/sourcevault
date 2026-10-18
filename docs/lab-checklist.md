@@ -29,7 +29,9 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | Run `Setup-SourceVault.ps1 -Update -WithBuilds`, write `build.json` from `build.example.json` (or the target `New-BuildContainer.ps1` printed), then run `Grant-BuildDockerAccess.ps1` | admin; restarts Docker access for the build service |
 | [ ] | WSL target: `New-WslDockerTls.ps1 -Distro <name>`, apply the printed dockerd settings, restart that distro's Docker | the WSL distro restarts |
 | [ ] | Import `samples\dotnet-hello` from the package (`SourceVault.Import.exe <package>\samples\dotnet-hello --project "Hello sample"`), then **Build** it on the Linux target: succeeds, log shown, the output folder has `Hello.dll`, `Hello`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
-| [ ] | ~~Build on the Windows target~~: **not possible on this PC**. Windows containers need Windows Pro, Enterprise or Education; this PC runs Windows 11 Home | — |
+| [ ] | Windows target prerequisites (this PC is now Windows 11 Pro): **Containers** and **Hyper-V** features on (*Turn Windows features on or off*, then restart), and a Docker engine running Windows containers | **restart**; your install |
+| [ ] | **Windows build container (new):** elevated `New-WindowsBuildContainer.ps1`. It pulls the pinned Windows Server Core .NET SDK image (about 2.7 GB) and creates `sourcevault-build-windows`. **Record which isolation it used and whether the copy check passed**: that decides whether the Windows target can work at all | admin; download |
+| [ ] | Add the `windows` target it printed to `build.json`, run `Grant-BuildDockerAccess.ps1` for the Windows engine, then **Build** `Hello sample` on the Windows target: succeeds, and the output folder has `Hello.exe`, `Hello.dll`, `Hello.deps.json` and `Hello.runtimeconfig.json` (no `Hello.pdb`) | admin |
 | [ ] | **Dropped files (new):** the `dotnet-hello` build lists `Hello.pdb` as left out (DebugSymbols) at the end of its log, and *Left out: 1 file* in the result | — |
 | [ ] | A build that runs past `timeoutSeconds` is *timed out*; a container with a network gets *refused* when `allowNetwork` is false | — |
 

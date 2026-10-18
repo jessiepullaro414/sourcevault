@@ -113,7 +113,7 @@ Editing it requires administrator rights. The service reads it at start and on e
       "container": "sourcevault-build-windows",
       "platform": "windows",
       "sourcePath": "C:\\sourcevault\\src",
-      "command": ["cmd.exe", "/c", "build.cmd"],
+      "command": ["cmd.exe", "/d", "/c", "build.cmd"],
       "artifactPath": "C:\\sourcevault\\out",
       "timeoutSeconds": 900,
       "maxArtifactMegabytes": 512,

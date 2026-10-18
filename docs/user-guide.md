@@ -88,7 +88,21 @@ powershell -ExecutionPolicy Bypass -File .\New-BuildContainer.ps1 -Distro Ubuntu
 
 Each project needs a `build.sh` at its top level that writes its output to `/sourcevault/out`. The package's `samples\dotnet-hello` is a fictional example: import it, then build it.
 - **No network in builds:** NuGet packages can't be downloaded, so projects with package references don't build yet.
-- **Windows containers need Windows Pro, Enterprise or Education.** On Windows Home, use the Linux target only.
+
+**The Windows build container** builds Windows-only code, such as WPF or WinForms projects. It needs Windows 11 Pro, Enterprise or Education.
+1. Turn on the **Containers** and **Hyper-V** features (*Turn Windows features on or off*), then restart.
+2. Install a Docker engine that runs Windows containers, for example Docker Desktop switched to Windows containers.
+3. From the package folder, as administrator:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\New-WindowsBuildContainer.ps1
+   ```
+   - **What it creates:** `sourcevault-build-windows`, from Microsoft's Windows Server Core .NET SDK image (about 2.7 GB), pinned by digest, with no network.
+   - **What it checks:** that a file can be copied into the running container and back out. That is the step the build service needs, and Docker may refuse it for Hyper-V-isolated containers. If this check fails, the Windows target can't build yet; keep the output.
+   - **What it prints:** the `windows` target for `build.json`.
+
+Each project builds on the Windows target with a `build.cmd` at its top level that writes to `C:\sourcevault\out`.
+
+**A project with a Windows part and a Linux part** has both scripts: `build.cmd` builds the Windows part and `build.sh` the Linux part. Every build sends the whole project; pick the target in the editor.
 
 1. **Install the build service** (as administrator, from the package folder):
    ```powershell

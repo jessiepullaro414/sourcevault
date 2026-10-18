@@ -72,7 +72,7 @@ Passed on this machine and no longer open: service identity, key provisioning un
 - Client signer check (waits for a signing decision; today: installed path plus hash pins), genuine separate-account/remote-client denial, and lock/revocation across several editors. The pins and the PID-reuse check still need their lab run.
 - Editor: the installed `--vault` smoke checklist against the service, the rest of the interactive native checklist, registry/policy debugging overrides, WebView2 profile/cache/crash persistence inspection, capture exclusion under real capture tools, and native confirmation that Monaco works (every asset now passes the policy in a test).
 - Importer, file operations, history and merge on the installed service.
-- Builds against a real Docker engine in WSL (TLS, the pinned .NET SDK container from `New-BuildContainer.ps1`, the dropped-file policy); an owner-approval release step (not built); NuGet packages in offline builds. A Windows-container target is not possible on this Windows 11 Home PC.
+- Builds against a real Docker engine in WSL (TLS, the pinned .NET SDK container from `New-BuildContainer.ps1`, the dropped-file policy); an owner-approval release step (not built); NuGet packages in offline builds. The Windows target (`New-WindowsBuildContainer.ps1`, now possible after the upgrade to Windows 11 Pro) is untested; its copy-into-a-running-container step is the open question.
 - Offline installer/update signing and independent security review. (License: MIT, chosen by the owner 2026-10-18.)
 
 See [next assignments](next-tasks.md) before dispatching further implementation. Only synthetic inputs should be used until the appropriate gates pass.

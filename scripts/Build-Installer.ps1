@@ -38,7 +38,7 @@ Get-ChildItem -LiteralPath (Join-Path $payload 'service') -Filter 'sourcevault.s
 
 # 4. Scripts, guide and third-party licenses.
 Copy-Item -LiteralPath (Join-Path $repoRoot 'installer\Setup-SourceVault.ps1'), (Join-Path $repoRoot 'installer\Uninstall-SourceVault.ps1'),
-    (Join-Path $repoRoot 'installer\Grant-BuildDockerAccess.ps1'), (Join-Path $repoRoot 'installer\New-WslDockerTls.ps1'), (Join-Path $repoRoot 'installer\New-BuildContainer.ps1'), (Join-Path $repoRoot 'installer\build.example.json') -Destination $package
+    (Join-Path $repoRoot 'installer\Grant-BuildDockerAccess.ps1'), (Join-Path $repoRoot 'installer\New-WslDockerTls.ps1'), (Join-Path $repoRoot 'installer\New-BuildContainer.ps1'), (Join-Path $repoRoot 'installer\New-WindowsBuildContainer.ps1'), (Join-Path $repoRoot 'installer\build.example.json') -Destination $package
 Copy-Item -LiteralPath (Join-Path $repoRoot 'installer\samples') -Destination $package -Recurse # synthetic projects for import and build checks
 Copy-Item -LiteralPath (Join-Path $repoRoot 'docs\user-guide.md') -Destination (Join-Path $package 'README.md')
 $licenses = Join-Path $package 'licenses'
