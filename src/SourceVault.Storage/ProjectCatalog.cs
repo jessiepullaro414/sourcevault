@@ -55,6 +55,9 @@ public sealed class ProjectCatalog
     private string IndexPath => Path.Combine(vaultRoot, "index");
     private string ProjectsPath => Path.Combine(vaultRoot, "projects");
     private string ProjectPath(Guid id) => Path.Combine(ProjectsPath, id.ToString("D"));
+    private string BuildsPath => Path.Combine(vaultRoot, "builds");
+    private string BuildLogPath(Guid id) => Path.Combine(BuildsPath, id.ToString("D"));
+    private readonly ConcurrentDictionary<Guid, RevisionStore> buildLogs = new();
 
     /// <summary>
     /// Verifies the whole vault and returns its projects. An empty root is a fresh vault with no projects.
@@ -77,6 +80,11 @@ public sealed class ProjectCatalog
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new VaultCatalogException(CatalogFailure.Layout); }
         // Every listed project must exist; a directory may otherwise exist only for a project awaiting cleanup.
         if (!expected.All(present.Contains) || !present.All(p => expected.Contains(p) || tombstoned.Contains(p))) throw new VaultCatalogException(CatalogFailure.Layout);
+        // Build logs (created on first build) may exist only for listed or tombstoned projects; they are verified when read.
+        string[] logs;
+        try { logs = Directory.Exists(BuildsPath) ? Directory.EnumerateFileSystemEntries(BuildsPath).Select(p => Path.GetFileName(p)!).ToArray() : []; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new VaultCatalogException(CatalogFailure.Layout); }
+        if (!logs.All(p => expected.Contains(p) || tombstoned.Contains(p))) throw new VaultCatalogException(CatalogFailure.Layout);
         var result = new List<ProjectInfo>();
         foreach (var (id, name) in state.Projects)
         {
@@ -130,7 +138,7 @@ public sealed class ProjectCatalog
             if (entry.ProjectId == Guid.Empty) throw new KeyNotFoundException();
             if (!string.Equals(entry.Name, confirmName, StringComparison.Ordinal)) throw new ArgumentException("Confirmation does not match the project name.");
             WriteIndex(new IndexState(state.Projects.Where(p => p.ProjectId != projectId).ToList(), [.. state.Deleted, projectId]));
-            stores.TryRemove(projectId, out _);
+            stores.TryRemove(projectId, out _); buildLogs.TryRemove(projectId, out _);
             // The deletion is recorded; anything that fails from here on only leaves the tombstone for a later purge.
             try { return PurgeLocked() == 0; }
             catch (Exception e) when (e is not OutOfMemoryException) { return false; }
@@ -167,14 +175,14 @@ public sealed class ProjectCatalog
         var remaining = new List<Guid>();
         foreach (var id in state.Deleted)
         {
-            var path = ProjectPath(id);
             try
             {
-                if (Directory.Exists(path))
-                {
-                    if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) Directory.Delete(path); // remove a link itself, never its target
-                    else Directory.Delete(path, recursive: true); // does not follow links inside
-                }
+                foreach (var path in new[] { ProjectPath(id), BuildLogPath(id) })
+                    if (Directory.Exists(path))
+                    {
+                        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) Directory.Delete(path); // remove a link itself, never its target
+                        else Directory.Delete(path, recursive: true); // does not follow links inside
+                    }
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { remaining.Add(id); }
         }
@@ -184,6 +192,31 @@ public sealed class ProjectCatalog
 
     /// <summary>The store of a project that <see cref="OpenAndVerify"/> returned.</summary>
     public RevisionStore OpenProject(Guid projectId) => Store(projectId);
+
+    /// <summary>
+    /// The encrypted build-log store of a live project (<c>builds&lt;projectId&gt;</c>), created on first use. Its store id is
+    /// derived from the project id, so its records can never be mistaken for the project's own.
+    /// </summary>
+    public RevisionStore OpenBuildLog(Guid projectId)
+    {
+        if (buildLogs.TryGetValue(projectId, out var cached)) return cached;
+        lock (createGate)
+        {
+            var state = ReadIndex() ?? throw new KeyNotFoundException();
+            if (!state.Projects.Any(p => p.ProjectId == projectId)) throw new KeyNotFoundException();
+            var store = new RevisionStore(BuildLogPath(projectId), BuildLogStoreId(projectId), protector);
+            if (!Directory.Exists(BuildLogPath(projectId))) { Directory.CreateDirectory(BuildsPath); store.Initialize(); }
+            return buildLogs.GetOrAdd(projectId, store);
+        }
+    }
+
+    internal static Guid BuildLogStoreId(Guid projectId)
+    {
+        Span<byte> input = stackalloc byte[48]; // 23-byte label, zero padding, then the 16-byte project id
+        "SourceVault.BuildLog.v1"u8.CopyTo(input);
+        projectId.TryWriteBytes(input[32..]);
+        return new Guid(SHA256.HashData(input)[..16]);
+    }
 
     private RevisionStore Store(Guid id) => stores.GetOrAdd(id, key => key == IndexStoreId
         ? new RevisionStore(IndexPath, IndexStoreId, protector)
@@ -201,7 +234,7 @@ public sealed class ProjectCatalog
         try { rootEntries = Directory.EnumerateFileSystemEntries(vaultRoot).Select(p => Path.GetFileName(p)!).ToArray(); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new VaultCatalogException(CatalogFailure.Layout); }
         if (rootEntries.Length == 0) return null;
-        if (!rootEntries.Contains("index", StringComparer.Ordinal) || rootEntries.Any(n => n is not ("index" or "projects")))
+        if (!rootEntries.Contains("index", StringComparer.Ordinal) || rootEntries.Any(n => n is not ("index" or "projects" or "builds")))
             throw new VaultCatalogException(CatalogFailure.Layout);
         byte[]? content = null;
         try

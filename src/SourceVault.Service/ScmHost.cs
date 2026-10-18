@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Security.Principal;
+using SourceVault.Build;
 using SourceVault.Storage;
 using SourceVault.Windows;
 
@@ -8,16 +9,21 @@ namespace SourceVault.Service;
 internal sealed class ScmHost
 {
     internal const string ServiceName = "SourceVault";
+    // The build service runs this same program as a separate service, under its own account. It never opens the vault
+    // or the TPM key, and its account has no access to either; it alone holds Docker access.
+    internal const string BuildServiceName = "SourceVaultBuild";
+    private readonly bool buildRole;
+    private string Name => buildRole ? BuildServiceName : ServiceName;
     private readonly Native.ServiceMain main;
     private readonly Native.Handler handler;
     private IntPtr statusHandle;
     private volatile ServiceLifecycle? lifecycle;
     private int failure;
-    internal ScmHost() { main = ServiceMain; handler = HandleControl; }
+    internal ScmHost(bool buildRole = false) { this.buildRole = buildRole; main = ServiceMain; handler = HandleControl; }
     internal int Run()
     {
         if (!OperatingSystem.IsWindows()) return 3;
-        var table = new[] { new Native.TableEntry { Name = ServiceName, Main = main }, new Native.TableEntry() };
+        var table = new[] { new Native.TableEntry { Name = Name, Main = main }, new Native.TableEntry() };
         if (!Native.StartServiceCtrlDispatcherW(table)) return 3;
         GC.KeepAlive(main);
         GC.KeepAlive(handler);
@@ -28,8 +34,16 @@ internal sealed class ScmHost
         // No exception may cross an unmanaged callback boundary.
         try
         {
-            statusHandle = Native.RegisterServiceCtrlHandlerExW(ServiceName, handler, IntPtr.Zero);
+            statusHandle = Native.RegisterServiceCtrlHandlerExW(Name, handler, IntPtr.Zero);
             if (statusHandle == IntPtr.Zero) { failure = 3; return; }
+            if (buildRole)
+            {
+                if (ParseStartMode(ReadArguments(count, arguments)) != StartMode.Run) { Report(new(ServiceState.Stopped, 0, 87, 0, 0)); return; }
+                using var build = new ServiceLifecycle(Report);
+                lifecycle = build;
+                build.Run(StartBuildEndpoints);
+                return;
+            }
             switch (ParseStartMode(ReadArguments(count, arguments)))
             {
                 case StartMode.ProvisionKey: Provision(); return;
@@ -70,7 +84,7 @@ internal sealed class ScmHost
             catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.OperatorsGroupMissing); }
             using var self = WindowsIdentity.GetCurrent();
             var pipeServer = new VaultPipeServer(VaultPipe.ProductionName, self.User!,
-                new PipePeerPolicy(operators, InstalledClients()), new VaultProtocol(catalog, projects));
+                new PipePeerPolicy(operators, InstalledClients()), new VaultProtocol(catalog, projects, builds: new BuildCoordinator(catalog, BuildServiceClient())));
             try { pipeServer.Start(); }
             catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
             {
@@ -82,6 +96,37 @@ internal sealed class ScmHost
         }
         catch { key.Dispose(); throw; }
     }
+
+    // Build role: running as NT SERVICE\SourceVaultBuild, serving the private build pipe to NT SERVICE\SourceVault only.
+    private IDisposable StartBuildEndpoints()
+    {
+        using var self = WindowsIdentity.GetCurrent();
+        SecurityIdentifier expectedSelf, vault;
+        try
+        {
+            expectedSelf = (SecurityIdentifier)new NTAccount("NT SERVICE", BuildServiceName).Translate(typeof(SecurityIdentifier));
+            vault = (SecurityIdentifier)new NTAccount("NT SERVICE", ServiceName).Translate(typeof(SecurityIdentifier));
+        }
+        catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.VaultServiceMissing); }
+        if (self.User is null || !expectedSelf.Equals(self.User)) throw new StartupRefusedException(StartupRefusedException.WrongIdentity);
+        var pipeServer = new BuildPipeServer(BuildChannel.PipeName, self.User!, vault, () => BuildConfig.Load(BuildConfig.DefaultPath),
+            target => new DockerEngineClient(target.Engine, target.CaFile, target.ClientCertificateThumbprint));
+        try { pipeServer.Start(); }
+        catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
+        {
+            pipeServer.Dispose();
+            throw new StartupRefusedException(StartupRefusedException.PipeUnavailable);
+        }
+        return pipeServer;
+    }
+
+    // Vault role: builds go to the build service, which must own its pipe as NT SERVICE\SourceVaultBuild. If that
+    // service is not installed or not running, build requests report Unavailable; nothing else is affected.
+    internal static IBuildService BuildServiceClient() => new BuildChannel.Client(_ =>
+    {
+        var build = (SecurityIdentifier)new NTAccount("NT SERVICE", BuildServiceName).Translate(typeof(SecurityIdentifier));
+        return Task.FromResult<Stream>(VaultPipe.Connect(BuildChannel.PipeName, build, TimeSpan.FromSeconds(5)));
+    });
 
     // Exact executables allowed to connect: apphost .exe files under the admin-owned install root. Never the
     // shared runtime's dotnet.exe, which would let any DLL connect.

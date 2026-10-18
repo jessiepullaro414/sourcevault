@@ -2,7 +2,7 @@ using SourceVault.Windows;
 namespace SourceVault.Service;
 internal static class Program
 {
-    internal static string ParseCommand(string[] args) => args.Length == 1 && args[0] is "metadata-probe" or "service" or "vault-root-check" or "vault-root-sddl"
+    internal static string ParseCommand(string[] args) => args.Length == 1 && args[0] is "metadata-probe" or "service" or "build-service" or "vault-root-check" or "vault-root-sddl"
         ? args[0] : throw new ArgumentException();
     public static int Main(string[] args)
     {
@@ -11,6 +11,7 @@ internal static class Program
             switch (ParseCommand(args))
             {
                 case "service": return new ScmHost().Run();
+                case "build-service": return new ScmHost(buildRole: true).Run();
                 case "vault-root-sddl":
                     // The exact root DACL the validator requires, for the administrator provisioning script.
                     Console.WriteLine(TrustedStorageRoot.ExpectedRootSddl(VaultRoot.Principals));
@@ -26,7 +27,7 @@ internal static class Program
             Console.WriteLine("hardwareProvider=available; persistedKeysOpened=false; sourceEndpoints=disabled; serviceDeployment=unverified");
             return 0;
         }
-        catch (ArgumentException) { Console.Error.WriteLine("usage: SourceVault.Service metadata-probe | service | vault-root-check | vault-root-sddl"); return 2; }
+        catch (ArgumentException) { Console.Error.WriteLine("usage: SourceVault.Service metadata-probe | service | build-service | vault-root-check | vault-root-sddl"); return 2; }
         catch { Console.Error.WriteLine("unavailable; no-fallback=true; sourceEndpoints=disabled"); return 3; }
     }
 }

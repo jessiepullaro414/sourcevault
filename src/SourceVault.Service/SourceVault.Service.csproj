@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="../SourceVault.Windows/SourceVault.Windows.csproj" />
     <ProjectReference Include="../SourceVault.Contracts/SourceVault.Contracts.csproj" />
+    <ProjectReference Include="../SourceVault.Build/SourceVault.Build.csproj" />
   </ItemGroup>
   <ItemGroup><InternalsVisibleTo Include="SourceVault.Service.Tests" /><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
 </Project>

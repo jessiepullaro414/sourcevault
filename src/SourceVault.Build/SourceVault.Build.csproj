@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Container builds (docs/files-history-builds-design.md, section 4). BCL only: the Docker Engine API is spoken
+       directly over its named pipe or TLS socket; no docker.exe, no packages. -->
+  <ItemGroup><ProjectReference Include="../SourceVault.Contracts/SourceVault.Contracts.csproj" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Build.Tests" /><InternalsVisibleTo Include="SourceVault.Service" /><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
+</Project>

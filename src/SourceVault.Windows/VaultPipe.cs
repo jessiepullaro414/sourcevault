@@ -54,10 +54,32 @@ public static class VaultPipe
     /// group get exactly <see cref="ClientRights"/>. Remote clients are rejected by the OS. The first instance uses
     /// first-instance protection so a squatter that created the name first makes startup fail.
     /// </summary>
-    public static NamedPipeServerStream CreateServerInstance(string name, SecurityIdentifier serverAccount, SecurityIdentifier operatorsGroup, bool first)
+    public static NamedPipeServerStream CreateServerInstance(string name, SecurityIdentifier serverAccount, SecurityIdentifier operatorsGroup, bool first) =>
+        CreateInstance(name, $"O:{serverAccount.Value}D:P(A;;FA;;;{serverAccount.Value})(A;;0x{ClientRights:X};;;SY)(A;;0x{ClientRights:X};;;{operatorsGroup.Value})", first);
+
+    /// <summary>
+    /// A service-to-service pipe (the build service's): owned by <paramref name="serverAccount"/>, which alone may create
+    /// instances; <paramref name="clientAccount"/> alone may connect, with exactly <see cref="ClientRights"/>. Remote
+    /// clients are rejected; the first instance uses first-instance protection.
+    /// </summary>
+    public static NamedPipeServerStream CreatePrivateServerInstance(string name, SecurityIdentifier serverAccount, SecurityIdentifier clientAccount, bool first) =>
+        CreateInstance(name, $"O:{serverAccount.Value}D:P(A;;FA;;;{serverAccount.Value})(A;;0x{ClientRights:X};;;{clientAccount.Value})", first);
+
+    /// <summary>For a private pipe: the OS client token's user must be <paramref name="expectedClient"/>. Throws otherwise.</summary>
+    public static void ValidatePrivateClient(NamedPipeServerStream pipe, SecurityIdentifier expectedClient)
+    {
+        SecurityIdentifier? user = null;
+        pipe.RunAsClient(() =>
+        {
+            using var identity = WindowsIdentity.GetCurrent(true) ?? throw new UnauthorizedAccessException();
+            user = identity.User;
+        });
+        if (user is null || !user.Equals(expectedClient)) throw new UnauthorizedAccessException("Peer rejected.");
+    }
+
+    private static NamedPipeServerStream CreateInstance(string name, string sddl, bool first)
     {
         ValidateName(name);
-        string sddl = $"O:{serverAccount.Value}D:P(A;;FA;;;{serverAccount.Value})(A;;0x{ClientRights:X};;;SY)(A;;0x{ClientRights:X};;;{operatorsGroup.Value})";
         Check(ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out var descriptor, out _));
         try
         {

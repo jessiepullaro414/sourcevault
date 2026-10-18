@@ -25,5 +25,7 @@ internal sealed class StartupRefusedException(uint code) : Exception
     internal const uint ProjectUntrusted = 12; // a project store failed authentication
     internal const uint OperatorsGroupMissing = 13; // local group "SourceVault Operators" does not exist
     internal const uint PipeUnavailable = 14; // the pipe could not be created, e.g. its name was already taken
+    internal const uint VaultServiceMissing = 15; // build service: NT SERVICE\SourceVault (its only client) does not exist
+    internal const uint WrongIdentity = 16; // build service: not running as NT SERVICE\SourceVaultBuild
     internal uint Code { get; } = code;
 }

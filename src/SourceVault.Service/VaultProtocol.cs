@@ -29,13 +29,15 @@ internal sealed class VaultProtocol
     internal static readonly TimeSpan IdleExpiry = TimeSpan.FromMinutes(5);
     internal static readonly TimeSpan AbsoluteExpiry = TimeSpan.FromMinutes(30);
     private readonly ProjectCatalog catalog;
+    private readonly BuildCoordinator? builds; // null: no build service configured, so build operations are Unavailable
     private readonly TimeProvider clock;
     // Projects created or verified in this process. Only the service creates projects, so this is authoritative.
     private readonly ConcurrentDictionary<Guid, bool> projects = new();
 
-    internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null)
+    internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null)
     {
         this.catalog = catalog;
+        this.builds = builds;
         this.clock = clock ?? TimeProvider.System;
         foreach (var p in verified) projects[p.ProjectId] = true;
     }
@@ -89,7 +91,12 @@ internal sealed class VaultProtocol
                 "ListDeletedFiles" => ListDeletedFiles(request),
                 "RestoreFile" => RestoreFile(request, state),
                 "ApplyEdits" => ApplyEdits(request, state),
-                "RequestBuild" or "GetBuildStatus" => Error(request, "Unavailable"),
+                "ListBuildTargets" or "RequestBuild" or "GetBuildStatus" or "ListBuilds" or "OpenBuildLog" when builds is null => Error(request, "Unavailable"),
+                "ListBuildTargets" => ListBuildTargets(request),
+                "RequestBuild" => RequestBuild(request, state),
+                "GetBuildStatus" => GetBuildStatus(request),
+                "ListBuilds" => ListBuilds(request),
+                "OpenBuildLog" => OpenBuildLog(request),
                 _ => Error(request, "UnsupportedOperation"),
             };
         }
@@ -97,6 +104,7 @@ internal sealed class VaultProtocol
         catch (KeyNotFoundException) { return Error(request, "NotFound"); }
         catch (NameExistsException) { return Error(request, "AlreadyExists"); }
         catch (RequestException e) { return Error(request, e.Code); }
+        catch (SourceVault.Build.BuildServiceUnavailableException) { return Error(request, "Unavailable"); }
         // Input is validated before the store is called, so anything the store or catalog rejects here is an
         // integrity, availability or key failure of the vault itself.
         catch (Exception e) when (e is VaultCatalogException or CryptographicException or IOException or InvalidDataException
@@ -299,6 +307,77 @@ internal sealed class VaultProtocol
         var name = Text(request.Body, "newName");
         if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest");
         return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Restore(Id(request.Body, "fileId"), name)], null, state);
+    }
+
+    // ---- builds (docs/files-history-builds-design.md, section 4) -----------------------------------------------------
+    private ProtocolResponse ListBuildTargets(ParsedRequest request)
+    {
+        Require(request.Body, "capability");
+        var names = builds!.Targets();
+        return Ok(request, w => { w.WriteStartArray("targets"); foreach (var n in names) w.WriteStringValue(n); w.WriteEndArray(); });
+    }
+
+    private ProtocolResponse RequestBuild(ParsedRequest request, ConnectionState state)
+    {
+        Require(request.Body, "capability", "projectId", "target");
+        var id = Id(request.Body, "projectId");
+        var target = Text(request.Body, "target");
+        if (target.Length is 0 or > 32) throw new RequestException("InvalidRequest");
+        if (!projects.ContainsKey(id)) throw new KeyNotFoundException();
+        int number;
+        try { number = builds!.Request(id, target, state.Actor); }
+        catch (InvalidOperationException) { throw new RequestException("LimitExceeded"); } // that target's queue is full
+        return Ok(request, w => w.WriteNumber("buildNumber", number));
+    }
+
+    private ProtocolResponse GetBuildStatus(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "buildNumber");
+        var id = Id(request.Body, "projectId");
+        if (!projects.ContainsKey(id)) throw new KeyNotFoundException();
+        var record = builds!.Status(id, Number(request.Body, "buildNumber"));
+        return Ok(request, w => WriteBuild(w, record));
+    }
+
+    private ProtocolResponse ListBuilds(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId");
+        var id = Id(request.Body, "projectId");
+        if (!projects.ContainsKey(id)) throw new KeyNotFoundException();
+        var list = builds!.List(id);
+        return Ok(request, w => { w.WriteStartArray("builds"); foreach (var r in list) { w.WriteStartObject(); WriteBuild(w, r); w.WriteEndObject(); } w.WriteEndArray(); },
+            capacity: 16384 + list.Count * 1024);
+    }
+
+    private ProtocolResponse OpenBuildLog(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "buildNumber");
+        var id = Id(request.Body, "projectId");
+        if (!projects.ContainsKey(id)) throw new KeyNotFoundException();
+        var content = builds!.OpenLog(id, Number(request.Body, "buildNumber"));
+        try { return Ok(request, w => w.WriteBase64String("contentBase64", content), capacity: 16384 + (content.Length + 2) / 3 * 4); }
+        finally { CryptographicOperations.ZeroMemory(content); }
+    }
+
+    private static void WriteBuild(Utf8JsonWriter w, BuildRecord r)
+    {
+        w.WriteNumber("buildNumber", r.Number); w.WriteString("target", r.Target); w.WriteString("state", r.State);
+        if (r.Reason is null) w.WriteNull("reason"); else w.WriteString("reason", r.Reason);
+        if (r.ExitCode is { } exit) w.WriteNumber("exitCode", exit); else w.WriteNull("exitCode");
+        if (r.RequestedBy is null) w.WriteNull("requestedBy"); else w.WriteString("requestedBy", r.RequestedBy);
+        w.WriteString("requestedAt", Time(r.RequestedAt));
+        if (r.FinishedAt is { } done) w.WriteString("finishedAt", Time(done)); else w.WriteNull("finishedAt");
+        if (r.ArtifactFolder is null) w.WriteNull("artifactFolder"); else w.WriteString("artifactFolder", r.ArtifactFolder);
+        w.WriteNumber("artifactFiles", r.ArtifactFiles); w.WriteNumber("artifactBytes", r.ArtifactBytes);
+        w.WriteBoolean("logAvailable", r.LogAvailable); w.WriteBoolean("logTruncated", r.LogTruncated);
+    }
+
+    private static string Time(DateTimeOffset value) => value.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static int Number(JsonElement body, string name)
+    {
+        var value = body.GetProperty(name);
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int n) && n >= 1 ? n : throw new RequestException("InvalidRequest");
     }
 
     private ProtocolResponse ListFiles(ParsedRequest request)

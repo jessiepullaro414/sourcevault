@@ -193,6 +193,56 @@ Test("history over the pipe: who and when, old versions, deleted files and resto
     }
 });
 
+Test("builds: queue, run through the build service, status, encrypted logs that survive a restart", () =>
+{
+    var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(vault);
+    var catalog = new ProjectCatalog(vault, key);
+    var fake = new FakeBuildService();
+    var builds = new BuildCoordinator(catalog, fake);
+    var finished = new System.Collections.Concurrent.BlockingCollection<BuildRecord>();
+    builds.Finished += (_, r) => finished.Add(r);
+    var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
+    using var server = new VaultPipeServer(name, me, new PipePeerPolicy(authenticatedUsers, [self]), new VaultProtocol(catalog, catalog.OpenAndVerify(), builds: builds));
+    server.Start();
+    using var c = new Client(name, me);
+    c.Begin();
+    var created = c.Ok("CreateProject", ("name", "Buildable"));
+    var project = created.GetProperty("projectId").GetString()!;
+    var snap = c.Ok("CreateFile", ("projectId", project), ("name", "src/app.ts"), ("expectedSnapshotId", created.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("export const synthetic = 1;\n"))).GetProperty("snapshotId").GetString()!;
+    c.Ok("CreateFile", ("projectId", project), ("name", "build.sh"), ("expectedSnapshotId", snap), ("contentBase64", B64("echo build\n")));
+    Assert(c.Ok("ListBuildTargets").GetProperty("targets").EnumerateArray().Select(t => t.GetString()).SequenceEqual(["linux"]), "targets");
+    Assert(c.Code("RequestBuild", ("projectId", project), ("target", "mac")) == "NotFound", "unknown target");
+    Assert(c.Code("RequestBuild", ("projectId", Guid.NewGuid().ToString("D")), ("target", "linux")) == "NotFound", "unknown project");
+    var number = c.Ok("RequestBuild", ("projectId", project), ("target", "linux")).GetProperty("buildNumber").GetInt32();
+    Assert(number == 1, "first build is 1");
+    Assert(finished.TryTake(out var done, TimeSpan.FromSeconds(20)) && done.State == "succeeded", "finished");
+    var status = c.Ok("GetBuildStatus", ("projectId", project), ("buildNumber", 1));
+    Assert(status.GetProperty("state").GetString() == "succeeded" && status.GetProperty("artifactFolder").GetString() == @"D:\artifacts\1-linux" && status.GetProperty("logAvailable").GetBoolean(), "status");
+    Assert(status.GetProperty("requestedBy").GetString() == me.Translate(typeof(NTAccount)).Value, "requested by the caller");
+    var log = Encoding.UTF8.GetString(c.Ok("OpenBuildLog", ("projectId", project), ("buildNumber", 1)).GetProperty("contentBase64").GetBytesFromBase64());
+    Assert(log == "synthetic-build-log: 2 files\n", "log text: " + log);
+    Assert(fake.Received.Single().Select(f => f.Name).OrderBy(n => n).SequenceEqual(["build.sh", "src/app.ts"]) && fake.ReceivedText["src/app.ts"] == "export const synthetic = 1;\n", "the build service got the decrypted project");
+    fake.Fail = true;
+    Assert(c.Ok("RequestBuild", ("projectId", project), ("target", "linux")).GetProperty("buildNumber").GetInt32() == 2, "second build");
+    Assert(finished.TryTake(out var second, TimeSpan.FromSeconds(20)) && second.State == "failed" && second.ExitCode == 1, "failed build recorded");
+    Assert(c.Ok("ListBuilds", ("projectId", project)).GetProperty("builds").EnumerateArray().Select(b => b.GetProperty("buildNumber").GetInt32()).SequenceEqual([2, 1]), "newest first");
+    Assert(c.Code("GetBuildStatus", ("projectId", project), ("buildNumber", 99)) == "NotFound", "unknown build");
+    Assert(c.Code("GetBuildStatus", ("projectId", project), ("buildNumber", 0)) == "InvalidRequest", "build numbers start at 1");
+    // Logs and records are encrypted on disk and come back after a restart.
+    foreach (var file in Directory.GetFiles(Path.Combine(vault, "builds"), "*", SearchOption.AllDirectories))
+        Assert(File.ReadAllBytes(file).AsSpan().IndexOf("synthetic-build-log"u8) < 0, "no plaintext log on disk");
+    var restarted = new BuildCoordinator(new ProjectCatalog(vault, key), fake);
+    Assert(restarted.List(Guid.Parse(project)).Select(r => r.State).SequenceEqual(["failed", "succeeded"]), "records after restart");
+    // A build service that is not there makes builds unavailable, nothing else.
+    var offline = new BuildCoordinator(catalog, new FakeBuildService { Offline = true });
+    try { offline.Targets(); throw new Exception("offline targets"); } catch (SourceVault.Build.BuildServiceUnavailableException) { }
+    // Deleting the project deletes its build logs.
+    c.Ok("DeleteProject", ("projectId", project), ("confirmName", "Buildable"));
+    Assert(!Directory.Exists(Path.Combine(vault, "builds", project)), "build logs removed with the project");
+    Assert(new ProjectCatalog(vault, key).OpenAndVerify().Count == 0, "vault still verifies");
+});
+
 Test("authorization: no session, wrong capability and a second BeginSession", () =>
 {
     var (server, pipe) = StartServer();
@@ -813,4 +863,26 @@ sealed class CountingProtector : IKeyProtector, IDisposable
     public byte[] WrapKey(ReadOnlySpan<byte> k) { lock (rsa) return rsa.Encrypt(k.ToArray(), RSAEncryptionPadding.OaepSHA256); }
     public byte[] UnwrapKey(ReadOnlySpan<byte> k) { lock (rsa) { Interlocked.Increment(ref Unwraps); return rsa.Decrypt(k.ToArray(), RSAEncryptionPadding.OaepSHA256); } }
     public void Dispose() => rsa.Dispose();
+}
+
+sealed class FakeBuildService : SourceVault.Build.IBuildService
+{
+    public bool Offline, Fail;
+    public readonly List<IReadOnlyList<(string Name, byte[] Content)>> Received = [];
+    public readonly Dictionary<string, string> ReceivedText = [];
+    public Task<IReadOnlyList<string>> TargetsAsync(CancellationToken ct) =>
+        Offline ? throw new SourceVault.Build.BuildServiceUnavailableException("NotRunning") : Task.FromResult<IReadOnlyList<string>>(["linux"]);
+    public Task<SourceVault.Build.BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IReadOnlyList<(string Name, byte[] Content)> files, CancellationToken ct)
+    {
+        if (Offline) throw new SourceVault.Build.BuildServiceUnavailableException("NotRunning");
+        lock (Received)
+        {
+            Received.Add(files.Select(f => (f.Name, f.Content.ToArray())).ToList());
+            foreach (var (name, content) in files) ReceivedText[name] = Encoding.UTF8.GetString(content);
+        }
+        var log = Encoding.UTF8.GetBytes($"synthetic-build-log: {files.Count} files\n");
+        return Task.FromResult(Fail
+            ? new SourceVault.Build.BuildReply("Failed", null, 1, log, false, null, 0, 0)
+            : new SourceVault.Build.BuildReply("Succeeded", null, 0, log, false, $@"D:\artifacts\{buildNumber}-{target}", 3, 1234));
+    }
 }

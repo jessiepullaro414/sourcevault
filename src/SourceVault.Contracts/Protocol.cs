@@ -108,7 +108,7 @@ public sealed class ProtocolCatalog
     public static readonly ProtocolCatalog V2 = new(2,
         "BeginSession", "ListProjects", "CreateProject", "ListFiles", "OpenDocument", "CreateFile",
         "ImportFiles", "DeleteProject", "RenameProject", "RenameFile", "RenameFolder", "DeleteFile", "ListHistory", "OpenRevision",
-        "ListDeletedFiles", "RestoreFile", "ApplyEdits", "EndSession",
+        "ListDeletedFiles", "RestoreFile", "ApplyEdits", "EndSession", "ListBuildTargets", "ListBuilds", "OpenBuildLog",
         "RequestBuild", "GetBuildStatus");
 }
 
