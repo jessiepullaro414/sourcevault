@@ -39,7 +39,52 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | Set the service to automatic start, reboot, and check it is RUNNING before anyone signs in | **reboot** |
 | [ ] | Sign-out with the editor open: the vault session ends, and nothing is left running | **sign-out** |
 | [ ] | A second Windows account that is *not* in *SourceVault Operators* is refused by the pipe | **sign-in as another user** |
-| [ ] | Power loss: start a long series of saves (the lab client), cut power (or hard-reset a VM), boot, check the service starts and the project opens at a complete revision | **hard power-off** |
+| [ ] | Power loss: `SourceVault.LabClient.exe save-loop`, cut power mid-run, boot, then `save-check` shows the last confirmed count (or one more) | **hard power-off** |
+
+### Runbook for the reboot round
+
+The package is `artifacts\installer\SourceVault-Setup\` in the repository (worktree) folder. "Elevated" means *Run as administrator*; "normal" means an ordinary PowerShell window. A reboot ends any Claude session, so reopen it afterwards and paste the outputs.
+
+**0. Install this build** (elevated). Close all editor and lab client windows first.
+```powershell
+cd "C:\Users\root\Project\SourceVault\.claude\worktrees\project-review-e08e79\artifacts\installer\SourceVault-Setup"
+powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update
+powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Status
+```
+Then, in a normal window: `& "C:\Program Files\SourceVault\client\SourceVault.LabClient.exe" check`. All steps should pass, which also proves the new hash pins accept the installed files. Open the editor from the Start menu once.
+
+**1. Automatic start** (elevated). `-Update` keeps the current start mode, which was manual for this lab install.
+```powershell
+sc.exe config SourceVault start= delayed-auto
+```
+
+**2. Reboot.** At the sign-in screen, wait **3 minutes** (delayed start runs about 2 minutes after boot), then sign in. Elevated:
+```powershell
+$svc = Get-CimInstance Win32_Service -Filter "Name='SourceVault'"; $svc.State
+(Get-Process -Id $svc.ProcessId).StartTime; (Get-Process explorer | Sort-Object StartTime | Select-Object -First 1).StartTime
+```
+The service should be `Running`, and its start time should be earlier than explorer's, which is when you signed in. Then run the start/stop check, and leave the service running:
+```powershell
+sc.exe stop SourceVault
+powershell -ExecutionPolicy Bypass -File "C:\Users\root\Project\SourceVault\.claude\worktrees\project-review-e08e79\scripts\lab\Test-ServiceLab.ps1" -LeaveRunning
+```
+Normal window: the lab client `check` again, then open the editor, open a project and save a file.
+
+**3. Sign-out.** With the editor open and unlocked, sign out (Start, your account, *Sign out*), then sign back in. In a normal window, `Get-Process SourceVault.Editor -ErrorAction SilentlyContinue` should show nothing. The editor then opens from the Start menu and unlocks normally.
+
+**4. Second account (optional).** You must create the account yourself: a standard local user, **not** in *SourceVault Operators*. Use *Switch user* to sign in as it and run `& "C:\Program Files\SourceVault\client\SourceVault.LabClient.exe" list`. Expected: "Access denied by the pipe". Sign that account out afterwards.
+
+**5. Power loss — last, and only when nothing else is running** (the other agent, unsaved work: everything open is lost). In a normal window:
+```powershell
+& "C:\Program Files\SourceVault\client\SourceVault.LabClient.exe" save-loop
+```
+Once some "saved N" lines have appeared, **photograph the screen** and immediately hold the power button until the PC turns off (or pull the plug). Boot, sign in, wait 3 minutes, then run elevated `Setup-SourceVault.ps1 -Status`. The service should be running, which means every project authenticated at startup. Normal window:
+```powershell
+& "C:\Program Files\SourceVault\client\SourceVault.LabClient.exe" save-check
+```
+The count must be the last N in the photo, or N+1.
+
+**Afterwards:** to go back to manual start, run `sc.exe config SourceVault start= demand` (elevated).
 
 ## Needs administrator and leaves the service stopped for a while
 

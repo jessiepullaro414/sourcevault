@@ -433,6 +433,13 @@ Test("lab client: check and list run end to end and never print document content
         Assert(SourceVault.LabClient.LabCommands.List(Connect, listing) == 0 && listing.ToString().Contains("check.txt"), "list");
         foreach (var output in new[] { first.ToString(), second.ToString(), listing.ToString() })
             Assert(!output.Contains("nonce:") && !output.Contains("# Synthetic demo") && !output.Contains("SourceVault lab client check"), "no content printed");
+        var missing = new StringWriter();
+        Assert(SourceVault.LabClient.LabCommands.SaveCheck(Connect, missing) == 1 && missing.ToString().Contains("run save-loop first"), "save-check before any loop");
+        var loop = new StringWriter();
+        Assert(SourceVault.LabClient.LabCommands.SaveLoop(Connect, loop, 5) == 0 && loop.ToString().Contains("starting at count 0") && loop.ToString().TrimEnd().EndsWith("saved 5"), "save-loop: " + loop);
+        Assert(SourceVault.LabClient.LabCommands.SaveLoop(Connect, new StringWriter(), 3) == 0, "a second loop continues");
+        var check = new StringWriter();
+        Assert(SourceVault.LabClient.LabCommands.SaveCheck(Connect, check) == 0 && check.ToString().Contains("holds count 8."), "save-check: " + check);
     }
 });
 
