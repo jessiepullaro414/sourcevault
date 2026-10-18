@@ -9,6 +9,11 @@ public enum LockReason { User, Closed, Expired }
 public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount);
 public sealed record FileSummary(Guid FileId, string Name, Guid RevisionId, int ByteLength);
 public sealed record OpenedDocument(FileSummary File, string Text);
+public sealed record RevisionSummary(Guid RevisionId, DateTimeOffset? SavedAt, string? SavedBy, int ByteLength, string Action, string Name);
+public sealed record HistoryListing(IReadOnlyList<RevisionSummary> Revisions, bool More);
+public sealed record DeletedSummary(Guid FileId, string Name, int ByteLength, DateTimeOffset DeletedAt, string? DeletedBy);
+/// <summary>Inputs for a three-way merge: the text the editor's copy is based on, and the current text and revision.</summary>
+public sealed record MergeSources(string BaseText, string TheirsText, Guid TheirsRevision);
 
 /// <summary>Outcome of a controller call: a protocol code, or <c>Conflict</c> / <c>Locked</c> / <c>NotOpen</c>.</summary>
 public sealed record VaultResult<T>(string Code, T? Value)
@@ -139,6 +144,77 @@ public sealed class EditorVaultController : IDisposable
         return result;
     });
 
+    /// <summary>One page of a file's history (live or deleted), newest first.</summary>
+    public Task<VaultResult<HistoryListing>> ListHistoryAsync(Guid projectId, Guid fileId, int page, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("ListHistory", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteString("fileId", fileId.ToString("D")); w.WriteNumber("page", page); }, null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<HistoryListing>(r.Code);
+        return new("Ok", new HistoryListing(r.Body.GetProperty("revisions").EnumerateArray().Select(e => new RevisionSummary(
+            Guid.Parse(e.GetProperty("revisionId").GetString()!),
+            e.GetProperty("savedAt").ValueKind == JsonValueKind.Null ? null : DateTimeOffset.Parse(e.GetProperty("savedAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+            e.GetProperty("savedBy").ValueKind == JsonValueKind.Null ? null : e.GetProperty("savedBy").GetString(),
+            e.GetProperty("byteLength").GetInt32(), e.GetProperty("action").GetString()!, e.GetProperty("name").GetString()!)).ToList(),
+            r.Body.GetProperty("more").GetBoolean()));
+    });
+
+    /// <summary>The text of one revision from a file's history.</summary>
+    public Task<VaultResult<string>> OpenRevisionAsync(Guid projectId, Guid fileId, Guid revisionId, CancellationToken ct = default) => Guarded(() =>
+        OpenRevisionCoreAsync(projectId, fileId, revisionId, ct));
+
+    private async Task<VaultResult<string>> OpenRevisionCoreAsync(Guid projectId, Guid fileId, Guid revisionId, CancellationToken ct)
+    {
+        var r = await client!.CallAsync("OpenRevision", w =>
+        {
+            w.WriteString("projectId", projectId.ToString("D")); w.WriteString("fileId", fileId.ToString("D")); w.WriteString("revisionId", revisionId.ToString("D"));
+        }, null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<string>(r.Code);
+        var bytes = r.Body.GetProperty("contentBase64").GetBytesFromBase64();
+        try { return new("Ok", StrictUtf8.GetString(bytes)); }
+        finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    public Task<VaultResult<IReadOnlyList<DeletedSummary>>> ListDeletedAsync(Guid projectId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("ListDeletedFiles", w => w.WriteString("projectId", projectId.ToString("D")), null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<IReadOnlyList<DeletedSummary>>(r.Code);
+        return new("Ok", r.Body.GetProperty("files").EnumerateArray().Select(e => new DeletedSummary(
+            Guid.Parse(e.GetProperty("fileId").GetString()!), e.GetProperty("name").GetString()!, e.GetProperty("byteLength").GetInt32(),
+            DateTimeOffset.Parse(e.GetProperty("deletedAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+            e.GetProperty("deletedBy").ValueKind == JsonValueKind.Null ? null : e.GetProperty("deletedBy").GetString())).ToList());
+    });
+
+    /// <summary>Restores a deleted file under <paramref name="name"/> (its old name or a new one).</summary>
+    public Task<VaultResult<bool>> RestoreFileAsync(Guid projectId, Guid fileId, string name, CancellationToken ct = default) => Guarded(() =>
+        ProjectChangeAsync(projectId, "RestoreFile", null, w => { w.WriteString("fileId", fileId.ToString("D")); w.WriteString("newName", name); }, _ => true, ct));
+
+    /// <summary>
+    /// For a three-way merge after a conflict: the text this editor's copy is based on, and the file's current text and
+    /// revision ("theirs"). Nothing changes until <see cref="SaveMergedAsync"/> is called with that revision.
+    /// </summary>
+    public Task<VaultResult<MergeSources>> MergeSourcesAsync(Guid projectId, Guid fileId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        if (!opened.TryGetValue((projectId, fileId), out var basedOn)) return Fail<MergeSources>("NotOpen");
+        var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+        if (!list.Ok) return Fail<MergeSources>(list.Code);
+        var file = list.Value!.Files.FirstOrDefault(f => f.FileId == fileId);
+        if (file is null) return Fail<MergeSources>("NotFound");
+        var baseText = await OpenRevisionCoreAsync(projectId, fileId, basedOn, ct).ConfigureAwait(false);
+        if (!baseText.Ok) return Fail<MergeSources>(baseText.Code);
+        var theirs = await OpenRevisionCoreAsync(projectId, fileId, file.RevisionId, ct).ConfigureAwait(false);
+        if (!theirs.Ok) return Fail<MergeSources>(theirs.Code);
+        return new("Ok", new MergeSources(baseText.Value!, theirs.Value!, file.RevisionId));
+    });
+
+    /// <summary>
+    /// Saves a merge result on top of <paramref name="theirsRevision"/>. <c>Conflict</c>: the file changed again since
+    /// the merge sources were fetched. On success the editor's copy is based on the new revision.
+    /// </summary>
+    public Task<VaultResult<FileSummary>> SaveMergedAsync(Guid projectId, Guid fileId, string text, Guid theirsRevision, CancellationToken ct = default) => Guarded(async () =>
+    {
+        if (!opened.ContainsKey((projectId, fileId))) return Fail<FileSummary>("NotOpen");
+        return await SaveCoreAsync(projectId, fileId, text, theirsRevision, ct).ConfigureAwait(false);
+    });
+
     // List, optionally check the listing, then commit against that snapshot; a commit racing in between is retried once.
     private async Task<VaultResult<T>> ProjectChangeAsync<T>(Guid projectId, string operation, Func<IReadOnlyList<FileSummary>, string?>? check,
         Action<Utf8JsonWriter> fields, Func<JsonElement, T> result, CancellationToken ct)
@@ -195,6 +271,12 @@ public sealed class EditorVaultController : IDisposable
     public Task<VaultResult<FileSummary>> SaveDocumentAsync(Guid projectId, Guid fileId, string text, CancellationToken ct = default) => Guarded(async () =>
     {
         if (!opened.TryGetValue((projectId, fileId), out var basedOn)) return Fail<FileSummary>("NotOpen");
+        return await SaveCoreAsync(projectId, fileId, text, basedOn, ct).ConfigureAwait(false);
+    });
+
+    // Saves only if the file is still at basedOn: per-file concurrency over the service's project-wide snapshot.
+    private async Task<VaultResult<FileSummary>> SaveCoreAsync(Guid projectId, Guid fileId, string text, Guid basedOn, CancellationToken ct)
+    {
         var bytes = Encode(text, out var code);
         if (bytes is null) return Fail<FileSummary>(code);
         try
@@ -221,7 +303,7 @@ public sealed class EditorVaultController : IDisposable
             return Fail<FileSummary>("RevisionConflict");
         }
         finally { CryptographicOperations.ZeroMemory(bytes); }
-    });
+    }
 
     /// <summary>Creates a file and treats it as opened at its first revision.</summary>
     public Task<VaultResult<FileSummary>> CreateFileAsync(Guid projectId, string name, string text, CancellationToken ct = default) => Guarded(async () =>

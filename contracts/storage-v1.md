@@ -52,3 +52,21 @@ The record format, manifest schema and store layout are unchanged. Only the plai
 ## Addition: renames and deletes in a commit (2026-10-18)
 
 `RevisionStore.CommitChanges` applies writes, renames and deletes in one all-or-nothing commit: deletes first, then renames, then writes. Renames apply together, so two names can be swapped. A rename keeps the file id and its revision record; only the manifest changes. Name and tree checks run before any record is written. The record format and manifest schema 2 are unchanged.
+
+## Manifest schema 3: per-file history (owner-approved, 2026-10-18)
+
+See `docs/files-history-builds-design.md`, section 2. The record format and codec are unchanged.
+
+- **Live file entries** gain `historyRecordId` and `historyRecordSha256`. Both are present or both are null. Null means the file was carried over from schema 2 and not saved since.
+- **`deleted[]`** lists up to 512 deleted files. Each entry has the same fields plus `deletedAt` (UTC, `yyyy-MM-ddTHH:mm:ss.fffZ`) and `deletedBy` (an account name or null). Older deletions drop off the list, but their records stay on disk.
+- **History records** are ordinary document records, with context `(project, file, record id)`, holding strict JSON `{version: 1, fileId, entries[1..256], older}`.
+  - Entries are oldest first: `{revisionId, recordSha256, byteLength, name, savedAt, savedBy, action}`.
+  - `action` is one of `created`, `edited`, `imported`, `restored` or `before-history`. `savedAt` is null only for `before-history`, the revision a schema-2 file had when its history began.
+  - `older` is null or `{recordId, recordSha256}`, pointing to the previous, full record.
+
+  The hash chain from manifest to history record to revision record authenticates every old revision.
+- **Writes** append to the file's newest history record, or start a new record that references it once it has 256 entries. **Renames** don't touch history. A **delete** moves the entry, with its history reference, to `deleted`. A **restore** moves it back at its last revision and appends a `restored` entry.
+- **Ids** are unique across live files, deleted files, revisions, history records and the snapshot.
+- **Readers** accept schema 2 and 3. Writers always write schema 3.
+- History records are verified when read, not on every operation: a missing or altered history record fails only operations that read that file's history.
+- **Cost:** the first save of an existing file in a store instance decrypts its newest history record, which is one TPM unwrap. Later saves use the cached copy.

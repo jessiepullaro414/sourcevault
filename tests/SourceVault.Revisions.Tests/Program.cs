@@ -171,7 +171,7 @@ using var counting = new CountingProtector();
 }
 int Unwraps(Action action) { counting.Unwraps = 0; action(); return counting.Unwraps; }
 
-Test("unwrap budget: cold list 1, warm list 0, open 1, commit 0, bulk read N", () =>
+Test("unwrap budget: cold list 1, warm list 0, open 1, cold edit 1 (history), warm edit 0, bulk read N", () =>
 {
     var p = Populated(8);
     var cold = new RevisionStore(p.Path, p.Project, counting);
@@ -179,7 +179,8 @@ Test("unwrap budget: cold list 1, warm list 0, open 1, commit 0, bulk read N", (
     Assert(Unwraps(() => cold.List()) == 0);
     Assert(Unwraps(() => CryptographicOperations.ZeroMemory(cold.Open(p.Snap.SnapshotId, p.Snap.Files[3].FileId))) == 1);
     StoreSnapshot next = p.Snap;
-    Assert(Unwraps(() => next = cold.Commit(p.Snap.SnapshotId, "file3.cs", Text("synthetic-edit"))) == 0);
+    Assert(Unwraps(() => next = cold.Commit(p.Snap.SnapshotId, "file3.cs", Text("synthetic-edit"))) == 1); // reads file3's history once
+    Assert(Unwraps(() => next = cold.Commit(next.SnapshotId, "file3.cs", Text("synthetic-edit"))) == 0);
     var seen = new List<string>();
     Assert(Unwraps(() => cold.ReadSnapshot(next.SnapshotId, (f, content) => seen.Add(f.LogicalName + "=" + Encoding.UTF8.GetString(content)))) == 8);
     Assert(seen.Count == 8 && seen.Contains("file3.cs=synthetic-edit") && seen.Contains("file7.cs=synthetic-content-7"));
@@ -193,7 +194,7 @@ Test("CommitMany: many files in one snapshot, all or nothing, no TPM unwraps whe
     var batch = Enumerable.Range(0, 50).Select(i => ($"src/m{i / 10}/f{i}.ts", Text($"synthetic-{i}"))).ToList();
     StoreSnapshot next = s;
     Assert(Unwraps(() => next = store.CommitMany(s.SnapshotId, batch)) == 0);
-    Assert(next.Files.Count == 50 && Directory.GetFiles(path, "*.svr").Length == 1 + 1 + 50);
+    Assert(next.Files.Count == 50 && Directory.GetFiles(path, "*.svr").Length == 1 + 1 + 50 + 50); // manifests, documents, history records
     Reject<ArgumentException>(() => store.CommitMany(next.SnapshotId, [("dup.ts", Text("a")), ("DUP.ts", Text("b"))]));
     Reject<RevisionConflictException>(() => store.CommitMany(s.SnapshotId, [("late.ts", Text("x"))]));
     var replaced = store.CommitMany(next.SnapshotId, [("src/m0/f0.ts", Text("synthetic-replaced")), ("new.ts", Text("synthetic-new"))]);
@@ -439,6 +440,107 @@ Test("catalog: rename project; names stay unique; letter-case change of its own 
     c.RenameProject(t.B.ProjectId, "Gamma");
     var after = new ProjectCatalog(t.Vault, counting).OpenAndVerify();
     Assert(after.Select(p => p.Name).SequenceEqual(new[] { "ALPHA", "Gamma" }) && after[0].ProjectId == t.A.ProjectId && after[0].Snapshot.Files.Count == 1);
+});
+
+// Per-file history (manifest schema 3).
+Test("history: every save is listed newest first with who and when; old revisions open; renames keep history", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-v1"))], @"PC\alice");
+    var id = s.Files.Single().FileId;
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-v2"))], @"PC\bob");
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(id, "src/a.ts")], @"PC\bob");
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Write("src/a.ts", Text("synthetic-v3"))], @"PC\alice");
+    var page = f.Store.ReadHistory(id, 0);
+    Assert(!page.More && page.Revisions.Select(r => r.Action).SequenceEqual(new[] { "edited", "edited", "created" }));
+    Assert(page.Revisions.Select(r => r.SavedBy).SequenceEqual(new[] { @"PC\alice", @"PC\bob", @"PC\alice" }));
+    Assert(page.Revisions.Select(r => r.Name).SequenceEqual(new[] { "src/a.ts", "a.ts", "a.ts" }));
+    Assert(page.Revisions.All(r => r.SavedAt is { } at && Math.Abs((DateTimeOffset.UtcNow - at).TotalMinutes) < 5));
+    Assert(page.Revisions[0].RevisionId == s.Files.Single().RevisionId);
+    Assert(Encoding.UTF8.GetString(f.Store.OpenRevision(id, page.Revisions[2].RevisionId)) == "synthetic-v1");
+    Assert(Encoding.UTF8.GetString(f.Store.OpenRevision(id, page.Revisions[1].RevisionId)) == "synthetic-v2");
+    Reject<KeyNotFoundException>(() => f.Store.OpenRevision(id, Guid.NewGuid()));
+    Reject<KeyNotFoundException>(() => f.Store.ReadHistory(Guid.NewGuid(), 0));
+    Assert(f.Store.ReadHistory(id, 1).Revisions.Count == 0);
+    // Reopened by a fresh instance (cold caches), the history and old content still authenticate.
+    var fresh = new RevisionStore(f.Path, f.Project, key);
+    Assert(fresh.ReadHistory(id, 0).Revisions.Count == 3 && Encoding.UTF8.GetString(fresh.OpenRevision(id, page.Revisions[2].RevisionId)) == "synthetic-v1");
+    // History is encrypted: account names appear nowhere on disk.
+    foreach (var file in Directory.GetFiles(f.Path)) Assert(File.ReadAllBytes(file).AsSpan().IndexOf(Text("alice")) < 0);
+});
+
+Test("history: deleted files keep their history and can be restored, under their old name or a new one", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    s = f.Store.CommitMany(s.SnapshotId, [("a.ts", Text("synthetic-a1")), ("b.ts", Text("synthetic-b"))]);
+    var a = s.Files.Single(x => x.LogicalName == "a.ts").FileId;
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-a2"))]);
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Delete(a)], @"PC\carol");
+    var deleted = f.Store.ListDeleted().Single();
+    Assert(deleted.FileId == a && deleted.LogicalName == "a.ts" && deleted.DeletedBy == @"PC\carol" && s.Files.Count == 1);
+    Assert(f.Store.ReadHistory(a, 0).Revisions.Count == 2);
+    Assert(Encoding.UTF8.GetString(f.Store.OpenRevision(a, f.Store.ReadHistory(a, 0).Revisions[1].RevisionId)) == "synthetic-a1");
+    Reject<KeyNotFoundException>(() => f.Store.Open(s.SnapshotId, a));
+    // Someone takes the name; restoring under it clashes, under another name works and keeps the file id.
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-new"))]);
+    Reject<NameExistsException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Restore(a, "A.TS")]));
+    Reject<KeyNotFoundException>(() => f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Restore(s.Files[0].FileId, "x.ts")])); // not deleted
+    s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Restore(a, "old/a.ts")], @"PC\carol");
+    var restored = s.Files.Single(x => x.FileId == a);
+    Assert(restored.LogicalName == "old/a.ts" && Encoding.UTF8.GetString(f.Store.Open(s.SnapshotId, a)) == "synthetic-a2");
+    Assert(f.Store.ListDeleted().Count == 0 && f.Store.ReadHistory(a, 0).Revisions[0].Action == "restored");
+});
+
+Test("history: a schema 2 store upgrades; its files start history at the revision they had", () =>
+{
+    var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path);
+    var project = Guid.NewGuid(); var fileId = Guid.NewGuid(); var revision = Guid.NewGuid(); var snapshot = Guid.NewGuid();
+    var content = Text("synthetic-legacy");
+    var record = RecordCodec.Encrypt(new(project, fileId, revision, RecordKind.Document), content, key);
+    File.WriteAllBytes(Path.Combine(path, revision + ".svr"), record);
+    var manifest = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, snapshotId = snapshot.ToString("D"),
+        files = new[] { new { fileId = fileId.ToString("D"), name = "legacy.ts", revisionId = revision.ToString("D"), byteLength = content.Length, recordSha256 = Convert.ToHexStringLower(SHA256.HashData(record)) } } });
+    File.WriteAllBytes(Path.Combine(path, snapshot + ".svr"), RecordCodec.Encrypt(new(project, Guid.Empty, snapshot, RecordKind.Manifest), manifest, key));
+    File.WriteAllText(Path.Combine(path, "HEAD"), snapshot.ToString("D"));
+    var store = new RevisionStore(path, project, key);
+    var s = store.List();
+    Assert(s.Files.Single().LogicalName == "legacy.ts");
+    var before = store.ReadHistory(fileId, 0).Revisions.Single();
+    Assert(before.Action == "before-history" && before.SavedAt is null && before.RevisionId == revision);
+    s = store.CommitChanges(s.SnapshotId, [new StoreChange.Write("legacy.ts", Text("synthetic-after"))], @"PC\dave");
+    var history = store.ReadHistory(fileId, 0).Revisions;
+    Assert(history.Select(r => r.Action).SequenceEqual(new[] { "edited", "before-history" }));
+    Assert(Encoding.UTF8.GetString(store.OpenRevision(fileId, revision)) == "synthetic-legacy");
+    Assert(new RevisionStore(path, project, key).List().SnapshotId == s.SnapshotId); // the upgraded manifest reads back
+});
+
+Test("history: chunks chain after 256 saves; a tampered history record fails only that file's history", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    s = f.Store.CommitMany(s.SnapshotId, [("a.ts", Text("synthetic-0")), ("b.ts", Text("synthetic-b"))]);
+    var a = s.Files.Single(x => x.LogicalName == "a.ts").FileId;
+    for (int i = 1; i <= 300; i++) s = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-" + i))]);
+    var first = f.Store.ReadHistory(a, 0); var second = f.Store.ReadHistory(a, 1);
+    Assert(first.More && first.Revisions.Count == 45 && !second.More && second.Revisions.Count == 256);
+    Assert(Encoding.UTF8.GetString(f.Store.OpenRevision(a, second.Revisions[^1].RevisionId)) == "synthetic-0");
+    // Corrupt one byte of a's newest history record: its history fails closed, everything else still works.
+    var known = new HashSet<string>(s.Files.Select(x => x.RevisionId + ".svr")) { File.ReadAllText(Path.Combine(f.Path, "HEAD")) + ".svr" };
+    var fresh = new RevisionStore(f.Path, f.Project, key);
+    var newest = Directory.GetFiles(f.Path, "*.svr").Select(p => new FileInfo(p)).Where(i => !known.Contains(i.Name)).OrderByDescending(i => i.LastWriteTimeUtc).ThenByDescending(i => i.CreationTimeUtc).First();
+    var raw = File.ReadAllBytes(newest.FullName); raw[^1] ^= 1; File.WriteAllBytes(newest.FullName, raw);
+    Reject<InvalidDataException>(() => fresh.ReadHistory(a, 0));
+    Assert(fresh.List().Files.Count == 2 && Encoding.UTF8.GetString(fresh.Open(s.SnapshotId, a)) == "synthetic-300");
+});
+
+Test("history: warm saves need no TPM unwrap; a cold save of an existing file needs one", () =>
+{
+    var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); var project = Guid.NewGuid();
+    var store = new RevisionStore(path, project, counting);
+    var s = store.Initialize();
+    s = store.CommitMany(s.SnapshotId, [("a.ts", Text("synthetic-1"))]);
+    Assert(Unwraps(() => s = store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-2"))])) == 0);
+    var cold = new RevisionStore(path, project, counting);
+    Assert(Unwraps(() => cold.CommitChanges(cold.List().SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-3"))])) == 2); // manifest + history
 });
 
 foreach (var target in new[] { "LOCK", "HEAD", "blob", "root" })

@@ -9,7 +9,9 @@ const REQUEST_TYPE = 'sourcevault.vault.request';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ARGS = {
   listProjects: [], createProject: ['name'], deleteProject: ['projectId', 'name'], renameProject: ['projectId', 'newName'],
-  renameFile: ['projectId', 'fileId', 'newName'], renameFolder: ['projectId', 'name', 'newName'], deleteFile: ['projectId', 'fileId'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
+  renameFile: ['projectId', 'fileId', 'newName'], renameFolder: ['projectId', 'name', 'newName'], deleteFile: ['projectId', 'fileId'],
+  listHistory: ['projectId', 'fileId', 'page'], openRevision: ['projectId', 'fileId', 'revisionId'], listDeleted: ['projectId'],
+  restoreFile: ['projectId', 'fileId', 'newName'], mergeSources: ['projectId', 'fileId'], saveMerged: ['projectId', 'fileId', 'text', 'revisionId'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
   closeDocument: ['projectId', 'fileId'], saveDocument: ['projectId', 'fileId', 'text'], createFile: ['projectId', 'name', 'text'],
   lock: [], unlock: [],
 };
@@ -36,7 +38,9 @@ export class FakeVaultHost {
   locked = true;
   failNextUnlock = null;   // e.g. 'ServiceNotRunning' to rehearse unlock errors
   latencyMs;
-  #projects = new Map();   // projectId -> { name, files: Map(fileId -> { name, text, rev }) }
+  #projects = new Map();   // projectId -> { name, files: Map(fileId -> file), deleted: Map(fileId -> { file, deletedAt, deletedBy }) }
+                           // file: { name, text, rev, history: [{ revisionId, rev, text, savedAt, savedBy, action, name }] }
+  actor = 'FAKE\\operator';
   #opened = new Map();     // `${projectId}/${fileId}` -> rev the editor's copy is based on
   #listeners = new Set();
   requests = [];           // operations received (names only), for tests
@@ -44,8 +48,8 @@ export class FakeVaultHost {
   constructor({ latencyMs = 0, seed = SEED } = {}) {
     this.latencyMs = latencyMs;
     for (const project of seed) {
-      const files = new Map(project.files.map(([name, text]) => [crypto.randomUUID(), { name, text, rev: 1 }]));
-      this.#projects.set(crypto.randomUUID(), { name: project.name, files });
+      const files = new Map(project.files.map(([name, text]) => [crypto.randomUUID(), this.#newFile(name, text, 'created')]));
+      this.#projects.set(crypto.randomUUID(), { name: project.name, files, deleted: new Map() });
     }
   }
 
@@ -65,8 +69,13 @@ export class FakeVaultHost {
     const [p, f] = key.split('/');
     const file = this.#projects.get(p)?.files.get(f);
     if (!file) return false;
-    file.text = text; file.rev++;
+    this.#save(file, text, 'edited', 'FAKE\\someone-else');
     return true;
+  }
+  #newFile(name, text, action) { const file = { name, text, rev: 0, history: [] }; this.#save(file, text, action); return file; }
+  #save(file, text, action, by = this.actor) {
+    file.text = text; file.rev++;
+    file.history.push({ revisionId: crypto.randomUUID(), rev: file.rev, text, savedAt: new Date().toISOString(), savedBy: by, action, name: file.name });
   }
   /** Host-side lock: Windows lock (`windows`), session expiry (`expired`) or a dropped connection (`closed`). */
   simulateLock(reason = 'windows') { this.locked = true; this.#emit({ type: 'sourcevault.vault.locked', reason }); }
@@ -95,7 +104,7 @@ export class FakeVaultHost {
       case 'createProject': {
         if ([...this.#projects.values()].some(p => p.name.toLowerCase() === args.name.toLowerCase())) return reply('AlreadyExists');
         const projectId = crypto.randomUUID();
-        this.#projects.set(projectId, { name: args.name, files: new Map() });
+        this.#projects.set(projectId, { name: args.name, files: new Map(), deleted: new Map() });
         return reply('Ok', { projectId, name: args.name });
       }
       case 'deleteProject': {
@@ -133,7 +142,50 @@ export class FakeVaultHost {
         if (!file) return reply('NotFound');
         if (this.#opened.has(key) && this.#opened.get(key) !== file.rev) return reply('Conflict');
         project.files.delete(args.fileId); this.#opened.delete(key);
+        project.deleted.set(args.fileId, { file, deletedAt: new Date().toISOString(), deletedBy: this.actor });
         return reply('Ok', {});
+      }
+      case 'listHistory': {
+        if (!Number.isInteger(args.page) || args.page < 0) return;
+        const file = project.files.get(args.fileId) ?? project.deleted.get(args.fileId)?.file;
+        if (!file) return reply('NotFound');
+        const revisions = args.page > 0 ? [] : [...file.history].reverse().map(({ revisionId, savedAt, savedBy, text, action, name }) => ({ revisionId, savedAt, savedBy, byteLength: bytes(text), action, name }));
+        return reply('Ok', { revisions, more: false });
+      }
+      case 'openRevision': {
+        if (!isId(args.revisionId)) return;
+        const file = project.files.get(args.fileId) ?? project.deleted.get(args.fileId)?.file;
+        const revision = file?.history.find(r => r.revisionId === args.revisionId);
+        return revision ? reply('Ok', { text: revision.text }) : reply('NotFound');
+      }
+      case 'listDeleted':
+        return reply('Ok', { files: [...project.deleted].reverse().map(([fileId, d]) => ({ fileId, name: d.file.name, byteLength: bytes(d.file.text), deletedAt: d.deletedAt, deletedBy: d.deletedBy })) });
+      case 'restoreFile': {
+        const entry = project.deleted.get(args.fileId);
+        if (!entry) return reply('NotFound');
+        if (!validFileName(args.newName)) return reply('InvalidRequest');
+        project.files.set(args.fileId, entry.file);
+        if (!this.#treeOk(project, new Map([[args.fileId, args.newName]]))) { project.files.delete(args.fileId); return reply('AlreadyExists'); }
+        project.deleted.delete(args.fileId);
+        entry.file.name = args.newName;
+        entry.file.history.push({ ...entry.file.history.at(-1), savedAt: new Date().toISOString(), savedBy: this.actor, action: 'restored', name: args.newName });
+        return reply('Ok', {});
+      }
+      case 'mergeSources': {
+        const file = project.files.get(args.fileId);
+        if (!file) return reply('NotFound');
+        if (!this.#opened.has(key)) return reply('NotOpen');
+        const base = file.history.find(r => r.rev === this.#opened.get(key));
+        return reply('Ok', { base: base?.text ?? '', theirs: file.text, theirsRevisionId: file.history.at(-1).revisionId });
+      }
+      case 'saveMerged': {
+        if (!isId(args.revisionId)) return;
+        if (!this.#opened.has(key)) return reply('NotOpen');
+        const file = project.files.get(args.fileId);
+        if (!file) return reply('NotFound');
+        if (file.history.at(-1).revisionId !== args.revisionId) return reply('Conflict');
+        this.#save(file, args.text, 'edited'); this.#opened.set(key, file.rev);
+        return reply('Ok', { byteLength: bytes(args.text) });
       }
       case 'listFiles':
         return reply('Ok', { files: [...project.files].map(([fileId, f]) => ({ fileId, name: f.name, byteLength: bytes(f.text) })) });
@@ -149,14 +201,14 @@ export class FakeVaultHost {
         const file = project.files.get(args.fileId);
         if (!file) return reply('NotFound');
         if (file.rev !== this.#opened.get(key)) return reply('Conflict');
-        file.text = args.text; file.rev++; this.#opened.set(key, file.rev);
+        this.#save(file, args.text, 'edited'); this.#opened.set(key, file.rev);
         return reply('Ok', { byteLength: bytes(args.text) });
       }
       case 'createFile': {
         if (!validFileName(args.name)) return reply('InvalidRequest');
         if ([...project.files.values()].some(f => f.name.toLowerCase() === args.name.toLowerCase())) return reply('AlreadyExists');
         const fileId = crypto.randomUUID();
-        project.files.set(fileId, { name: args.name, text: args.text, rev: 1 });
+        project.files.set(fileId, this.#newFile(args.name, args.text, 'created'));
         this.#opened.set(`${args.projectId}/${fileId}`, 1);
         return reply('Ok', { fileId, name: args.name });
       }

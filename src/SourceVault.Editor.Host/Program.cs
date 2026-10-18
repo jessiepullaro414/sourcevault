@@ -225,6 +225,43 @@ internal sealed class EditorWindow : Window
                 VaultOperation.RenameFolder => Respond(request, await controller.RenameFolderAsync(request.ProjectId, request.Name!, request.NewName!), (w, count) =>
                     w.WriteNumber("renamed", count)),
                 VaultOperation.DeleteFile => Respond(request, await controller.DeleteFileAsync(request.ProjectId, request.FileId), (w, _) => { }),
+                VaultOperation.ListHistory => Respond(request, await controller.ListHistoryAsync(request.ProjectId, request.FileId, request.Page), (w, h) =>
+                {
+                    w.WriteStartArray("revisions");
+                    foreach (var r in h.Revisions)
+                    {
+                        w.WriteStartObject();
+                        w.WriteString("revisionId", r.RevisionId.ToString("D"));
+                        if (r.SavedAt is { } at) w.WriteString("savedAt", at.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)); else w.WriteNull("savedAt");
+                        if (r.SavedBy is { } by) w.WriteString("savedBy", by); else w.WriteNull("savedBy");
+                        w.WriteNumber("byteLength", r.ByteLength); w.WriteString("action", r.Action); w.WriteString("name", r.Name);
+                        w.WriteEndObject();
+                    }
+                    w.WriteEndArray();
+                    w.WriteBoolean("more", h.More);
+                }),
+                VaultOperation.OpenRevision => Respond(request, await controller.OpenRevisionAsync(request.ProjectId, request.FileId, request.RevisionId), (w, text) =>
+                    w.WriteString("text", text)),
+                VaultOperation.ListDeleted => Respond(request, await controller.ListDeletedAsync(request.ProjectId), (w, files) =>
+                {
+                    w.WriteStartArray("files");
+                    foreach (var f in files)
+                    {
+                        w.WriteStartObject();
+                        w.WriteString("fileId", f.FileId.ToString("D")); w.WriteString("name", f.Name); w.WriteNumber("byteLength", f.ByteLength);
+                        w.WriteString("deletedAt", f.DeletedAt.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+                        if (f.DeletedBy is { } by) w.WriteString("deletedBy", by); else w.WriteNull("deletedBy");
+                        w.WriteEndObject();
+                    }
+                    w.WriteEndArray();
+                }),
+                VaultOperation.RestoreFile => Respond(request, await controller.RestoreFileAsync(request.ProjectId, request.FileId, request.NewName!), (w, _) => { }),
+                VaultOperation.MergeSources => Respond(request, await controller.MergeSourcesAsync(request.ProjectId, request.FileId), (w, m) =>
+                {
+                    w.WriteString("base", m.BaseText); w.WriteString("theirs", m.TheirsText); w.WriteString("theirsRevisionId", m.TheirsRevision.ToString("D"));
+                }),
+                VaultOperation.SaveMerged => Respond(request, await controller.SaveMergedAsync(request.ProjectId, request.FileId, request.Text!, request.RevisionId), (w, f) =>
+                    w.WriteNumber("byteLength", f.ByteLength)),
                 VaultOperation.ListFiles => Respond(request, await controller.ListFilesAsync(request.ProjectId), (w, files) =>
                 {
                     // Revision ids stay in the host.

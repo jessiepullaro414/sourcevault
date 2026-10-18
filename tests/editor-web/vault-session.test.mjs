@@ -142,6 +142,34 @@ test('delete files; a draft of a file deleted elsewhere can be discarded or save
   assert.equal(session.file(newId).path, 'main.ts');
 });
 
+test('history lists saved versions; an old version restores as unsaved edits; deleted files restore', async () => {
+  const { host, session, projectId, byName } = await opened();
+  const main = byName('main.ts');
+  await session.open(main.id);
+  session.edit(main.id, '// second version\n');
+  await session.save(main.id);
+  const { revisions, more } = await session.listHistory(main.id);
+  assert.equal(more, false);
+  assert.deepEqual(revisions.map(r => r.action), ['edited', 'created']);
+  assert.equal(revisions[0].savedBy, 'FAKE\\operator');
+  const original = await session.openRevision(main.id, revisions[1].revisionId);
+  assert.match(original, /greet\('synthetic'\)/);
+  await session.restoreRevision(main.id, revisions[1].revisionId);
+  assert.equal(session.file(main.id).text, original); assert.equal(session.dirty(main.id), true, 'restored as unsaved edits');
+  await session.save(main.id);
+  assert.equal(host.textOf(projectId, main.id), original);
+  // Delete, list deleted, restore under its old name; a taken name is AlreadyExists.
+  await session.deleteFile(main.id);
+  const deleted = await session.listDeleted();
+  assert.equal(deleted.length, 1); assert.equal(deleted[0].name, 'main.ts'); assert.equal(deleted[0].deletedBy, 'FAKE\\operator');
+  assert.equal((await session.listHistory(deleted[0].fileId)).revisions.length, 3, 'a deleted file keeps its history');
+  await session.createFile('main.ts', '// new file in the old place\n');
+  await rejectsWith(session.restoreFile(deleted[0].fileId, 'MAIN.TS'), 'AlreadyExists');
+  await session.restoreFile(deleted[0].fileId, 'old/main.ts');
+  assert.equal(session.file(deleted[0].fileId).path, 'old/main.ts');
+  assert.deepEqual(await session.listDeleted(), []);
+});
+
 test('user lock keeps drafts hidden; unlock reports files changed meanwhile as conflicts', async () => {
   const { host, session, projectId, byName } = await opened();
   const main = byName('main.ts');

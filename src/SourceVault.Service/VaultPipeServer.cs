@@ -63,6 +63,14 @@ internal sealed class VaultPipeServer : IDisposable
         }
     }
 
+    // The operator's account name ("PC\alice") for file history, which stores it only inside encrypted records.
+    // Falls back to the SID text when the name can't be resolved.
+    private static string AccountName(SecurityIdentifier user)
+    {
+        try { return user.Translate(typeof(NTAccount)).Value; }
+        catch (Exception e) when (e is IdentityNotMappedException or SystemException) { return user.Value; }
+    }
+
     private async Task ServeAsync(NamedPipeServerStream pipe, ConnectionState state)
     {
         PipePeer? first = null;
@@ -73,7 +81,7 @@ internal sealed class VaultPipeServer : IDisposable
             try
             {
                 var peer = VaultPipe.ValidateClient(pipe, policy);
-                if (first is null) { first = peer; state.WindowsSession = peer.Session; }
+                if (first is null) { first = peer; state.WindowsSession = peer.Session; state.Actor = AccountName(peer.User); }
                 else if (!peer.User.Equals(first.User) || peer.Session != first.Session || peer.ProcessId != first.ProcessId) return;
                 ProtocolResponse response;
                 using (var request = ProtocolParser.ParseRequest(frame, ProtocolCatalog.V2))

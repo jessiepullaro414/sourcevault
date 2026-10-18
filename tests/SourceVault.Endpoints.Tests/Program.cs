@@ -155,6 +155,44 @@ Test("RenameFile, RenameFolder, DeleteFile and RenameProject over the pipe", () 
     }
 });
 
+Test("history over the pipe: who and when, old versions, deleted files and restore", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var created = c.Ok("CreateProject", ("name", "History"));
+        var project = created.GetProperty("projectId").GetString()!;
+        var file = c.Ok("CreateFile", ("projectId", project), ("name", "a.ts"), ("expectedSnapshotId", created.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("version one")));
+        var fileId = file.GetProperty("fileId").GetString()!; var firstRevision = file.GetProperty("revisionId").GetString()!;
+        var snap = c.Ok("ApplyEdits", ("projectId", project), ("fileId", fileId), ("expectedSnapshotId", file.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("version two"))).GetProperty("snapshotId").GetString()!;
+        var history = c.Ok("ListHistory", ("projectId", project), ("fileId", fileId), ("page", 0));
+        var revisions = history.GetProperty("revisions").EnumerateArray().ToList();
+        Assert(revisions.Count == 2 && !history.GetProperty("more").GetBoolean(), "two versions");
+        Assert(revisions[0].GetProperty("action").GetString() == "edited" && revisions[1].GetProperty("action").GetString() == "created", "actions");
+        var account = me.Translate(typeof(NTAccount)).Value;
+        Assert(revisions.All(r => r.GetProperty("savedBy").GetString() == account), "saved by the caller's account");
+        Assert(revisions[1].GetProperty("revisionId").GetString() == firstRevision, "oldest is the first revision");
+        var old = c.Ok("OpenRevision", ("projectId", project), ("fileId", fileId), ("revisionId", firstRevision));
+        Assert(Encoding.UTF8.GetString(old.GetProperty("contentBase64").GetBytesFromBase64()) == "version one", "old content");
+        Assert(c.Code("OpenRevision", ("projectId", project), ("fileId", fileId), ("revisionId", Guid.NewGuid().ToString("D"))) == "NotFound", "unknown revision");
+        Assert(c.Code("ListHistory", ("projectId", project), ("fileId", fileId), ("page", -1)) == "InvalidRequest", "negative page");
+        Assert(c.Code("ListHistory", ("projectId", project), ("fileId", fileId), ("page", "0")) == "InvalidRequest", "page as text");
+        snap = c.Ok("DeleteFile", ("projectId", project), ("fileId", fileId), ("expectedSnapshotId", snap)).GetProperty("snapshotId").GetString()!;
+        var deleted = c.Ok("ListDeletedFiles", ("projectId", project)).GetProperty("files").EnumerateArray().Single();
+        Assert(deleted.GetProperty("fileId").GetString() == fileId && deleted.GetProperty("name").GetString() == "a.ts" && deleted.GetProperty("deletedBy").GetString() == account, "deleted listed");
+        Assert(c.Ok("ListHistory", ("projectId", project), ("fileId", fileId), ("page", 0)).GetProperty("revisions").GetArrayLength() == 2, "deleted file keeps history");
+        snap = c.Ok("CreateFile", ("projectId", project), ("name", "a.ts"), ("expectedSnapshotId", snap), ("contentBase64", B64("someone else"))).GetProperty("snapshotId").GetString()!;
+        var raw = c.Raw("RestoreFile", ("projectId", project), ("fileId", fileId), ("newName", "a.ts"), ("expectedSnapshotId", snap));
+        Assert(raw.Contains("\"AlreadyExists\"") && !raw.Contains("a.ts"), "restore onto a taken name");
+        snap = c.Ok("RestoreFile", ("projectId", project), ("fileId", fileId), ("newName", "restored/a.ts"), ("expectedSnapshotId", snap)).GetProperty("snapshotId").GetString()!;
+        var back = c.Ok("OpenDocument", ("projectId", project), ("fileId", fileId), ("expectedSnapshotId", snap));
+        Assert(Encoding.UTF8.GetString(back.GetProperty("contentBase64").GetBytesFromBase64()) == "version two", "restored at its last version");
+        Assert(c.Ok("ListDeletedFiles", ("projectId", project)).GetProperty("files").GetArrayLength() == 0, "no longer deleted");
+    }
+});
+
 Test("authorization: no session, wrong capability and a second BeginSession", () =>
 {
     var (server, pipe) = StartServer();
@@ -422,6 +460,36 @@ Test("controller: rename keeps an open file saveable; deleting a file someone el
         Assert(Run(ctl.DeleteFileAsync(project, a)).Ok, "delete");
         Assert(Run(ctl.SaveDocumentAsync(project, a, "A3")).Code == "NotOpen", "deleted file forgotten");
         Assert(Run(ctl.ListFilesAsync(project)).Value!.Select(f => f.Name).SequenceEqual(new[] { "old/b.ts" }), "remaining");
+    }
+});
+
+Test("controller: history, restore of a deleted file, and merge sources saved on top of theirs", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Merge")).Value!.ProjectId;
+        var a = Run(ctl.CreateFileAsync(project, "a.ts", "line 1\nline 2\nline 3\n")).Value!.FileId;
+        ExternalEdit(pipe, project, a, "line 1\nline 2 (theirs)\nline 3\n");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "line 1 (mine)\nline 2\nline 3\n")).Code == "Conflict", "conflict first");
+        var sources = Run(ctl.MergeSourcesAsync(project, a));
+        Assert(sources.Ok && sources.Value!.BaseText == "line 1\nline 2\nline 3\n" && sources.Value.TheirsText == "line 1\nline 2 (theirs)\nline 3\n", "base and theirs");
+        ExternalEdit(pipe, project, a, "line 1\nline 2 (theirs again)\nline 3\n");
+        Assert(Run(ctl.SaveMergedAsync(project, a, "merged", sources.Value!.TheirsRevision)).Code == "Conflict", "changed again since the merge");
+        sources = Run(ctl.MergeSourcesAsync(project, a));
+        Assert(Run(ctl.SaveMergedAsync(project, a, "line 1 (mine)\nline 2 (theirs again)\nline 3\n", sources.Value!.TheirsRevision)).Ok, "merged save");
+        Assert(Run(ctl.SaveDocumentAsync(project, a, "after merge")).Ok, "normal saves continue from the merged revision");
+        var history = Run(ctl.ListHistoryAsync(project, a, 0)).Value!;
+        Assert(history.Revisions.Count == 5 && history.Revisions[^1].Action == "created", "five versions");
+        Assert(Run(ctl.OpenRevisionAsync(project, a, history.Revisions[^1].RevisionId)).Value == "line 1\nline 2\nline 3\n", "oldest text");
+        Assert(Run(ctl.DeleteFileAsync(project, a)).Ok, "delete");
+        var deleted = Run(ctl.ListDeletedAsync(project)).Value!.Single();
+        Assert(deleted.FileId == a && deleted.Name == "a.ts", "listed as deleted");
+        Assert(Run(ctl.RestoreFileAsync(project, a, "a.ts")).Ok, "restore");
+        Assert(Run(ctl.ListFilesAsync(project)).Value!.Single().FileId == a, "back");
+        Assert(Run(ctl.MergeSourcesAsync(project, Guid.NewGuid())).Code == "NotOpen", "unknown file");
     }
 });
 

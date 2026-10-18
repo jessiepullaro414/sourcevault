@@ -236,6 +236,36 @@ export class VaultSession {
     return this.createFile(f.path, text);
   }
 
+  /** One page of a file's history, newest first: { revisions: [{ revisionId, savedAt, savedBy, byteLength, action, name }], more }. */
+  async listHistory(fileId, page = 0) {
+    const result = await this.#call('listHistory', { projectId: this.project.projectId, fileId, page });
+    return { revisions: result.revisions ?? [], more: !!result.more };
+  }
+
+  /** The text of one revision of a live or deleted file. Not kept by the session. */
+  async openRevision(fileId, revisionId) {
+    return (await this.#call('openRevision', { projectId: this.project.projectId, fileId, revisionId })).text;
+  }
+
+  /** Puts an old revision's text into the editor as unsaved edits of the file (opened if needed). Saving makes it current. */
+  async restoreRevision(id, revisionId) {
+    const text = await this.openRevision(id, revisionId);
+    await this.open(id);
+    this.edit(id, text);
+  }
+
+  /** Deleted files of the open project, most recently deleted first. */
+  async listDeleted() {
+    return (await this.#call('listDeleted', { projectId: this.project.projectId })).files ?? [];
+  }
+
+  /** Restores a deleted file under `name` (its old name, or a new one if that is taken). */
+  async restoreFile(fileId, name) {
+    await this.#call('restoreFile', { projectId: this.project.projectId, fileId, newName: name });
+    await this.#refreshFiles();
+    if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + 1 };
+  }
+
   #forget(id) {
     this.files.delete(id);
     this.openIds = this.openIds.filter(x => x !== id);

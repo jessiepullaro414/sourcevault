@@ -59,6 +59,11 @@ export function createEditor(ariaLabel) {
   return monaco.editor.create($('editor'), { theme: 'sourcevault', model: null, automaticLayout: true, editContext: false, fontFamily: 'Cascadia Code, Consolas, monospace', fontSize: 13, lineHeight: 23, padding: { top: 12, bottom: 24 }, minimap: { enabled: true, renderCharacters: false, maxColumn: 80, scale: 1 }, scrollBeyondLastLine: false, contextmenu: false, dragAndDrop: false, dropIntoEditor: { enabled: false }, links: false, quickSuggestions: true, tabSize: 2, insertSpaces: true, bracketPairColorization: { enabled: true }, renderLineHighlight: 'line', overviewRulerBorder: false, hideCursorInOverviewRuler: true, smoothScrolling: true, fixedOverflowWidgets: true, ariaLabel });
 }
 
+/** A read-only side-by-side diff (file history). Same blocked context menu and drag paths as the main editor. */
+export function createDiffEditor(container, ariaLabel) {
+  return monaco.editor.createDiffEditor(container, { theme: 'sourcevault', readOnly: true, originalEditable: false, automaticLayout: true, editContext: false, renderSideBySide: true, fontFamily: 'Cascadia Code, Consolas, monospace', fontSize: 13, lineHeight: 21, minimap: { enabled: false }, scrollBeyondLastLine: false, contextmenu: false, dragAndDrop: false, dropIntoEditor: { enabled: false }, links: false, renderOverviewRuler: false, ariaLabel });
+}
+
 /** Explorer/inspector/activity panel toggles, find, and blocked browser shortcuts (Ctrl+S calls onSave). */
 export function wireChrome(getEditor, { onSave, isLocked }) {
   $('find').onclick = () => { if (!isLocked()) getEditor()?.getAction('actions.find').run(); };

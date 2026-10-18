@@ -107,7 +107,8 @@ public sealed class ProtocolCatalog
     /// <summary>contracts/protocol-v2.md: sessions not bound to a project, project/file creation, no CloseDocument.</summary>
     public static readonly ProtocolCatalog V2 = new(2,
         "BeginSession", "ListProjects", "CreateProject", "ListFiles", "OpenDocument", "CreateFile",
-        "ImportFiles", "DeleteProject", "RenameProject", "RenameFile", "RenameFolder", "DeleteFile", "ApplyEdits", "EndSession",
+        "ImportFiles", "DeleteProject", "RenameProject", "RenameFile", "RenameFolder", "DeleteFile", "ListHistory", "OpenRevision",
+        "ListDeletedFiles", "RestoreFile", "ApplyEdits", "EndSession",
         "RequestBuild", "GetBuildStatus");
 }
 

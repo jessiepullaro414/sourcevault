@@ -101,7 +101,8 @@ If you see a lock screen instead, it explains why:
 - **Rename, move or delete a file:** click **⋯** on its row in the Explorer.
   - **Rename / move** takes a full path, so `src/a.ts` → `lib/a.ts` moves it.
   - **Rename folder** moves every file in that file's folder at once.
-  - **Delete** asks first, and is refused while the file has unsaved edits. Deleted files can't be restored yet; history is coming.
+  - **Delete** asks first, and is refused while the file has unsaved edits. Deleted files can be restored: **Deleted files** in the Explorer lists them with who deleted them and when; **Restore** brings one back with its history (under a new path if its old one is taken).
+  - **History** lists every saved version of the file: when, who, and the path it had. Choosing one compares it side by side with the current version (read-only). **Restore this version** puts that text into the editor as unsaved edits; saving makes it the newest version, so history is never rewritten.
   - Open tabs and unsaved edits follow a renamed file.
 - **If someone else deletes a file you have unsaved edits in,** it shows *Deleted by someone else*. **Save** creates it again with your text, or **⋯ → Delete** discards your version.
 - **Rename a project:** **Switch project** → **Rename…** next to it.
@@ -200,4 +201,4 @@ Different files never conflict: two people can edit different files of the same 
 - **No recovery, by design.** No backup tool and no migration to another computer either: if this computer's TPM is cleared or the computer is lost, the vault is gone.
 - **Not yet verified:** that everything works after a reboot (automatic start at boot), and an independent security review.
 - **Builds are not available yet.** The vault stores and edits files only.
-- **No file history yet:** a deleted file or an overwritten version can't be brought back. Per-file history and merging are next.
+- **History is kept forever** for the life of a project: every saved version stays encrypted on disk until the project is deleted. Files saved before this version start their history at the version they had then.

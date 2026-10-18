@@ -4,15 +4,17 @@ using System.Text.Json;
 
 namespace SourceVault.Editor.Host;
 
-internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
+internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
-internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null);
+internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0);
 
 /// <summary>
 /// Bridge v2 (docs/editor-vault-design.md): pure, UI-free validation of renderer-to-host vault requests and
 /// construction of host-to-renderer messages. Requests carry ids, names and text only, never capabilities or
-/// snapshot/revision ids, which stay in the host. Anything unexpected is rejected without throwing.
+/// snapshot ids, which stay in the host. Revision ids appear only for history (openRevision) and to save a merge on top
+/// of the revision it was merged with (saveMerged); the host still checks every save against the vault. Anything
+/// unexpected is rejected without throwing.
 /// </summary>
 internal static class BridgePolicy
 {
@@ -33,6 +35,12 @@ internal static class BridgePolicy
         ["renameFile"] = (VaultOperation.RenameFile, ["projectId", "fileId", "newName"]),
         ["renameFolder"] = (VaultOperation.RenameFolder, ["projectId", "name", "newName"]), // name: the folder path
         ["deleteFile"] = (VaultOperation.DeleteFile, ["projectId", "fileId"]),
+        ["listHistory"] = (VaultOperation.ListHistory, ["projectId", "fileId", "page"]),
+        ["openRevision"] = (VaultOperation.OpenRevision, ["projectId", "fileId", "revisionId"]),
+        ["listDeleted"] = (VaultOperation.ListDeleted, ["projectId"]),
+        ["restoreFile"] = (VaultOperation.RestoreFile, ["projectId", "fileId", "newName"]),
+        ["mergeSources"] = (VaultOperation.MergeSources, ["projectId", "fileId"]),
+        ["saveMerged"] = (VaultOperation.SaveMerged, ["projectId", "fileId", "text", "revisionId"]), // revisionId: theirs, from mergeSources
         ["listFiles"] = (VaultOperation.ListFiles, ["projectId"]),
         ["openDocument"] = (VaultOperation.OpenDocument, ["projectId", "fileId"]),
         ["closeDocument"] = (VaultOperation.CloseDocument, ["projectId", "fileId"]),
@@ -58,14 +66,17 @@ internal static class BridgePolicy
             if (opElement.ValueKind != JsonValueKind.String || !Operations.TryGetValue(opElement.GetString()!, out var op)) return false;
             var args = root.GetProperty("args");
             if (!ExactFields(args, op.Args)) return false;
-            Guid projectId = Guid.Empty, fileId = Guid.Empty;
+            Guid projectId = Guid.Empty, fileId = Guid.Empty, revisionId = Guid.Empty;
+            int page = 0;
             string? name = null, text = null, newName = null;
             if (op.Args.Contains("projectId") && !TryId(args.GetProperty("projectId"), out projectId)) return false;
             if (op.Args.Contains("fileId") && !TryId(args.GetProperty("fileId"), out fileId)) return false;
             if (op.Args.Contains("name") && !TryName(args.GetProperty("name"), out name)) return false;
             if (op.Args.Contains("text") && !TryText(args.GetProperty("text"), out text)) return false;
             if (op.Args.Contains("newName") && !TryName(args.GetProperty("newName"), out newName)) return false;
-            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName);
+            if (op.Args.Contains("revisionId") && !TryId(args.GetProperty("revisionId"), out revisionId)) return false;
+            if (op.Args.Contains("page") && !TryPage(args.GetProperty("page"), out page)) return false;
+            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page);
             return true;
         }
         catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException)
@@ -124,6 +135,12 @@ internal static class BridgePolicy
     {
         name = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         return name is { Length: > 0 and <= MaxNameChars } && !name.Any(char.IsControl) && IsStrictUtf8(name, out _);
+    }
+
+    private static bool TryPage(JsonElement value, out int page)
+    {
+        page = 0;
+        return value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out page) && page is >= 0 and <= 10000;
     }
 
     private static bool TryText(JsonElement value, out string? text)

@@ -320,6 +320,13 @@ Check("bridge accepts every operation with its exact arguments", () =>
     var renameFolder = Parsed(Req("renameFolder", $"{{\"projectId\":\"{P}\",\"name\":\"src\",\"newName\":\"lib\"}}"));
     Assert(renameFolder.Operation == VaultOperation.RenameFolder && renameFolder.Name == "src" && renameFolder.NewName == "lib", "renameFolder");
     Assert(Parsed(Req("deleteFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}")).Operation == VaultOperation.DeleteFile, "deleteFile");
+    Assert(Parsed(Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":3}}")).Page == 3, "listHistory");
+    Assert(Parsed(Req("openRevision", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"revisionId\":\"{P}\"}}")).RevisionId == Guid.Parse(P), "openRevision");
+    Assert(Parsed(Req("listDeleted", $"{{\"projectId\":\"{P}\"}}")).Operation == VaultOperation.ListDeleted, "listDeleted");
+    Assert(Parsed(Req("restoreFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"newName\":\"a.ts\"}}")).NewName == "a.ts", "restoreFile");
+    Assert(Parsed(Req("mergeSources", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}")).Operation == VaultOperation.MergeSources, "mergeSources");
+    var merged = Parsed(Req("saveMerged", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\",\"revisionId\":\"{F}\"}}"));
+    Assert(merged.Operation == VaultOperation.SaveMerged && merged.Text == "x" && merged.RevisionId == Guid.Parse(F), "saveMerged");
     Assert(Parsed(Req("listFiles", $"{{\"projectId\":\"{P}\"}}")).ProjectId == Guid.Parse(P), "listFiles");
     var open = Parsed(Req("openDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"));
     Assert(open.Operation == VaultOperation.OpenDocument && open.FileId == Guid.Parse(F), "openDocument");
@@ -353,7 +360,12 @@ Check("bridge rejects missing, extra, duplicate and mistyped arguments", () => R
     Req("renameFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"), Req("renameFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"newName\":\"\"}}"),
     Req("renameFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"newName\":\"" + new string('n', BridgePolicy.MaxNameChars + 1) + "\"}}"),
     Req("renameFolder", $"{{\"projectId\":\"{P}\",\"newName\":\"lib\"}}"), Req("renameFolder", $"{{\"projectId\":\"{P}\",\"name\":\"src\",\"newName\":\"tab\\tname\"}}"),
-    Req("deleteFile", $"{{\"projectId\":\"{P}\"}}"), Req("deleteFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"expectedSnapshotId\":\"{P}\"}}")));
+    Req("deleteFile", $"{{\"projectId\":\"{P}\"}}"), Req("deleteFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"expectedSnapshotId\":\"{P}\"}}"),
+    Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"), Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":-1}}"),
+    Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":1.5}}"), Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":\"0\"}}"),
+    Req("listHistory", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"page\":10001}}"),
+    Req("openRevision", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"), Req("openRevision", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"revisionId\":\"x\"}}"),
+    Req("saveMerged", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"x\"}}"), Req("restoreFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}")));
 
 Check("bridge rejects non-canonical, empty and malformed ids", () => Rejects(Vault,
     Req("listProjects", "{}", id: Guid1.ToUpperInvariant()), Req("listProjects", "{}", id: "{" + Guid1 + "}"),

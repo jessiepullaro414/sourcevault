@@ -1,7 +1,7 @@
 // Vault mode UI (docs/editor-vault-design.md). The host owns the service connection; this page sees project/file ids,
 // names and the text of files it opens. Nothing here logs or posts document text anywhere but the host bridge.
-import { VaultSession } from './vault-session.mjs';
-import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, wireChrome, showLoadFailure } from './shell.mjs';
+import { VaultSession, languageFor as languageOf } from './vault-session.mjs';
+import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, wireChrome, showLoadFailure } from './shell.mjs';
 
 const UNLOCK_FAILURES = {
   ServiceNotInstalled: 'The SourceVault service is not installed on this computer.',
@@ -20,6 +20,7 @@ const LOCK_SCREENS = {
   expired: ['SESSION EXPIRED', 'Your vault session expired', 'Sessions end after 5 idle minutes or 30 minutes in total. ' + KEPT],
   closed: ['DISCONNECTED', 'The vault connection closed', KEPT],
 };
+const ACTIONS = { created: 'Created', edited: 'Saved', imported: 'Imported', restored: 'Restored', 'before-history': 'Version when history began' };
 const FAILURES = {
   NotFound: 'That item no longer exists in the vault.',
   LimitExceeded: 'Files are limited to 256 KiB.',
@@ -40,6 +41,8 @@ export async function startVault(transport, metadata, onSession) {
   let editor, suppress = false, busy = false, picking = false, unlockError = null;
   let deleting = null; // { projectId, typed } while a delete confirmation is open in the picker
   let renaming = null; // { projectId, value } while a project rename is open in the picker
+  let history = null, diffEditor = null; // the open history view: { fileId, path, language, deleted, revisions, more, page, selected, latestText, models }
+  let showDeleted = false, deletedFiles = [], restoring = null; // the deleted-files view; restoring: { fileId, value } when the old path is taken
   let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
   const active = () => (session.activeId ? session.files.get(session.activeId) : null);
 
@@ -72,10 +75,10 @@ export async function startVault(transport, metadata, onSession) {
     $('unlock').disabled = busy;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
-    $('no-file').hidden = locked || !hasProject || !!f;
+    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted;
     $('workspace-name').textContent = $('breadcrumb-root').textContent = session.project?.name ?? 'No project';
     $('project-heading').textContent = (session.project?.name ?? 'No project').toUpperCase();
-    $('new-file').disabled = $('switch-project').disabled = locked || busy || !hasProject;
+    $('new-file').disabled = $('switch-project').disabled = $('deleted-files').disabled = locked || busy || !hasProject;
     $('lock').disabled = locked || busy;
 
     $('tabs').replaceChildren(); $('source-files').replaceChildren(); $('root-files').replaceChildren();
@@ -118,6 +121,7 @@ export async function startVault(transport, metadata, onSession) {
     $('files-detail').textContent = hasProject ? `${session.files.size} in project` : '—';
     $('language-detail').textContent = $('language-status').textContent = f ? languageLabel(f.language) : '—';
     document.body.classList.toggle('locked', locked);
+    renderHistory(); renderDeleted();
     postStatus(session.metadata); // four numeric/boolean fields only; also drives the host's keep-alive
   }
 
@@ -172,6 +176,7 @@ export async function startVault(transport, metadata, onSession) {
     switch (fileMenu.mode) {
       case 'menu': {
         const actions = document.createElement('div'); actions.className = 'file-menu';
+        actions.append(button('History', () => openHistory(file.id, file.path, file.language)));
         actions.append(button('Rename / move', () => { fileMenu = { id: file.id, mode: 'rename' }; render(); }));
         if (folder) actions.append(button(`Rename folder ${folder}/`, () => { fileMenu = { id: file.id, mode: 'folder' }; render(); }));
         actions.append(button('Delete', () => { fileMenu = { id: file.id, mode: 'delete' }; render(); }, 'danger-text'));
@@ -194,7 +199,7 @@ export async function startVault(transport, metadata, onSession) {
       }
       case 'delete': {
         const text = document.createElement('p');
-        text.textContent = file.deleted ? `Discard your unsaved version of ${file.path}? Someone else already deleted it.` : session.dirty(file.id) ? `Save or reload ${file.path} before deleting it.` : `Delete ${file.path} from the vault?`;
+        text.textContent = file.deleted ? `Discard your unsaved version of ${file.path}? Someone else already deleted it.` : session.dirty(file.id) ? `Save or reload ${file.path} before deleting it.` : `Delete ${file.path}? It can be restored later from Deleted files, with its history.`;
         const actions = document.createElement('div'); actions.className = 'delete-actions';
         const confirm = button('Delete file', () => act(async () => { await session.deleteFile(file.id); dropModel(file.id); fileMenu = null; return `Deleted ${file.path}.`; }), 'danger');
         confirm.disabled = busy || (!file.deleted && session.dirty(file.id));
@@ -205,6 +210,118 @@ export async function startVault(transport, metadata, onSession) {
     }
     return panel;
   }
+  // ---- file history: list of saved versions, read-only diff against the current version, restore as a draft -------
+  function openHistory(fileId, path, language, deleted = false) {
+    act(async () => {
+      const first = await session.listHistory(fileId, 0);
+      const latestText = first.revisions.length ? await session.openRevision(fileId, first.revisions[0].revisionId) : '';
+      closeHistory();
+      history = { fileId, path, language, deleted, revisions: first.revisions, more: first.more, page: 0, selected: null, latestText };
+      fileMenu = null; showDeleted = false;
+    }, () => renderHistory());
+  }
+  function closeHistory() {
+    if (!history) return;
+    diffEditor?.setModel(null);
+    for (const model of history.models ?? []) model.dispose();
+    history = null;
+  }
+  function selectRevision(revision) {
+    act(async () => {
+      const text = await session.openRevision(history.fileId, revision.revisionId);
+      diffEditor ??= createDiffEditor($('history-diff'), 'Selected version (left) compared with the current saved version (right)');
+      diffEditor.setModel(null);
+      for (const model of history.models ?? []) model.dispose();
+      // Plain text: a typed language would join the old text to the TypeScript/JSON workers' project and diagnostics.
+      const original = monaco.editor.createModel(text, 'plaintext');
+      const modified = monaco.editor.createModel(history.latestText, 'plaintext');
+      history.models = [original, modified];
+      diffEditor.setModel({ original, modified });
+      history.selected = revision.revisionId;
+    }, () => renderHistory());
+  }
+  function renderHistory() {
+    const open = !!history && !session.locked && !picking && !!session.project;
+    $('history-view').hidden = !open;
+    if (!open) return;
+    $('history-title').textContent = history.path + (history.deleted ? ' (deleted)' : '');
+    $('history-caption').textContent = history.selected
+      ? 'Left: the selected version. Right: the current saved version. Read-only.'
+      : 'Choose a version to compare it with the current saved version.';
+    const list = $('history-list'); list.replaceChildren();
+    for (const revision of history.revisions) {
+      const item = document.createElement('li');
+      const button = document.createElement('button'); button.className = `history-item${revision.revisionId === history.selected ? ' active' : ''}`; button.disabled = busy;
+      const when = document.createElement('strong'); when.textContent = revision.savedAt ? new Date(revision.savedAt).toLocaleString() : 'Before history began';
+      const detail = document.createElement('span');
+      detail.textContent = [ACTIONS[revision.action] ?? revision.action, revision.savedBy, `${revision.byteLength.toLocaleString()} bytes`, revision.name !== history.path ? `as ${revision.name}` : null].filter(Boolean).join(' · ');
+      button.append(when, detail);
+      button.onclick = () => selectRevision(revision);
+      item.append(button); list.append(item);
+    }
+    $('history-more').hidden = !history.more;
+    const file = session.files.get(history.fileId);
+    $('history-restore').disabled = busy || !history.selected || history.deleted || !file;
+    $('history-restore').title = history.deleted ? 'Restore the deleted file first (Deleted files).' : 'Put this version into the editor as unsaved edits';
+  }
+  $('history-close').onclick = () => { closeHistory(); render(); };
+  $('history-more').onclick = () => act(async () => {
+    const next = await session.listHistory(history.fileId, history.page + 1);
+    history.revisions = [...history.revisions, ...next.revisions]; history.more = next.more; history.page++;
+  }, () => renderHistory());
+  $('history-restore').onclick = () => {
+    if (!history?.selected) return;
+    const { fileId, selected, path } = history;
+    if (session.dirty(fileId)) { announce(`Save or reload ${path} before restoring an older version.`); return; }
+    act(async () => {
+      await session.restoreRevision(fileId, selected);
+      closeHistory();
+      return `Restored an older version of ${path} as unsaved edits. Save to make it the current version.`;
+    });
+  };
+
+  // ---- deleted files ---------------------------------------------------------------------------------------------
+  function renderDeleted() {
+    $('deleted-view').hidden = !showDeleted || session.locked || picking || !session.project;
+    if ($('deleted-view').hidden) return;
+    const list = $('deleted-list'); list.replaceChildren();
+    $('deleted-caption').textContent = deletedFiles.length ? 'Deleted files keep their history and can be restored.' : 'No deleted files in this project.';
+    for (const file of deletedFiles) {
+      const row = document.createElement('div'); row.className = 'project-row';
+      const info = document.createElement('div'); info.className = 'project-option deleted-option';
+      const name = document.createElement('strong'); name.textContent = file.name;
+      const when = document.createElement('span'); when.textContent = `deleted ${new Date(file.deletedAt).toLocaleString()}${file.deletedBy ? ` by ${file.deletedBy}` : ''}`;
+      info.append(name, when);
+      const historyButton = document.createElement('button'); historyButton.className = 'project-delete'; historyButton.textContent = 'History'; historyButton.disabled = busy;
+      historyButton.onclick = () => openHistory(file.fileId, file.name, languageOf(file.name), true);
+      const restore = document.createElement('button'); restore.className = 'project-delete'; restore.textContent = 'Restore'; restore.disabled = busy;
+      restore.onclick = () => restoreDeleted(file, file.name);
+      row.append(info, historyButton, restore); list.append(row);
+      if (restoring?.fileId === file.fileId) {
+        const form = document.createElement('form'); form.className = 'delete-confirm rename-confirm';
+        const text = document.createElement('p'); text.textContent = `${file.name} is taken now. Restore it under another path:`;
+        const input = document.createElement('input'); input.value = restoring.value; input.maxLength = 260; input.autocomplete = 'off'; input.spellcheck = false; input.setAttribute('aria-label', 'Restore under this path');
+        input.oninput = () => { restoring.value = input.value; };
+        const ok = document.createElement('button'); ok.type = 'submit'; ok.textContent = 'Restore'; ok.disabled = busy;
+        const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.onclick = () => { restoring = null; render(); };
+        form.onsubmit = event => { event.preventDefault(); const value = input.value.trim(); if (value) restoreDeleted(file, value); };
+        const actions = document.createElement('div'); actions.className = 'delete-actions'; actions.append(ok, cancel);
+        form.append(text, input, actions); list.append(form);
+      }
+    }
+  }
+  function restoreDeleted(file, name) {
+    act(async () => {
+      try { await session.restoreFile(file.fileId, name); }
+      catch (e) { if (e?.code === 'AlreadyExists') { restoring = { fileId: file.fileId, value: name }; return `${name} is taken; choose another path.`; } throw e; }
+      restoring = null;
+      deletedFiles = await session.listDeleted();
+      return `Restored ${name}.`;
+    });
+  }
+  $('deleted-files').onclick = () => act(async () => { deletedFiles = await session.listDeleted(); closeHistory(); showDeleted = true; restoring = null; });
+  $('deleted-close').onclick = () => { showDeleted = false; restoring = null; render(); };
+
   // A rename keeps the model (and its undo history); only the language follows the new extension.
   function retitleModel(id) { const model = models.get(id), file = session.files.get(id); if (model && file) monaco.editor.setModelLanguage(model, file.language); }
 
@@ -303,7 +420,7 @@ export async function startVault(transport, metadata, onSession) {
   $('conflict-keep').onclick = () => { const f = active(); if (f) { keepEditing.add(f.id); render(); announce('Keeping your edits. Saving will still conflict; reload to take their version.'); } };
   $('switch-project').onclick = () => {
     if (session.dirtyIds.length) { announce(FAILURES.UnsavedChanges); return; }
-    act(async () => { await session.refreshProjects(); picking = true; });
+    act(async () => { await session.refreshProjects(); closeHistory(); showDeleted = false; picking = true; });
   };
   $('new-file').onclick = () => { $('new-file-form').hidden = false; $('new-file-name').value = ''; $('new-file-name').focus(); };
   $('new-file-form').onsubmit = event => {
@@ -320,7 +437,7 @@ export async function startVault(transport, metadata, onSession) {
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { closeHistory(); showDeleted = false; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
   wireChrome(() => editor, { onSave: save, isLocked: () => session.locked });
 

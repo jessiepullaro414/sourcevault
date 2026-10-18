@@ -13,7 +13,7 @@ Owner decisions already made:
 - **Build logs** are stored encrypted in the vault.
 - **Only an administrator** sets the artifact paths.
 
-Status: step 1 (file and project rename, file delete) is built and tested in process; steps 2-4 are not built yet. The owner's decisions are at the end.
+Status: steps 1 (file and project rename, file delete) and 2 (history, deleted files) are built and tested in process; steps 3-4 are not built yet. The owner's decisions are at the end.
 
 ---
 

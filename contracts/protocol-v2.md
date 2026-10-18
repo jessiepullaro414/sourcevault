@@ -87,10 +87,27 @@ See `docs/files-history-builds-design.md`, section 1. Every operation also takes
 
 - **RenameFile** moves a file to any valid path. Its file id and current revision are kept: only the encrypted manifest changes, and no content is re-encrypted.
 - **RenameFolder** moves every file whose path starts with `oldPrefix/` (case-insensitive) in one commit. No such file returns `NotFound`; a resulting path that is too long or too deep returns `InvalidRequest`.
-- **DeleteFile** removes the file from the snapshot. Until per-file history exists, a deleted file can't be restored through the protocol. Its encrypted records stay on disk until the project is deleted, as before.
+- **DeleteFile** removes the file from the snapshot. With manifest schema 3 it moves to the deleted list and can be restored (see "file history" below).
 - **Errors:**
   - a name taken (case-insensitive) or a file/folder clash: `AlreadyExists`;
   - an unknown file: `NotFound`;
   - a stale `expectedSnapshotId`: `RevisionConflict`.
 
   Errors never echo names.
+
+## Addition: file history, deleted files, restore (owner-approved, 2026-10-18)
+
+See `docs/files-history-builds-design.md`, section 2. Every operation also takes `capability`.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| ListHistory | `projectId`, `fileId`, `page` (integer, 0 = newest, ≤ 10,000) | `fileId`, `revisions[]`, `more` |
+| OpenRevision | `projectId`, `fileId`, `revisionId` | `revisionId`, `contentBase64` |
+| ListDeletedFiles | `projectId` | `files[]`: `fileId`, `name`, `byteLength`, `deletedAt`, `deletedBy` |
+| RestoreFile | `projectId`, `fileId`, `newName`, `expectedSnapshotId` | `snapshotId` |
+
+- **ListHistory** returns revisions newest first: `revisionId`, `savedAt` (UTC or null), `savedBy` (account or null), `byteLength`, `action`, and `name`, the path the file had at that save. A page holds up to 256 entries, and `more` says whether older pages exist. It works for live and deleted files.
+- **OpenRevision** decrypts any revision in a live or deleted file's history.
+- **RestoreFile** brings back a deleted file under `newName`, which can be its old path or a new one, at its last revision. A taken name returns `AlreadyExists`.
+- **savedBy / deletedBy** is the calling operator's Windows account name. The service records it only inside encrypted records.
+- **DeleteFile** now keeps the file's history, and the file can be restored.

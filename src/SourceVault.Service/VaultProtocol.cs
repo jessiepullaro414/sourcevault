@@ -14,6 +14,7 @@ internal sealed class ConnectionState
     internal long Started, LastActivity;
     internal bool Closed; // terminal: expired, ended, revoked or rejected
     internal uint WindowsSession;
+    internal string? Actor; // the operator's account name, recorded in encrypted file history
 }
 
 internal readonly record struct ProtocolResponse(ArrayBufferWriter<byte> Buffer, bool Close);
@@ -76,14 +77,18 @@ internal sealed class VaultProtocol
                 "CreateProject" => CreateProject(request),
                 "ListFiles" => ListFiles(request),
                 "OpenDocument" => OpenDocument(request),
-                "CreateFile" => CreateFile(request),
-                "ImportFiles" => ImportFiles(request),
+                "CreateFile" => CreateFile(request, state),
+                "ImportFiles" => ImportFiles(request, state),
                 "DeleteProject" => DeleteProject(request),
                 "RenameProject" => RenameProject(request),
-                "RenameFile" => RenameFile(request),
-                "RenameFolder" => RenameFolder(request),
-                "DeleteFile" => DeleteFile(request),
-                "ApplyEdits" => ApplyEdits(request),
+                "RenameFile" => RenameFile(request, state),
+                "RenameFolder" => RenameFolder(request, state),
+                "DeleteFile" => DeleteFile(request, state),
+                "ListHistory" => ListHistory(request),
+                "OpenRevision" => OpenRevision(request),
+                "ListDeletedFiles" => ListDeletedFiles(request),
+                "RestoreFile" => RestoreFile(request, state),
+                "ApplyEdits" => ApplyEdits(request, state),
                 "RequestBuild" or "GetBuildStatus" => Error(request, "Unavailable"),
                 _ => Error(request, "UnsupportedOperation"),
             };
@@ -171,18 +176,18 @@ internal sealed class VaultProtocol
     }
 
     /// <summary>Renames or moves one file. Its id and revision are kept; only the encrypted manifest changes.</summary>
-    private ProtocolResponse RenameFile(ParsedRequest request)
+    private ProtocolResponse RenameFile(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "projectId", "fileId", "newName", "expectedSnapshotId");
         var store = Project(request.Body);
         var fileId = Id(request.Body, "fileId");
         var name = Text(request.Body, "newName");
         if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest");
-        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Rename(fileId, name)], null);
+        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Rename(fileId, name)], null, state);
     }
 
     /// <summary>Renames every file under a folder path in one commit ("src/app" to "lib/app").</summary>
-    private ProtocolResponse RenameFolder(ParsedRequest request)
+    private ProtocolResponse RenameFolder(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "projectId", "oldPrefix", "newPrefix", "expectedSnapshotId");
         var store = Project(request.Body);
@@ -201,21 +206,99 @@ internal sealed class VaultProtocol
             if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest"); // too long or too deep
             changes.Add(new StoreChange.Rename(f.FileId, name));
         }
-        return Changed(request, store, expected, changes, w => w.WriteNumber("renamed", moved.Count));
+        return Changed(request, store, expected, changes, w => w.WriteNumber("renamed", moved.Count), state);
     }
 
-    private ProtocolResponse DeleteFile(ParsedRequest request)
+    private ProtocolResponse DeleteFile(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "projectId", "fileId", "expectedSnapshotId");
         var store = Project(request.Body);
-        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Delete(Id(request.Body, "fileId"))], null);
+        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Delete(Id(request.Body, "fileId"))], null, state);
     }
 
     // The store re-checks the expected snapshot under its lock; unknown ids are NotFound and clashes AlreadyExists.
-    private ProtocolResponse Changed(ParsedRequest request, RevisionStore store, Guid expected, IReadOnlyList<StoreChange> changes, Action<Utf8JsonWriter>? extra)
+    private ProtocolResponse Changed(ParsedRequest request, RevisionStore store, Guid expected, IReadOnlyList<StoreChange> changes, Action<Utf8JsonWriter>? extra, ConnectionState state)
     {
-        var next = store.CommitChanges(expected, changes);
+        var next = store.CommitChanges(expected, changes, state.Actor);
         return Ok(request, w => { w.WriteString("snapshotId", next.SnapshotId.ToString("D")); extra?.Invoke(w); });
+    }
+
+    /// <summary>One page of a live or deleted file's history, newest first. Page 0 is the newest; more: older pages exist.</summary>
+    private ProtocolResponse ListHistory(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "page");
+        var store = Project(request.Body);
+        var fileId = Id(request.Body, "fileId");
+        var pageValue = request.Body.GetProperty("page");
+        if (pageValue.ValueKind != JsonValueKind.Number || !pageValue.TryGetInt32(out int page) || page is < 0 or > 10000) throw new RequestException("InvalidRequest");
+        var history = store.ReadHistory(fileId, page);
+        return Ok(request, w =>
+        {
+            w.WriteString("fileId", fileId.ToString("D"));
+            w.WriteStartArray("revisions");
+            foreach (var r in history.Revisions)
+            {
+                w.WriteStartObject();
+                w.WriteString("revisionId", r.RevisionId.ToString("D"));
+                if (r.SavedAt is { } at) w.WriteString("savedAt", at.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture)); else w.WriteNull("savedAt");
+                if (r.SavedBy is { } by) w.WriteString("savedBy", by); else w.WriteNull("savedBy");
+                w.WriteNumber("byteLength", r.ByteLength);
+                w.WriteString("action", r.Action);
+                w.WriteString("name", r.Name);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteBoolean("more", history.More);
+        }, capacity: 16384 + history.Revisions.Count * 700);
+    }
+
+    /// <summary>Decrypts one revision from a live or deleted file's history.</summary>
+    private ProtocolResponse OpenRevision(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "revisionId");
+        var store = Project(request.Body);
+        var revisionId = Id(request.Body, "revisionId");
+        var content = store.OpenRevision(Id(request.Body, "fileId"), revisionId);
+        try
+        {
+            return Ok(request, w =>
+            {
+                w.WriteString("revisionId", revisionId.ToString("D"));
+                w.WriteBase64String("contentBase64", content);
+            }, capacity: 16384 + (content.Length + 2) / 3 * 4); // pre-sized so the buffer never reallocates (see OpenDocument)
+        }
+        finally { CryptographicOperations.ZeroMemory(content); }
+    }
+
+    private ProtocolResponse ListDeletedFiles(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId");
+        var deleted = Project(request.Body).ListDeleted();
+        return Ok(request, w =>
+        {
+            w.WriteStartArray("files");
+            foreach (var d in deleted)
+            {
+                w.WriteStartObject();
+                w.WriteString("fileId", d.FileId.ToString("D"));
+                w.WriteString("name", d.LogicalName);
+                w.WriteNumber("byteLength", d.ByteLength);
+                w.WriteString("deletedAt", d.DeletedAt.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture));
+                if (d.DeletedBy is { } by) w.WriteString("deletedBy", by); else w.WriteNull("deletedBy");
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+        }, capacity: 16384 + deleted.Count * 700);
+    }
+
+    /// <summary>Brings a deleted file back, under its old name or a new one, at the revision it had when deleted.</summary>
+    private ProtocolResponse RestoreFile(ParsedRequest request, ConnectionState state)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "newName", "expectedSnapshotId");
+        var store = Project(request.Body);
+        var name = Text(request.Body, "newName");
+        if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest");
+        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Restore(Id(request.Body, "fileId"), name)], null, state);
     }
 
     private ProtocolResponse ListFiles(ParsedRequest request)
@@ -263,7 +346,7 @@ internal sealed class VaultProtocol
         finally { CryptographicOperations.ZeroMemory(content); }
     }
 
-    private ProtocolResponse CreateFile(ParsedRequest request)
+    private ProtocolResponse CreateFile(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "projectId", "name", "expectedSnapshotId", "contentBase64");
         var store = Project(request.Body);
@@ -277,7 +360,7 @@ internal sealed class VaultProtocol
             if (current.SnapshotId != expected) throw new RevisionConflictException();
             if (current.Files.Any(f => StringComparer.OrdinalIgnoreCase.Equals(f.LogicalName, name))) throw new NameExistsException();
             // The store re-checks the expected snapshot under its lock, so a racing create of the same name conflicts.
-            var next = store.Commit(expected, name, content);
+            var next = store.CommitChanges(expected, [new StoreChange.Write(name, content, "created")], state.Actor);
             var file = next.Files.Single(f => StringComparer.OrdinalIgnoreCase.Equals(f.LogicalName, name));
             return Ok(request, w =>
             {
@@ -295,7 +378,7 @@ internal sealed class VaultProtocol
     /// Adds up to 256 new files in one snapshot, all or nothing (used by the importer). Create-only: any name that
     /// already exists, or that clashes with an existing folder/file path, is AlreadyExists and nothing is written.
     /// </summary>
-    private ProtocolResponse ImportFiles(ParsedRequest request)
+    private ProtocolResponse ImportFiles(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "projectId", "expectedSnapshotId", "files");
         var store = Project(request.Body);
@@ -319,7 +402,7 @@ internal sealed class VaultProtocol
             var existing = current.Files.Select(f => f.LogicalName).ToHashSet(StringComparer.OrdinalIgnoreCase);
             if (documents.Any(d => existing.Contains(d.Name))) throw new NameExistsException();
             if (current.Files.Count + documents.Count > RevisionStore.MaximumFiles) throw new RequestException("LimitExceeded");
-            var next = store.CommitMany(expected, documents); // re-checks the snapshot under the lock; path clashes are NameExists
+            var next = store.CommitChanges(expected, documents.Select(d => (StoreChange)new StoreChange.Write(d.Name, d.Content, "imported")).ToList(), state.Actor); // re-checks the snapshot under the lock; path clashes are NameExists
             return Ok(request, w =>
             {
                 w.WriteString("snapshotId", next.SnapshotId.ToString("D"));
@@ -329,7 +412,7 @@ internal sealed class VaultProtocol
         finally { foreach (var (_, content) in documents) CryptographicOperations.ZeroMemory(content); }
     }
 
-    private ProtocolResponse ApplyEdits(ParsedRequest request)
+    private ProtocolResponse ApplyEdits(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "projectId", "fileId", "expectedSnapshotId", "contentBase64");
         var store = Project(request.Body);
@@ -341,7 +424,7 @@ internal sealed class VaultProtocol
             var current = store.List();
             if (current.SnapshotId != expected) throw new RevisionConflictException();
             var entry = current.Files.SingleOrDefault(f => f.FileId == fileId) ?? throw new KeyNotFoundException();
-            var next = store.Commit(expected, entry.LogicalName, content); // same name keeps the same file id
+            var next = store.CommitChanges(expected, [new StoreChange.Write(entry.LogicalName, content, "edited")], state.Actor); // same name keeps the same file id
             var file = next.Files.Single(f => f.FileId == fileId);
             return Ok(request, w =>
             {
