@@ -24,11 +24,13 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 
 | Done | Test | Needs |
 |---|---|---|
-| [ ] | Run `Setup-SourceVault.ps1 -Update -WithBuilds`, write `build.json` from `build.example.json`, then run `Grant-BuildDockerAccess.ps1` | admin; restarts Docker access for the build service |
+| [ ] | Docker installed in a WSL distro and running (you install it; e.g. Docker Engine from Docker's apt repository) | your install |
+| [ ] | **Build container (new):** `New-BuildContainer.ps1 -Distro <name>`, run as your normal user. It pulls the pinned .NET SDK image (about 335 MB), creates `sourcevault-build-linux`, and must end with "a fictional console app built and ran with no network". Record the output | download; Docker in the distro |
+| [ ] | Run `Setup-SourceVault.ps1 -Update -WithBuilds`, write `build.json` from `build.example.json` (or the target `New-BuildContainer.ps1` printed), then run `Grant-BuildDockerAccess.ps1` | admin; restarts Docker access for the build service |
 | [ ] | WSL target: `New-WslDockerTls.ps1 -Distro <name>`, apply the printed dockerd settings, restart that distro's Docker | the WSL distro restarts |
-| [ ] | Build a synthetic project on the Linux target: succeeds, log shown, output folder has the files | — |
-| [ ] | Build on the Windows target. **Record whether copying into the running Windows container works** (Hyper-V isolation may refuse it) | — |
-| [ ] | **Dropped files (new):** a build that writes `app.js.map` and `app.pdb` publishes the other files and lists both as dropped | — |
+| [ ] | Import `samples\dotnet-hello` from the package (`SourceVault.Import.exe <package>\samples\dotnet-hello --project "Hello sample"`), then **Build** it on the Linux target: succeeds, log shown, the output folder has `Hello.dll`, `Hello`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
+| [ ] | ~~Build on the Windows target~~: **not possible on this PC**. Windows containers need Windows Pro, Enterprise or Education; this PC runs Windows 11 Home | — |
+| [ ] | **Dropped files (new):** the `dotnet-hello` build lists `Hello.pdb` as left out (DebugSymbols) at the end of its log, and *Left out: 1 file* in the result | — |
 | [ ] | A build that runs past `timeoutSeconds` is *timed out*; a container with a network gets *refused* when `allowNetwork` is false | — |
 
 ## Needs a sign-out or reboot (wait until the machine is free)

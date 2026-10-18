@@ -20,7 +20,7 @@ Still open:
 1. **Editor native validation (T06).** The interactive items are in the lab checklist. Still for development: anything those runs turn up. Pagefile and hibernation persistence remain out of scope and documented.
 2. **Client identity.** An Authenticode signer check waits for the signing decision (below). Genuine separate-account and remote-client denial, and lock/revocation across several editors, are lab items.
 3. **Storage.** The skipped reparse-point cases need an elevated run. Power loss is a lab item. TPM throughput beyond 200 files is unmeasured. A crash between creating a project's folder and recording it in the index leaves an orphan folder, which makes startup refuse (code 11) until an administrator removes it. That is by design ("for review"); decide whether to keep it.
-4. **Builds.** Artifacts go through a `.partial` folder and are published with no approval step; an owner-approval release step is not built. A real initial compiler is still to be chosen.
+4. **Builds.** Artifacts go through a `.partial` folder and are published with no approval step; an owner-approval release step is not built. The compiler is chosen (below), and `installer/New-BuildContainer.ps1` creates its container; it still needs its lab run. Offline builds cannot restore NuGet packages yet: a reviewed local package source is the next step if projects need packages.
 5. **Release.** Offline installer and update signing, a supported hardware/OS matrix, and an independent security review.
 
 ## Retired or out of scope (owner, 2026-10-18)
@@ -33,7 +33,7 @@ Still open:
 - Confirm operator/administrator threat model and intentional-export policy.
 - ~~Confirm device-only loss policy versus an owner recovery envelope.~~ Decided 2026-10-18: device-only, no recovery. Do not add a recovery envelope, escrow or key export.
 - Approve supported hardware/OS/runtime and offline update strategy.
-- Choose a real initial compiler and artifact policy. Readable JavaScript output does not conceal implementation. (Dropping source maps and debug symbols: decided 2026-10-18.)
+- ~~Choose a real initial compiler.~~ Decided 2026-10-18: C#/.NET with Microsoft's .NET SDK image (`mcr.microsoft.com/dotnet/sdk:10.0.402`, pinned by digest) on Docker in WSL. Windows containers are not possible on this Windows 11 Home PC. Artifact policy: dropping source maps and debug symbols decided 2026-10-18; readable output (for example .NET IL) still does not conceal implementation.
 - Signing/release ownership. This also unblocks an Authenticode client check.
 - ~~License.~~ Decided 2026-10-18: MIT, chosen by the owner in the GitHub repository (`LICENSE`).
 - ~~Per-project permissions.~~ Decided 2026-10-18: none. Every member of *SourceVault Operators* can open every project; access is limited by that group alone.

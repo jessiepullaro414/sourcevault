@@ -78,6 +78,18 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
 
 SourceVault can send a project's saved files to an **already-running, named Docker container**, run the build command there, and copy the build's output to a folder on this PC. A separate service, **SourceVault Build** (`NT SERVICE\SourceVaultBuild`), does this; the vault service never gets Docker access.
 
+**The C#/.NET build container.** The supported compiler is Microsoft's .NET SDK image (`mcr.microsoft.com/dotnet/sdk`), pinned by digest, on Docker inside a WSL distro. To create it, run from the package folder, as your normal user, with Docker running in the distro:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\New-BuildContainer.ps1 -Distro Ubuntu-24.04
+```
+- **What it creates:** `sourcevault-build-linux`, with no network, dropped privileges, and restart with the engine.
+- **What it checks:** that an offline test build runs.
+- **What it prints:** the `build.json` target to use.
+
+Each project needs a `build.sh` at its top level that writes its output to `/sourcevault/out`. The package's `samples\dotnet-hello` is a fictional example: import it, then build it.
+- **No network in builds:** NuGet packages can't be downloaded, so projects with package references don't build yet.
+- **Windows containers need Windows Pro, Enterprise or Education.** On Windows Home, use the Linux target only.
+
 1. **Install the build service** (as administrator, from the package folder):
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update -WithBuilds

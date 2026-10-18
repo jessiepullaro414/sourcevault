@@ -12,7 +12,7 @@
       "container": "sourcevault-build-linux",
       "platform": "linux",
       "sourcePath": "/sourcevault/src",
-      "command": ["/bin/sh", "-c", "./build.sh"],
+      "command": ["/bin/sh", "-c", "sed -i 's/\\r$//' build.sh && exec /bin/sh build.sh"],
       "artifactPath": "/sourcevault/out",
       "timeoutSeconds": 900,
       "maxArtifactMegabytes": 512,

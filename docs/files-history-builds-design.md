@@ -101,7 +101,7 @@ Editing it requires administrator rights. The service reads it at start and on e
       "container": "sourcevault-build-linux",
       "platform": "linux",
       "sourcePath": "/sourcevault/src",
-      "command": ["/bin/sh", "-c", "./build.sh"],
+      "command": ["/bin/sh", "-c", "sed -i 's/\\r$//' build.sh && exec /bin/sh build.sh"],
       "artifactPath": "/sourcevault/out",
       "timeoutSeconds": 900,
       "maxArtifactMegabytes": 512,
@@ -130,7 +130,7 @@ Editing it requires administrator rights. The service reads it at start and on e
 | `container` | Name of the already-running container. The build fails with *container not running* otherwise. |
 | `platform` | `linux` or `windows`. Selects path rules and the cleanup command. |
 | `sourcePath` | Folder inside the container that receives the project. Emptied before and after every build. |
-| `command` | What runs in `sourcePath`. Set by the administrator; operators can't change it. |
+| `command` | What runs in `sourcePath`. Set by the administrator; operators can't change it. Files arrive without the executable bit, so run scripts through the shell (`/bin/sh build.sh`, not `./build.sh`); the example also strips Windows line endings first. |
 | `artifactPath` | Folder inside the container whose contents become the artifacts. Emptied before every build. |
 | `artifactRoot` | Host folder for artifacts. Each build goes to `<artifactRoot>\<projectId>\<buildNumber>-<target>\`. Folder names use ids, so project names never appear on disk. |
 | `timeoutSeconds` | The build is stopped after this many seconds (up to 3,600). |
