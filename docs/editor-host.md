@@ -40,7 +40,20 @@ Design: [editor-vault-design.md](editor-vault-design.md).
 - a killed editor's profile was deleted at the next launch;
 - unrelated folders were left alone.
 
-**Not yet done:** the renderer side (step 3), and running vault mode as the installed editor against the service.
+**Renderer (step 3).** `app.mjs` asks the host for its mode before rendering anything, so a vault editor never shows the synthetic sample. Preview mode (`preview-app.mjs` over `state.mjs`) is unchanged. Vault mode (`vault-app.mjs` over `vault-session.mjs`) has:
+
+- a project picker and project creation;
+- files loaded only when opened, and their text dropped when closed;
+- **+ New file**;
+- a conflict banner with **Reload their version** / **Keep editing**;
+- lock screens for the user, Windows, expiry and disconnects, plus explained unlock failures;
+- drafts kept while locked and re-checked on unlock.
+
+For browser review, `index.html?fake-vault` loads `dev/fake-host.mjs`, which mirrors the host bridge rules and controller semantics and has buttons to simulate an external edit, a Windows lock, expiry and an unlock failure. `dev/` is excluded from the native editor's assets.
+
+Reviewed in the browser with the fake host: picker, open, edit and save, external edit then conflict then reload, user lock and unlock, Windows lock, a failed unlock message, new file, and switch project, with no console errors. Preview mode was rechecked unchanged.
+
+**Not yet done:** running vault mode as the installed editor against the service (design step 4).
 
 The bridge accepts messages from the app origin only, bounded to 4 KiB and depth 3. The exact shape is `{ "type": "sourcevault.preview.ready" | "sourcevault.preview.status", "locked": boolean, "dirtyCount": integer, "revisionCount": integer }`. Counts must be 0..32 and 0..1000000 respectively. Duplicate/unknown properties and operations have no effect. A ready message receives `{ "type": "sourcevault.host.metadata", "mode": "synthetic-preview", "captureExclusion": false, "serviceConnected": false }`. The bridge never receives source text or evaluates script; status messages only update the window title. The frontend owns its synthetic lock presentation.
 

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
-  <title>SourceVault — Editor preview</title>
+  <title>SourceVault — Editor</title>
   <link rel="stylesheet" href="app.css">
   <script src="vendor/monaco/vs/loader.js" defer></script>
   <script type="module" src="app.mjs"></script>
@@ -13,7 +13,7 @@
 <div class="app">
   <header class="titlebar">
     <div class="brand"><span class="brand-mark" aria-hidden="true">S</span><strong>SourceVault</strong><span class="title-divider"></span><span class="subtle">Editor</span></div>
-    <div class="workspace-title"><span class="status-dot"></span>synthetic-workspace<span class="preview-badge">Synthetic preview</span></div>
+    <div class="workspace-title"><span class="status-dot"></span><span id="workspace-name">synthetic-workspace</span><span id="mode-badge" class="preview-badge">Synthetic preview</span></div>
     <button id="lock" class="quiet-button"><span aria-hidden="true">▣</span> Lock session</button>
   </header>
   <div class="workbench">
@@ -25,29 +25,33 @@
     </nav>
     <aside class="explorer" id="explorer">
       <div class="panel-heading">EXPLORER<span class="ellipsis" aria-hidden="true">···</span></div>
-      <div class="project-name"><span aria-hidden="true">⌄</span> SYNTHETIC WORKSPACE</div>
-      <div class="folder-row"><span aria-hidden="true">⌄</span><span class="folder-icon" aria-hidden="true">▱</span> src</div>
+      <div class="project-name"><span aria-hidden="true">⌄</span> <span id="project-heading">SYNTHETIC WORKSPACE</span></div>
+      <div id="vault-explorer-actions" class="explorer-actions" hidden><button id="new-file" class="link-button">+ New file</button><button id="switch-project" class="link-button">Switch project</button></div>
+      <form id="new-file-form" class="inline-form" hidden><input id="new-file-name" maxlength="128" placeholder="name.ts" aria-label="New file name" autocomplete="off" spellcheck="false"><button type="submit">Create</button></form>
+      <div id="folder-row" class="folder-row"><span aria-hidden="true">⌄</span><span class="folder-icon" aria-hidden="true">▱</span> src</div>
       <div id="source-files" class="file-list"></div>
       <div id="root-files" class="file-list root-files"></div>
-      <div class="explorer-note"><span class="tiny-label">PREVIEW WORKSPACE</span><p>Bundled sample files.<br>Mock service, memory only.</p></div>
+      <div class="explorer-note"><span id="explorer-note-label" class="tiny-label">PREVIEW WORKSPACE</span><p id="explorer-note-text">Bundled sample files.<br>Mock service, memory only.</p></div>
     </aside>
     <main class="workspace" aria-label="Source editor">
-      <div class="tab-bar"><div id="tabs" role="tablist" aria-label="Open files"></div><button id="save" class="save-button" title="Save in-memory revision (Ctrl+S)">Save revision <kbd>Ctrl S</kbd></button></div>
-      <div class="breadcrumb"><span>synthetic-workspace</span><span aria-hidden="true">›</span><span id="breadcrumb-file">src › pipeline.ts</span><span class="breadcrumb-right" id="document-state">Session copy</span></div>
+      <div class="tab-bar"><div id="tabs" role="tablist" aria-label="Open files"></div><button id="save" class="save-button" title="Save in-memory revision (Ctrl+S)"><span id="save-label">Save revision</span> <kbd>Ctrl S</kbd></button></div>
+      <div class="breadcrumb"><span id="breadcrumb-root">synthetic-workspace</span><span aria-hidden="true">›</span><span id="breadcrumb-file">src › pipeline.ts</span><span class="breadcrumb-right" id="document-state">Session copy</span></div>
+      <div id="conflict-banner" class="conflict-banner" role="alert" hidden><span>Someone else changed this file since you opened it. Saving will not overwrite their version.</span><button id="conflict-reload">Reload their version</button><button id="conflict-keep">Keep editing</button></div>
       <div class="editor-shell">
         <div id="editor" aria-label="Code editor"></div>
         <div id="loading" class="empty-state"><span class="brand-mark">S</span><h1>Opening your workspace</h1><p>Loading the bundled offline editor…</p></div>
-        <div id="locked-view" class="empty-state" hidden><span class="lock-symbol" aria-hidden="true">▣</span><span class="eyebrow">SESSION PAUSED</span><h1>Your workspace is locked</h1><p>The editor view is hidden. This preview retains its session<br>in memory; locking does not guarantee memory erasure.</p><button id="unlock" class="primary-button">Unlock synthetic session <span aria-hidden="true">→</span></button></div>
-        <div id="no-file" class="empty-state" hidden><h1>Choose a file to begin</h1><p>Open a sample file from the explorer.</p></div>
+        <div id="locked-view" class="empty-state" hidden><span class="lock-symbol" aria-hidden="true">▣</span><span id="locked-eyebrow" class="eyebrow">SESSION PAUSED</span><h1 id="locked-title">Your workspace is locked</h1><p id="locked-detail">The editor view is hidden. This preview retains its session<br>in memory; locking does not guarantee memory erasure.</p><button id="unlock" class="primary-button"><span id="unlock-label">Unlock synthetic session</span> <span aria-hidden="true">→</span></button></div>
+        <div id="project-picker" class="empty-state" hidden><span class="eyebrow">VAULT PROJECTS</span><h1>Choose a project</h1><div id="project-list" class="project-list"></div><form id="new-project-form" class="inline-form wide"><input id="new-project-name" maxlength="64" placeholder="New project name" aria-label="New project name" autocomplete="off" spellcheck="false"><button type="submit">Create project</button></form></div>
+        <div id="no-file" class="empty-state" hidden><h1 id="no-file-title">Choose a file to begin</h1><p id="no-file-detail">Open a sample file from the explorer.</p></div>
       </div>
       <section class="activity" id="activity"><button id="activity-toggle" class="activity-heading" aria-expanded="true"><span>SESSION ACTIVITY <span id="activity-count" class="count">1</span></span><span id="activity-chevron">⌄</span></button><div id="activity-content"><div class="activity-entry"><span class="activity-time">SESSION</span><span class="activity-check">✓</span><span id="activity-message">Synthetic workspace ready. No service connection.</span></div></div></section>
     </main>
     <aside class="inspector" id="inspector">
       <div class="panel-heading">SESSION DETAILS</div>
-      <div class="session-card"><span class="session-icon" aria-hidden="true">◈</span><div><strong>Local preview</strong><span>Mock service · memory only</span></div><span class="status-dot"></span></div>
-      <div class="detail-section"><span class="tiny-label">WORKSPACE</span><dl><dt>Files</dt><dd>4 synthetic</dd><dt>Language</dt><dd id="language-detail">TypeScript</dd><dt>Source</dt><dd>Bundled sample</dd></dl></div>
-      <div class="detail-section"><span class="tiny-label">SESSION REVISIONS</span><div class="revision-number" id="revision-count">00</div><p class="detail-copy">Save a revision to checkpoint edits in this session.</p><div class="memory-label"><span aria-hidden="true">◷</span> In memory only</div></div>
-      <div class="boundary-note"><strong>Editor preview</strong><p>An in-memory mock of the service protocol stands in for the service. Vault encryption, TPM protection, service authentication and isolated builds are not connected.</p></div>
+      <div class="session-card"><span class="session-icon" aria-hidden="true">◈</span><div><strong id="session-title">Local preview</strong><span id="session-subtitle">Mock service · memory only</span></div><span class="status-dot"></span></div>
+      <div class="detail-section"><span class="tiny-label">WORKSPACE</span><dl><dt>Files</dt><dd id="files-detail">4 synthetic</dd><dt>Language</dt><dd id="language-detail">TypeScript</dd><dt>Source</dt><dd id="source-detail">Bundled sample</dd><dt>Capture</dt><dd id="capture-detail">Allowed</dd></dl></div>
+      <div class="detail-section"><span id="revision-label" class="tiny-label">SESSION REVISIONS</span><div class="revision-number" id="revision-count">00</div><p id="revision-copy" class="detail-copy">Save a revision to checkpoint edits in this session.</p><div class="memory-label"><span aria-hidden="true">◷</span> <span id="memory-text">In memory only</span></div></div>
+      <div class="boundary-note"><strong id="boundary-title">Editor preview</strong><p id="boundary-text">An in-memory mock of the service protocol stands in for the service. Vault encryption, TPM protection, service authentication and isolated builds are not connected.</p></div>
       <button id="reset" class="reset-button">↺ Reset sample workspace</button>
     </aside>
   </div>

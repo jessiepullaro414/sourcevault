@@ -34,3 +34,14 @@ From the repository root, run `node --test tests/editor-web/state.test.mjs tests
 The optional native bridge receives exactly `{ type, locked, dirtyCount, revisionCount }`, where type is `sourcevault.preview.ready` or `sourcevault.preview.status`. Messages contain metadata only. A host may request a lock with `{ type: 'sourcevault.preview.lock' }`. Native host metadata is not used to assert working security features. The standalone browser mode needs no bridge.
 
 The CSP permits same-origin scripts, fonts, workers, and connection requests (used for local language-worker asset loading), blob worker bootstrap URLs, and Monaco's inline style generation. It excludes third-party origins. Do not weaken it merely to suppress worker warnings: verify the bundled distribution and asset MIME mappings first.
+
+## Vault mode
+
+The editor host decides the mode. `app.mjs` posts a ready message and waits for the host metadata before rendering:
+
+- `mode: "vault"` starts `vault-app.mjs` on `vault-session.mjs`, which speaks bridge v2 to the host;
+- anything else starts the synthetic preview (`preview-app.mjs` on `state.mjs` and the in-renderer mock).
+
+In vault mode this page never sees capabilities or snapshot/revision ids, and never puts document text in status messages.
+
+For browser review without a service, open `index.html?fake-vault`. This loads `dev/fake-host.mjs`, an in-page stand-in for the host with fictional data and a panel to simulate events. `dev/` is not shipped in the native editor. Node tests: `tests/editor-web/vault-session.test.mjs`.
