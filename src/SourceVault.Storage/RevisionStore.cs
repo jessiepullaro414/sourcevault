@@ -505,6 +505,10 @@ public sealed partial class RevisionStore
         FaultInjection?.Invoke(CommitStage.BeforeHeadPublish);
         if (replace) File.Replace(temporary, head, previous);
         else File.Move(temporary, head, false);
+        // The pointer's data was flushed above; the swap itself is file-system metadata. FlushFileBuffers on the new
+        // HEAD forces NTFS to commit its log, which holds the rename, so a returned commit survives a crash. Power
+        // loss and device write caches still need the lab test (docs/lab-checklist.md).
+        using (var published = new FileStream(head, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)) published.Flush(true);
         FaultInjection?.Invoke(CommitStage.HeadPublished);
     }
 }

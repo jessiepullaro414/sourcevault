@@ -198,14 +198,18 @@ export class FakeVaultHost {
         if (!this.buildTargets.includes(args.name)) return reply('NotFound');
         const list = this.#builds.get(args.projectId) ?? []; this.#builds.set(args.projectId, list);
         const build = { buildNumber: list.length + 1, target: args.name, state: 'running', reason: null, exitCode: null, requestedBy: this.actor,
-          requestedAt: new Date().toISOString(), finishedAt: null, artifactFolder: null, artifactFiles: 0, artifactBytes: 0, logAvailable: false, logTruncated: false, log: null };
+          requestedAt: new Date().toISOString(), finishedAt: null, artifactFolder: null, artifactFiles: 0, artifactBytes: 0, artifactsDropped: 0, logAvailable: false, logTruncated: false, log: null };
         list.push(build);
         const files = [...project.files.values()];
+        // Like the build service: source maps and debug symbols are left out and listed at the end of the log.
+        const dropped = files.filter(f => /\.(map|pdb)$/i.test(f.name)), kept = files.filter(f => !dropped.includes(f));
+        const notice = dropped.length ? `\n[SourceVault] ${dropped.length} output file(s) were not published because they can reveal source:\n${dropped.map(f => `  ${f.name}  (${/\.map$/i.test(f.name) ? 'SourceMap' : 'DebugSymbols'})\n`).join('')}` : '';
         setTimeout(() => Object.assign(build, this.buildFails
           ? { state: 'failed', exitCode: 1, finishedAt: new Date().toISOString(), logAvailable: true, log: `$ ./build.sh\nerror: fictional failure in ${files[0]?.name ?? 'nothing'}\n` }
           : { state: 'succeeded', exitCode: 0, finishedAt: new Date().toISOString(), logAvailable: true,
               artifactFolder: ['D:', 'SourceVault', 'artifacts', args.projectId, `${build.buildNumber}-${args.name}`].join('\\'),
-              artifactFiles: files.length, artifactBytes: files.reduce((n, f) => n + bytes(f.text), 0), log: `$ ./build.sh\ncompiling ${files.length} fictional file(s)\ndone\n` }), this.buildMs);
+              artifactFiles: kept.length, artifactBytes: kept.reduce((n, f) => n + bytes(f.text), 0), artifactsDropped: dropped.length,
+              log: `$ ./build.sh\ncompiling ${files.length} fictional file(s)\ndone\n${notice}` }), this.buildMs);
         return reply('Ok', { buildNumber: build.buildNumber });
       }
       case 'listBuilds':

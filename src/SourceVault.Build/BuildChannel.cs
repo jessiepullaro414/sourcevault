@@ -6,7 +6,8 @@ using SourceVault.Contracts;
 namespace SourceVault.Build;
 
 /// <summary>A build's result as the vault service receives it.</summary>
-public sealed record BuildReply(string State, string? Reason, int? ExitCode, byte[] Log, bool LogTruncated, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes);
+public sealed record BuildReply(string State, string? Reason, int? ExitCode, byte[] Log, bool LogTruncated, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes,
+    int ArtifactsDropped = 0);
 
 /// <summary>The vault service's view of the build service (the test seam).</summary>
 public interface IBuildService
@@ -26,7 +27,7 @@ public sealed class BuildServiceUnavailableException(string reason) : Exception(
 /// accounts can use. Frames are <see cref="FrameCodec"/> JSON. One connection per request:
 ///   {op:"targets"}                                   -> {ok, targets[] | code}
 ///   {op:"build", target, projectId, buildNumber, fileCount}, then fileCount × {name, contentBase64}
-///                                                     -> {ok, state, reason, exitCode, logBase64, logTruncated, artifactFolder, artifactFiles, artifactBytes}
+///                                                     -> {ok, state, reason, exitCode, logBase64, logTruncated, artifactFolder, artifactFiles, artifactBytes, artifactsDropped}
 /// Source crosses only this pipe; the build service never sees the vault, its key, or project names.
 /// </summary>
 public static class BuildChannel
@@ -65,7 +66,8 @@ public static class BuildChannel
             string? reason = root.GetProperty("reason").ValueKind == JsonValueKind.String ? root.GetProperty("reason").GetString() : null;
             string? folder = root.GetProperty("artifactFolder").ValueKind == JsonValueKind.String ? root.GetProperty("artifactFolder").GetString() : null;
             return new BuildReply(root.GetProperty("state").GetString()!, reason, exit, log, root.GetProperty("logTruncated").GetBoolean(), folder,
-                root.GetProperty("artifactFiles").GetInt32(), root.GetProperty("artifactBytes").GetInt64());
+                root.GetProperty("artifactFiles").GetInt32(), root.GetProperty("artifactBytes").GetInt64(),
+                root.TryGetProperty("artifactsDropped", out var dropped) ? dropped.GetInt32() : 0); // absent from an older build service
         }
 
         private async Task<Stream> Connect(CancellationToken ct)
@@ -132,6 +134,7 @@ public static class BuildChannel
                     if (outcome.Artifacts is { } a) w.WriteString("artifactFolder", a.Folder); else w.WriteNull("artifactFolder");
                     w.WriteNumber("artifactFiles", outcome.Artifacts?.Files ?? 0);
                     w.WriteNumber("artifactBytes", outcome.Artifacts?.Bytes ?? 0);
+                    w.WriteNumber("artifactsDropped", outcome.Artifacts?.DroppedCount ?? 0);
                 }, ct, 16384 + outcome.Log.Length * 4 / 3).ConfigureAwait(false);
             }
             finally { CryptographicOperations.ZeroMemory(outcome.Log); }

@@ -153,6 +153,15 @@ Owner-run lab, 2026-10-17, after signing out and in as an operator:
 
 The owner sign-in now holds the operators group. Still open: a reboot test, and the editor (design step 3).
 
+## Client checks: PID reuse and hash pins (2026-10-18)
+
+Design: [hardening-design.md](hardening-design.md), sections 1 and 2.
+
+- **PID reuse.** The server records when it accepted a connection. The client process must still be running and must have been created no later than that, checked while the server holds a handle to it, so a reused PID is refused. Its creation time is pinned with the PID for every later frame.
+- **Hash pins.** On each connection's first frame, the service re-reads `install-manifest.sha256` from the install root. It refuses the client unless its folder (`client\` or `editor\`, recursively, assets included) holds exactly the listed files with matching SHA-256 and no links. A missing or malformed manifest refuses every client; the service itself still starts.
+- **Limits.** An administrator can rewrite the manifest, and only files on disk are checked, not the running image. The shared `runtime\` is checked by `-Status`, not per connection.
+- **Verified:** in-process tests only (the endpoint tests). Lab check: [lab-checklist.md](lab-checklist.md).
+
 ## Build service role (2026-10-18)
 
 The same service program also runs as a second service, **SourceVaultBuild**, under its own virtual account `NT SERVICE\SourceVaultBuild`, started with the argument `build-service`. Setup registers it only with `-WithBuilds`.

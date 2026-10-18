@@ -55,8 +55,9 @@ internal sealed class VaultPipeServer : IDisposable
             try
             {
                 await pipe.WaitForConnectionAsync(stopping.Token).ConfigureAwait(false);
+                var connectedUtc = DateTime.UtcNow; // the client process must be older than this (PID-reuse check)
                 active[state] = pipe;
-                await ServeAsync(pipe, state).ConfigureAwait(false);
+                await ServeAsync(pipe, state, connectedUtc).ConfigureAwait(false);
             }
             catch { /* any failure closes this connection only; details are never reported */ }
             finally { Close(state, pipe); active.TryRemove(state, out _); }
@@ -71,7 +72,7 @@ internal sealed class VaultPipeServer : IDisposable
         catch (Exception e) when (e is IdentityNotMappedException or SystemException) { return user.Value; }
     }
 
-    private async Task ServeAsync(NamedPipeServerStream pipe, ConnectionState state)
+    private async Task ServeAsync(NamedPipeServerStream pipe, ConnectionState state, DateTime connectedUtc)
     {
         PipePeer? first = null;
         while (!state.Closed && !stopping.IsCancellationRequested)
@@ -80,9 +81,13 @@ internal sealed class VaultPipeServer : IDisposable
             if (frame is null) return;
             try
             {
-                var peer = VaultPipe.ValidateClient(pipe, policy);
-                if (first is null) { first = peer; state.WindowsSession = peer.Session; state.Actor = AccountName(peer.User); }
-                else if (!peer.User.Equals(first.User) || peer.Session != first.Session || peer.ProcessId != first.ProcessId) return;
+                var peer = VaultPipe.ValidateClient(pipe, policy, connectedUtc);
+                if (first is null)
+                {
+                    policy.ValidateInstalledFiles(peer.ImagePath); // hash pins, once per connection
+                    first = peer; state.WindowsSession = peer.Session; state.Actor = AccountName(peer.User);
+                }
+                else if (!peer.User.Equals(first.User) || peer.Session != first.Session || peer.ProcessId != first.ProcessId || peer.ProcessCreated != first.ProcessCreated) return;
                 ProtocolResponse response;
                 using (var request = ProtocolParser.ParseRequest(frame, ProtocolCatalog.V2))
                     response = protocol.Handle(request, state);

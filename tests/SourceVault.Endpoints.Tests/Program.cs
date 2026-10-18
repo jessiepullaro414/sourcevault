@@ -219,6 +219,7 @@ Test("builds: queue, run through the build service, status, encrypted logs that 
     Assert(finished.TryTake(out var done, TimeSpan.FromSeconds(20)) && done.State == "succeeded", "finished");
     var status = c.Ok("GetBuildStatus", ("projectId", project), ("buildNumber", 1));
     Assert(status.GetProperty("state").GetString() == "succeeded" && status.GetProperty("artifactFolder").GetString() == @"D:\artifacts\1-linux" && status.GetProperty("logAvailable").GetBoolean(), "status");
+    Assert(status.GetProperty("artifactFiles").GetInt32() == 3 && status.GetProperty("artifactsDropped").GetInt32() == 2, "dropped count stored and reported");
     Assert(status.GetProperty("requestedBy").GetString() == me.Translate(typeof(NTAccount)).Value, "requested by the caller");
     var log = Encoding.UTF8.GetString(c.Ok("OpenBuildLog", ("projectId", project), ("buildNumber", 1)).GetProperty("contentBase64").GetBytesFromBase64());
     Assert(log == "synthetic-build-log: 2 files\n", "log text: " + log);
@@ -805,6 +806,109 @@ Test("importer: batches stay under the frame limit and 256 files", () =>
     Assert(SourceVault.Import.Importer.Batches(big).All(b => b.Sum(f => f.Length) <= SourceVault.Import.Importer.MaxBatchBytes), "large files split");
 });
 
+bool Refused(Action action)
+{
+    try { action(); return false; }
+    catch (UnauthorizedAccessException) { return true; }
+}
+
+Test("PID reuse: the client must still be running and older than the connection", () =>
+{
+    using var current = System.Diagnostics.Process.GetCurrentProcess();
+    long created = VaultPipe.CheckProcessLifetime(current.SafeHandle, DateTime.UtcNow);
+    Assert(created > 0 && created <= DateTime.UtcNow.ToFileTimeUtc(), "a running, older process passes");
+    var createdUtc = DateTime.FromFileTimeUtc(created);
+    Assert(Refused(() => VaultPipe.CheckProcessLifetime(current.SafeHandle, createdUtc.AddSeconds(-1))), "a process newer than the connection is a reused PID");
+    using var child = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/d /c exit 0") { UseShellExecute = false, CreateNoWindow = true })!;
+    child.WaitForExit();
+    Assert(Refused(() => VaultPipe.CheckProcessLifetime(child.SafeHandle, DateTime.UtcNow)), "an exited process is refused");
+});
+
+// A synthetic install root: <root>\client\{Tool.exe, Tool.dll, sub\data.json} and a manifest in setup's format.
+(string Root, string Exe) FakeInstall(Func<string, string, string>? editManifest = null)
+{
+    var root = Path.Combine(workspace, "install-" + Guid.NewGuid().ToString("N"));
+    var client = Path.Combine(root, "client");
+    Directory.CreateDirectory(Path.Combine(client, "sub"));
+    File.WriteAllText(Path.Combine(client, "Tool.exe"), "synthetic apphost");
+    File.WriteAllText(Path.Combine(client, "Tool.dll"), "synthetic app code");
+    File.WriteAllText(Path.Combine(client, "sub", "data.json"), "{}");
+    Directory.CreateDirectory(Path.Combine(root, "service"));
+    File.WriteAllText(Path.Combine(root, "service", "other.dll"), "not pinned for clients");
+    var lines = Directory.GetFiles(root, "*", SearchOption.AllDirectories).Order(StringComparer.OrdinalIgnoreCase)
+        .Select(f => $"{Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f)))}  {f[(root.Length + 1)..]}");
+    var text = string.Join("\r\n", lines) + "\r\n";
+    File.WriteAllText(Path.Combine(root, ClientPins.ManifestName), editManifest is null ? text : editManifest(text, root), new UTF8Encoding(false));
+    return (root, Path.Combine(client, "Tool.exe"));
+}
+
+Test("client pins: an untouched client folder passes", () =>
+{
+    var (root, exe) = FakeInstall();
+    new ClientPins(root, ["client"]).Verify(exe);
+    new PipePeerPolicy(authenticatedUsers, [exe], new ClientPins(root + "\\", ["client"])).ValidateInstalledFiles(exe); // trailing separator is fine
+});
+
+Test("client pins: a changed, extra or missing file is refused", () =>
+{
+    var (root, exe) = FakeInstall();
+    var pins = new ClientPins(root, ["client"]);
+    File.AppendAllText(Path.Combine(root, "client", "Tool.dll"), "!");
+    Assert(Refused(() => pins.Verify(exe)), "changed file");
+    (root, exe) = FakeInstall(); pins = new ClientPins(root, ["client"]);
+    File.WriteAllText(Path.Combine(root, "client", "sub", "planted.dll"), "x");
+    Assert(Refused(() => pins.Verify(exe)), "extra file");
+    (root, exe) = FakeInstall(); pins = new ClientPins(root, ["client"]);
+    File.Delete(Path.Combine(root, "client", "sub", "data.json"));
+    Assert(Refused(() => pins.Verify(exe)), "missing file");
+});
+
+Test("client pins: an update that rewrites the manifest is honoured without a restart", () =>
+{
+    var (root, exe) = FakeInstall();
+    var pins = new ClientPins(root, ["client"]);
+    var dll = Path.Combine(root, "client", "Tool.dll");
+    File.WriteAllText(dll, "updated synthetic app code");
+    Assert(Refused(() => pins.Verify(exe)), "stale manifest refuses the new file");
+    var manifest = Path.Combine(root, ClientPins.ManifestName);
+    var lines = File.ReadAllLines(manifest).Select(l => l.EndsWith(@"  client\Tool.dll", StringComparison.Ordinal) ? $"{Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(dll)))}  client\\Tool.dll" : l);
+    File.WriteAllLines(manifest, lines);
+    pins.Verify(exe);
+});
+
+Test("client pins fail closed: no manifest, a malformed manifest, an unpinned folder, a path outside the root", () =>
+{
+    var (root, exe) = FakeInstall();
+    File.Delete(Path.Combine(root, ClientPins.ManifestName));
+    Assert(Refused(() => new ClientPins(root, ["client"]).Verify(exe)), "no manifest");
+    foreach (Func<string, string, string> bad in new Func<string, string, string>[]
+    {
+        (t, _) => t + "zz" + t[2..66] + "client\\x\r\n",                 // non-hex hash
+        (t, _) => t + t.Split("\r\n")[0] + "\r\n",                         // duplicate line
+        (t, _) => t + new string('0', 64) + "  client\\..\\service\\x\r\n", // dot segment
+        (t, r) => t + new string('0', 64) + "  " + r + "\\client\\abs\r\n", // rooted path
+        (t, _) => t.Replace("  ", " ", StringComparison.Ordinal),           // wrong separator
+    })
+    {
+        var (r2, e2) = FakeInstall(bad);
+        Assert(Refused(() => new ClientPins(r2, ["client"]).Verify(e2)), "malformed manifest rejects everything");
+    }
+    var (r3, e3) = FakeInstall();
+    Assert(Refused(() => new ClientPins(r3, ["editor"]).Verify(e3)), "folder not pinned");
+    Assert(Refused(() => new ClientPins(r3, ["client"]).Verify(Path.Combine(r3, "client", "sub", "data.json"))), "image must sit directly in a pinned folder");
+    Assert(Refused(() => new ClientPins(r3, ["client"]).Verify(Path.Combine(workspace, "client", "Tool.exe"))), "outside the install root");
+});
+
+Test("client pins: a link inside the client folder is refused", () =>
+{
+    var (root, exe) = FakeInstall();
+    var pins = new ClientPins(root, ["client"]);
+    var target = Path.Combine(workspace, "link-target-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(target);
+    if (!TryJunction(Path.Combine(root, "client", "linked"), target)) { Console.WriteLine("SKIP client pins link case: junction creation unavailable"); return; }
+    Assert(Refused(() => pins.Verify(exe)), "junction refused");
+});
+
 Console.WriteLine($"Endpoint tests: {passed} passed; synthetic workspace retained at {workspace}");
 return 0;
 
@@ -883,6 +987,6 @@ sealed class FakeBuildService : SourceVault.Build.IBuildService
         var log = Encoding.UTF8.GetBytes($"synthetic-build-log: {files.Count} files\n");
         return Task.FromResult(Fail
             ? new SourceVault.Build.BuildReply("Failed", null, 1, log, false, null, 0, 0)
-            : new SourceVault.Build.BuildReply("Succeeded", null, 0, log, false, $@"D:\artifacts\{buildNumber}-{target}", 3, 1234));
+            : new SourceVault.Build.BuildReply("Succeeded", null, 0, log, false, $@"D:\artifacts\{buildNumber}-{target}", 3, 1234, ArtifactsDropped: 2));
     }
 }

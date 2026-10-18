@@ -368,7 +368,7 @@ internal sealed class VaultProtocol
         w.WriteString("requestedAt", Time(r.RequestedAt));
         if (r.FinishedAt is { } done) w.WriteString("finishedAt", Time(done)); else w.WriteNull("finishedAt");
         if (r.ArtifactFolder is null) w.WriteNull("artifactFolder"); else w.WriteString("artifactFolder", r.ArtifactFolder);
-        w.WriteNumber("artifactFiles", r.ArtifactFiles); w.WriteNumber("artifactBytes", r.ArtifactBytes);
+        w.WriteNumber("artifactFiles", r.ArtifactFiles); w.WriteNumber("artifactBytes", r.ArtifactBytes); w.WriteNumber("artifactsDropped", r.ArtifactsDropped);
         w.WriteBoolean("logAvailable", r.LogAvailable); w.WriteBoolean("logTruncated", r.LogTruncated);
     }
 

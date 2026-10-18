@@ -107,6 +107,71 @@ Test("artifacts: links, escapes, bad names, duplicates and oversize sets are ref
     Refuse(Tar(("out/big.bin", TarEntryType.RegularFile, new string('x', 100))), "TooLarge", max: 50);
 });
 
+MemoryStream RevealingOutput() => Tar(("out/", TarEntryType.Directory, null),
+    ("out/app.js", TarEntryType.RegularFile, "console.log(1)"),
+    ("out/app.js.map", TarEntryType.RegularFile, "{\"sourcesContent\":[\"synthetic\"]}"),
+    ("out/App.PDB", TarEntryType.RegularFile, "synthetic symbols"),
+    ("out/obj/", TarEntryType.Directory, null), ("out/obj/x.o", TarEntryType.RegularFile, "synthetic object"),
+    ("out/x.dSYM/", TarEntryType.Directory, null), ("out/x.dSYM/Contents/dwarf", TarEntryType.RegularFile, "synthetic dwarf"),
+    ("out/inline.js", TarEntryType.RegularFile, "f()\n//# sourceMappingURL=data:application/json;base64,c3ludGhldGlj\n"),
+    ("out/lib/static.lib", TarEntryType.RegularFile, "synthetic library"));
+
+Test("artifacts: source maps, debug symbols, intermediates and inline source maps are left out and listed", () =>
+{
+    var dest = Dest();
+    var result = Run(ArtifactPublisher.PublishAsync(RevealingOutput(), "out", dest, 1 << 20, default));
+    Assert(result.Files == 2 && result.Bytes == "console.log(1)".Length + "synthetic library".Length, $"two files published (got {result.Files})");
+    Assert(result.DroppedCount == 5 && result.Dropped.Count == 5, "five left out");
+    var reasons = result.Dropped.ToDictionary(d => d.Path, d => d.Reason);
+    Assert(reasons["app.js.map"] == "SourceMap" && reasons["App.PDB"] == "DebugSymbols" && reasons["obj/x.o"] == "Intermediate"
+        && reasons["x.dSYM/Contents/dwarf"] == "DebugSymbols" && reasons["inline.js"] == "InlineSourceMap", string.Join(", ", reasons));
+    var onDisk = Directory.GetFiles(dest, "*", SearchOption.AllDirectories).Select(f => Path.GetRelativePath(dest, f)).Order().ToArray();
+    Assert(onDisk.SequenceEqual(["app.js", @"lib\static.lib"]), "only the kept files are on disk: " + string.Join(", ", onDisk));
+    Assert(!Directory.Exists(Path.Combine(dest, "x.dSYM")), "no dSYM folder");
+});
+
+Test("artifacts: keepFileTypes publishes the kinds an administrator chose; a map comment beyond the last 64 KiB is not seen", () =>
+{
+    var dest = Dest();
+    var keep = new HashSet<string>([".map", ".dsym", "inline-source-map"]);
+    var result = Run(ArtifactPublisher.PublishAsync(RevealingOutput(), "out", dest, 1 << 20, default, keep));
+    Assert(result.Files == 5 && result.DroppedCount == 2 && result.Dropped.Select(d => d.Path).Order().SequenceEqual(["App.PDB", "obj/x.o"]), "only .pdb and .o still left out");
+    var early = Dest();
+    var padded = "//# sourceMappingURL=data:application/json;base64,c3ludGhldGlj\n" + new string(' ', ArtifactFilter.InlineScanBytes + 10);
+    var kept = Run(ArtifactPublisher.PublishAsync(Tar(("out/early.js", TarEntryType.RegularFile, padded)), "out", early, 1 << 20, default));
+    Assert(kept.Files == 1 && kept.DroppedCount == 0, "documented limit: only the end of the file is checked");
+});
+
+Test("config: keepFileTypes accepts known kinds once each, case-insensitively", () =>
+{
+    var t = BuildConfig.Parse(Utf8(Config(LinuxTarget.Replace("\"artifactPath\"", "\"keepFileTypes\":[\".MAP\",\"inline-source-map\"],\"artifactPath\"")))).Targets[0];
+    Assert(t.Keep.SetEquals([".map", "inline-source-map"]), "parsed and lowercased");
+    Assert(BuildConfig.Parse(Utf8(Config(LinuxTarget))).Targets[0].Keep.Count == 0, "default keeps nothing");
+    string Keep(string list) => Config(LinuxTarget.Replace("\"artifactPath\"", $"\"keepFileTypes\":{list},\"artifactPath\""));
+    RejectConfig(Keep("[\".exe\"]"), "not a dropped kind");
+    RejectConfig(Keep("[\".map\",\".MAP\"]"), "listed twice");
+    RejectConfig(Keep("\".map\""), "not an array");
+    RejectConfig(Keep("[1]"), "not text");
+});
+
+Test("build: dropped files are listed at the end of the log, and the old log buffer is zeroed", () =>
+{
+    var box = new FakeContainer { ArchiveOverride = _ => RevealingOutput() };
+    var target = BuildConfig.Parse(Utf8(Config(LinuxTarget))).Targets[0];
+    IReadOnlyList<(string, byte[])> source = [("build.sh", Utf8("#!/bin/sh\necho synthetic\n"))];
+    var outcome = Run(BuildRunner.RunAsync(target, Dest(), Guid.NewGuid(), 1, source, new FakeEngine(box), default));
+    var log = Encoding.UTF8.GetString(outcome.Log);
+    Assert(outcome.State == BuildState.Succeeded && outcome.Artifacts!.DroppedCount == 5, "succeeded with five left out");
+    Assert(log.Contains("5 output file(s) were not published") && log.Contains("  app.js.map  (SourceMap)") && log.Contains("keepFileTypes"), log);
+    var many = Enumerable.Range(0, ArtifactFilter.MaxListed).Select(i => new DroppedArtifact($"m{i}.map", "SourceMap")).ToList();
+    var original = Utf8("synthetic build output\n");
+    var noticed = Encoding.UTF8.GetString(BuildRunner.WithDroppedNotice(original, new PublishedArtifacts("D:\\x", 0, 0, many, 150)));
+    Assert(noticed.StartsWith("synthetic build output\n") && noticed.Contains("...and 50 more"), "capped list");
+    Assert(original.All(b => b == 0), "old buffer zeroed");
+    var plain = Utf8("unchanged");
+    Assert(ReferenceEquals(BuildRunner.WithDroppedNotice(plain, new PublishedArtifacts("D:\\x", 1, 1)), plain), "nothing dropped: log untouched");
+});
+
 // ---- build steps against an in-memory container ------------------------------------------------------------------
 var linux = BuildConfig.Parse(Utf8(Config(LinuxTarget))).Targets[0];
 IReadOnlyList<(string, byte[])> Source() => [("build.sh", Utf8("#!/bin/sh\necho synthetic\n")), ("src/app.ts", Utf8("export const x = 1;\n"))];

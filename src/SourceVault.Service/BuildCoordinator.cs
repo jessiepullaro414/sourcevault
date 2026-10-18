@@ -9,7 +9,7 @@ namespace SourceVault.Service;
 
 /// <summary>One build as operators see it. States: queued, running, succeeded, failed, timedOut, rejected, unavailable.</summary>
 internal sealed record BuildRecord(int Number, string Target, string State, string? Reason, int? ExitCode, string? RequestedBy,
-    DateTimeOffset RequestedAt, DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated);
+    DateTimeOffset RequestedAt, DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated, int ArtifactsDropped = 0);
 
 /// <summary>
 /// Runs builds through the build service (docs/files-history-builds-design.md, section 4). Per target one build runs
@@ -99,7 +99,7 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
                 "Succeeded" => "succeeded", "Failed" => "failed", "TimedOut" => "timedOut", "Rejected" => "rejected", _ => "unavailable",
             };
             finished = queued with { State = state, Reason = reply.Reason, ExitCode = reply.ExitCode, FinishedAt = time.GetUtcNow(), ArtifactFolder = reply.ArtifactFolder,
-                ArtifactFiles = reply.ArtifactFiles, ArtifactBytes = reply.ArtifactBytes, LogTruncated = reply.LogTruncated };
+                ArtifactFiles = reply.ArtifactFiles, ArtifactBytes = reply.ArtifactBytes, ArtifactsDropped = reply.ArtifactsDropped, LogTruncated = reply.LogTruncated };
         }
         catch (BuildServiceUnavailableException e) { finished = queued with { State = "unavailable", Reason = e.Reason, FinishedAt = time.GetUtcNow() }; }
         catch (Exception e) when (e is not OutOfMemoryException) { finished = queued with { State = "unavailable", Reason = "VaultError", FinishedAt = time.GetUtcNow() }; }
@@ -174,7 +174,7 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
         {
             number = r.Number, target = r.Target, state = r.State, reason = r.Reason, exitCode = r.ExitCode, requestedBy = r.RequestedBy,
             requestedAt = r.RequestedAt.ToUnixTimeMilliseconds(), finishedAt = r.FinishedAt?.ToUnixTimeMilliseconds(),
-            artifactFolder = r.ArtifactFolder, artifactFiles = r.ArtifactFiles, artifactBytes = r.ArtifactBytes, logTruncated = r.LogTruncated,
+            artifactFolder = r.ArtifactFolder, artifactFiles = r.ArtifactFiles, artifactBytes = r.ArtifactBytes, artifactsDropped = r.ArtifactsDropped, logTruncated = r.LogTruncated,
         }),
     });
 
@@ -190,6 +190,7 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
             DateTimeOffset.FromUnixTimeMilliseconds(e.GetProperty("requestedAt").GetInt64()),
             e.GetProperty("finishedAt").ValueKind == JsonValueKind.Number ? DateTimeOffset.FromUnixTimeMilliseconds(e.GetProperty("finishedAt").GetInt64()) : null,
             Str(e, "artifactFolder"), e.GetProperty("artifactFiles").GetInt32(), e.GetProperty("artifactBytes").GetInt64(), true,
-            e.GetProperty("logTruncated").GetBoolean())).ToList();
+            e.GetProperty("logTruncated").GetBoolean(),
+            e.TryGetProperty("artifactsDropped", out var dropped) ? dropped.GetInt32() : 0)).ToList(); // absent in records stored before 2026-10-18
     }
 }

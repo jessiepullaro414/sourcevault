@@ -84,7 +84,7 @@ internal sealed class ScmHost
             catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.OperatorsGroupMissing); }
             using var self = WindowsIdentity.GetCurrent();
             var pipeServer = new VaultPipeServer(VaultPipe.ProductionName, self.User!,
-                new PipePeerPolicy(operators, InstalledClients()), new VaultProtocol(catalog, projects, builds: new BuildCoordinator(catalog, BuildServiceClient())));
+                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, projects, builds: new BuildCoordinator(catalog, BuildServiceClient())));
             try { pipeServer.Start(); }
             catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
             {
@@ -128,14 +128,15 @@ internal sealed class ScmHost
         return Task.FromResult<Stream>(VaultPipe.Connect(BuildChannel.PipeName, build, TimeSpan.FromSeconds(5)));
     });
 
+    internal static string InstallRoot => Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..")));
+
     // Exact executables allowed to connect: apphost .exe files under the admin-owned install root. Never the
-    // shared runtime's dotnet.exe, which would let any DLL connect.
+    // shared runtime's dotnet.exe, which would let any DLL connect. Their folders are also hash-pinned (ClientPins).
     internal static IEnumerable<string> InstalledClients()
     {
-        var installRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ".."));
-        yield return Path.Combine(installRoot, "client", "SourceVault.LabClient.exe");
-        yield return Path.Combine(installRoot, "client", "SourceVault.Import.exe");
-        yield return Path.Combine(installRoot, "editor", "SourceVault.Editor.exe");
+        yield return Path.Combine(InstallRoot, "client", "SourceVault.LabClient.exe");
+        yield return Path.Combine(InstallRoot, "client", "SourceVault.Import.exe");
+        yield return Path.Combine(InstallRoot, "editor", "SourceVault.Editor.exe");
     }
 
     private sealed class Owned(Action dispose) : IDisposable

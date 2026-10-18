@@ -412,5 +412,26 @@ Check("host messages are well-formed JSON and carry text losslessly", () =>
     try { BridgePolicy.BuildLocked("anything"); throw new Exception("accepted unknown reason"); } catch (ArgumentException) { }
 });
 
+// ---- Every shipped asset is reachable ----
+// The native editor maps https://sourcevault.local/ to the shipped copy of SourceVault.Editor.Web (without dev/).
+// A policy tightening that rejected any of these files would silently break a Monaco worker, language or font.
+Check("every shipped web asset, including all of vendor/monaco, is allowed at its app-origin URL", () =>
+{
+    var dir = new DirectoryInfo(AppContext.BaseDirectory);
+    while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "SourceVault.sln"))) dir = dir.Parent;
+    Assert(dir is not null, "repository root not found above the test binary");
+    var web = Path.Combine(dir!.FullName, "src", "SourceVault.Editor.Web");
+    var shipped = Directory.EnumerateFiles(web, "*", SearchOption.AllDirectories)
+        .Select(f => Path.GetRelativePath(web, f).Replace('\\', '/'))
+        .Where(r => !r.StartsWith("dev/", StringComparison.Ordinal)).ToList();
+    Assert(shipped.Count(r => r.StartsWith("vendor/monaco/", StringComparison.Ordinal)) > 100, "vendored Monaco found");
+    Assert(shipped.Contains("index.html") && shipped.Contains("vendor/monaco/vs/editor/editor.main.js"), "entry points present");
+    foreach (var relative in shipped)
+    {
+        var url = App + "/" + string.Join('/', relative.Split('/').Select(Uri.EscapeDataString));
+        Assert(PreviewPolicy.IsResourceAllowed(url), "asset refused: " + relative);
+    }
+});
+
 Console.WriteLine($"Editor host policy tests: {passed} passed; {failures.Count} failed.");
 return failures.Count == 0 ? 0 : 1;
