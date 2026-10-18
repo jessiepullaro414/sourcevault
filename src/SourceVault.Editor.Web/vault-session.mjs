@@ -6,6 +6,8 @@
 // Document text is held only for opened files and dropped when a file is closed. On lock, unsaved drafts stay in
 // memory behind the lock screen (owner decision) and are re-checked against the vault on unlock.
 
+import { merge3 } from './merge.mjs';
+
 export const REQUEST_TYPE = 'sourcevault.vault.request';
 export const RESPONSE_TYPE = 'sourcevault.vault.response';
 export const LOCKED_TYPE = 'sourcevault.vault.locked';
@@ -73,7 +75,8 @@ export class VaultSession {
   }
 
   file(id) { const f = this.files.get(id); if (!f) throw new VaultError('UnknownFile'); return f; }
-  dirty(id) { const f = this.files.get(id); return !!f && f.loaded && f.text !== f.saved; }
+  // A pending merge counts as unsaved even if its text happens to equal the last saved text.
+  dirty(id) { const f = this.files.get(id); return !!f && f.loaded && (f.text !== f.saved || !!f.mergedOnto); }
   get dirtyIds() { return [...this.files.values()].filter(f => this.dirty(f.id)).map(f => f.id); }
   get metadata() {
     return { locked: this.locked, dirtyCount: Math.min(MAX_DIRTY, this.dirtyIds.length), revisionCount: Math.min(MAX_REVISIONS, this.savedCount) };
@@ -84,7 +87,8 @@ export class VaultSession {
     const result = await this.#call('unlock');
     this.locked = false; this.lockReason = null;
     const changed = (result.changed ?? []).filter(c => c.projectId === this.project?.projectId).map(c => c.fileId);
-    for (const id of changed) { const f = this.files.get(id); if (f) f.conflict = true; }
+    // A draft already merged onto their version is checked again by its save, so it is not flagged here.
+    for (const id of changed) { const f = this.files.get(id); if (f && !f.mergedOnto) f.conflict = true; }
     await this.refreshProjects();
     if (this.project) await this.#refreshFiles();
     return changed;
@@ -164,7 +168,7 @@ export class VaultSession {
   async reload(id) {
     const f = this.file(id);
     const doc = await this.#call('openDocument', { projectId: this.project.projectId, fileId: id });
-    f.text = f.saved = doc.text; f.loaded = true; f.conflict = false;
+    f.text = f.saved = doc.text; f.loaded = true; f.conflict = false; f.mergedOnto = null;
   }
 
   /** Closes a tab; refused with unsaved edits. The file's text is dropped from memory. */
@@ -190,14 +194,36 @@ export class VaultSession {
     const f = this.file(id);
     if (!this.dirty(id)) return false;
     const sent = f.text; // edits made while the save is in flight stay dirty
+    const merged = f.mergedOnto;
     try {
-      const result = await this.#call('saveDocument', { projectId: this.project.projectId, fileId: id, text: sent });
-      f.saved = sent; f.byteLength = result.byteLength; f.revision++; f.conflict = false; this.savedCount++;
+      const result = merged
+        ? await this.#call('saveMerged', { projectId: this.project.projectId, fileId: id, text: sent, revisionId: merged })
+        : await this.#call('saveDocument', { projectId: this.project.projectId, fileId: id, text: sent });
+      f.saved = sent; f.byteLength = result.byteLength; f.revision++; f.conflict = false; f.mergedOnto = null; this.savedCount++;
       return true;
     } catch (e) {
-      if (e.code === 'Conflict') f.conflict = true;
+      if (e.code === 'Conflict') { f.conflict = true; f.mergedOnto = null; } // changed again: merge again from the latest version
       throw e;
     }
+  }
+
+  /**
+   * Starts a merge after a conflict: fetches the version this editor started from and their current version, and merges
+   * them with the draft. Returns { segments, conflicts, theirsRevisionId } (see merge.mjs); nothing changes until
+   * applyMerge is called.
+   */
+  async prepareMerge(id) {
+    const f = this.file(id);
+    if (!f.loaded) throw new VaultError('NotOpen');
+    const sources = await this.#call('mergeSources', { projectId: this.project.projectId, fileId: id });
+    return { ...merge3(sources.base, f.text, sources.theirs), theirsRevisionId: sources.theirsRevisionId };
+  }
+
+  /** Takes a merge result as the draft. The next save is made on top of their version, if it is still current. */
+  applyMerge(id, text, theirsRevisionId) {
+    if (this.locked) throw new VaultError('Locked');
+    const f = this.file(id);
+    f.text = text; f.mergedOnto = theirsRevisionId; f.conflict = false;
   }
 
   async renameProject(projectId, newName) {

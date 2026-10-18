@@ -111,3 +111,5 @@ See `docs/files-history-builds-design.md`, section 2. Every operation also takes
 - **RestoreFile** brings back a deleted file under `newName`, which can be its old path or a new one, at its last revision. A taken name returns `AlreadyExists`.
 - **savedBy / deletedBy** is the calling operator's Windows account name. The service records it only inside encrypted records.
 - **DeleteFile** now keeps the file's history, and the file can be restored.
+
+Merging needs no new protocol operation. The editor host fetches the text its copy was based on, and the current text, with `ListFiles` and `OpenRevision`. It saves the merge with `ApplyEdits` only if the file is still at the revision that was merged with; otherwise the save reports `Conflict` and the merge is redone.

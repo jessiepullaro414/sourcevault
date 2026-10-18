@@ -1,6 +1,7 @@
 // Vault mode UI (docs/editor-vault-design.md). The host owns the service connection; this page sees project/file ids,
 // names and the text of files it opens. Nothing here logs or posts document text anywhere but the host bridge.
 import { VaultSession, languageFor as languageOf } from './vault-session.mjs';
+import { resolve } from './merge.mjs';
 import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, wireChrome, showLoadFailure } from './shell.mjs';
 
 const UNLOCK_FAILURES = {
@@ -42,6 +43,7 @@ export async function startVault(transport, metadata, onSession) {
   let deleting = null; // { projectId, typed } while a delete confirmation is open in the picker
   let renaming = null; // { projectId, value } while a project rename is open in the picker
   let history = null, diffEditor = null; // the open history view: { fileId, path, language, deleted, revisions, more, page, selected, latestText, models }
+  let merging = null; // the open merge view: { id, path, segments, conflicts, choices, theirsRevisionId }
   let showDeleted = false, deletedFiles = [], restoring = null; // the deleted-files view; restoring: { fileId, value } when the old path is taken
   let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
   const active = () => (session.activeId ? session.files.get(session.activeId) : null);
@@ -75,7 +77,7 @@ export async function startVault(transport, metadata, onSession) {
     $('unlock').disabled = busy;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
-    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted;
+    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging;
     $('workspace-name').textContent = $('breadcrumb-root').textContent = session.project?.name ?? 'No project';
     $('project-heading').textContent = (session.project?.name ?? 'No project').toUpperCase();
     $('new-file').disabled = $('switch-project').disabled = $('deleted-files').disabled = locked || busy || !hasProject;
@@ -114,14 +116,14 @@ export async function startVault(transport, metadata, onSession) {
       }
     }
     $('breadcrumb-file').textContent = f ? f.path : 'No file selected';
-    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : session.dirty(f.id) ? 'Unsaved edits' : 'Saved in vault';
+    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : 'Saved in vault';
     $('conflict-banner').hidden = locked || !f || !f.conflict || keepEditing.has(f.id);
     $('save').disabled = !editor || locked || busy || !f || !session.dirty(f.id);
     $('revision-count').textContent = String(session.savedCount).padStart(2, '0');
     $('files-detail').textContent = hasProject ? `${session.files.size} in project` : '—';
     $('language-detail').textContent = $('language-status').textContent = f ? languageLabel(f.language) : '—';
     document.body.classList.toggle('locked', locked);
-    renderHistory(); renderDeleted();
+    renderHistory(); renderDeleted(); renderMerge();
     postStatus(session.metadata); // four numeric/boolean fields only; also drives the host's keep-alive
   }
 
@@ -280,6 +282,66 @@ export async function startVault(transport, metadata, onSession) {
     });
   };
 
+  // ---- merge after a conflict: clean changes combine automatically; overlaps are chosen one by one ---------------
+  function startMerge() {
+    const f = active();
+    if (!f || session.locked) return;
+    act(async () => {
+      const result = await session.prepareMerge(f.id);
+      if (result.conflicts === 0) {
+        session.applyMerge(f.id, resolve(result.segments, []), result.theirsRevisionId);
+        keepEditing.delete(f.id);
+        return `Merged their changes into ${f.path}; nothing overlapped. Review the result, then Save.`;
+      }
+      closeHistory(); showDeleted = false;
+      merging = { id: f.id, path: f.path, ...result, choices: new Array(result.conflicts).fill(null) };
+      return `${result.conflicts} place${result.conflicts === 1 ? '' : 's'} changed on both sides. Choose for each, then use the merged text.`;
+    });
+  }
+  function renderMerge() {
+    const open = !!merging && !session.locked && !picking && !!session.project;
+    $('merge-view').hidden = !open;
+    if (!open) return;
+    const chosen = merging.choices.filter(Boolean).length;
+    $('merge-title').textContent = `Merge changes to ${merging.path}`;
+    $('merge-caption').textContent = `${chosen} of ${merging.conflicts} chosen. Changes that didn't overlap are already combined. Nothing is saved until you Save.`;
+    $('merge-apply').disabled = busy || chosen < merging.conflicts;
+    const list = $('merge-list'); list.replaceChildren();
+    let n = 0;
+    for (const segment of merging.segments) {
+      if (segment.kind !== 'conflict') continue;
+      const index = n++;
+      const card = document.createElement('section'); card.className = 'merge-card';
+      const heading = document.createElement('h3'); heading.textContent = `Change ${index + 1} of ${merging.conflicts}`;
+      const sides = document.createElement('div'); sides.className = 'merge-sides';
+      for (const [label, lines] of [['Yours', segment.mine], ['Theirs', segment.theirs]]) {
+        const side = document.createElement('div'); side.className = 'merge-side';
+        const caption = document.createElement('span'); caption.className = 'tiny-label'; caption.textContent = label.toUpperCase();
+        const pre = document.createElement('pre'); pre.textContent = lines.length ? lines.join('') : '(removed)';
+        side.append(caption, pre); sides.append(side);
+      }
+      const actions = document.createElement('div'); actions.className = 'merge-choices';
+      for (const [choice, label] of [['mine', 'Take yours'], ['theirs', 'Take theirs'], ['both', 'Take both (yours first)']]) {
+        const button = document.createElement('button'); button.textContent = label; button.disabled = busy;
+        button.className = merging.choices[index] === choice ? 'chosen' : '';
+        button.setAttribute('aria-pressed', String(merging.choices[index] === choice));
+        button.onclick = () => { merging.choices[index] = choice; render(); };
+        actions.append(button);
+      }
+      card.append(heading, sides, actions); list.append(card);
+    }
+  }
+  $('conflict-merge').onclick = startMerge;
+  $('merge-cancel').onclick = () => { merging = null; render(); announce('Merge cancelled. Your edits are unchanged.'); };
+  $('merge-apply').onclick = () => {
+    if (!merging || merging.choices.some(c => !c)) return;
+    const { id, path, segments, choices, theirsRevisionId } = merging;
+    session.applyMerge(id, resolve(segments, choices), theirsRevisionId);
+    keepEditing.delete(id); merging = null;
+    syncModel(); render();
+    announce(`Merged ${path}. Review the result, then Save.`);
+  };
+
   // ---- deleted files ---------------------------------------------------------------------------------------------
   function renderDeleted() {
     $('deleted-view').hidden = !showDeleted || session.locked || picking || !session.project;
@@ -420,7 +482,7 @@ export async function startVault(transport, metadata, onSession) {
   $('conflict-keep').onclick = () => { const f = active(); if (f) { keepEditing.add(f.id); render(); announce('Keeping your edits. Saving will still conflict; reload to take their version.'); } };
   $('switch-project').onclick = () => {
     if (session.dirtyIds.length) { announce(FAILURES.UnsavedChanges); return; }
-    act(async () => { await session.refreshProjects(); closeHistory(); showDeleted = false; picking = true; });
+    act(async () => { await session.refreshProjects(); closeHistory(); showDeleted = false; merging = null; picking = true; });
   };
   $('new-file').onclick = () => { $('new-file-form').hidden = false; $('new-file-name').value = ''; $('new-file-name').focus(); };
   $('new-file-form').onsubmit = event => {
@@ -437,7 +499,7 @@ export async function startVault(transport, metadata, onSession) {
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { closeHistory(); showDeleted = false; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { closeHistory(); showDeleted = false; merging = null; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
   wireChrome(() => editor, { onSave: save, isLocked: () => session.locked });
 

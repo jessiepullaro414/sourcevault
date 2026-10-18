@@ -161,8 +161,9 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 
 If the file changed in the vault since you opened it, Save does **not** overwrite it. A yellow banner appears:
 
+- **Merge** combines your edits with theirs. Changes to different lines are combined automatically. Where you both changed the same lines, a merge view shows *Yours* and *Theirs* for each place: choose **Take yours**, **Take theirs** or **Take both**, then **Use merged text**. The result is in the editor as unsaved edits (*Merged · not saved yet*): check it, then **Save**. If they changed the file again in the meantime, Save reports the conflict again and you merge once more.
 - **Reload their version** throws away your unsaved edits and shows the current file.
-- **Keep editing** hides the banner, but saving will keep failing until you reload. There is no merge yet, so copy your intent by hand.
+- **Keep editing** hides the banner, but saving keeps failing until you merge or reload.
 
 Different files never conflict: two people can edit different files of the same project at the same time.
 

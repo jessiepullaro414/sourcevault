@@ -170,6 +170,33 @@ test('history lists saved versions; an old version restores as unsaved edits; de
   assert.deepEqual(await session.listDeleted(), []);
 });
 
+test('merge after a conflict: clean changes combine; overlaps are chosen; the save lands on their version', async () => {
+  const { host, session, projectId, byName } = await opened();
+  const util = byName('util.ts');
+  await session.open(util.id);
+  const original = util.text; // 3 lines: export function greet... / return ... / }
+  session.edit(util.id, '// my header\n' + original);
+  host.externalEdit(projectId, util.id, original + '// their footer\n');
+  await rejectsWith(session.save(util.id), 'Conflict');
+  const clean = await session.prepareMerge(util.id);
+  assert.equal(clean.conflicts, 0);
+  const { resolve } = await import('../../src/SourceVault.Editor.Web/merge.mjs');
+  session.applyMerge(util.id, resolve(clean.segments, []), clean.theirsRevisionId);
+  assert.equal(session.file(util.id).conflict, false); assert.equal(session.dirty(util.id), true);
+  assert.equal(await session.save(util.id), true);
+  assert.equal(host.textOf(projectId, util.id), '// my header\n' + original + '// their footer\n');
+  // Overlapping edits: a conflict to choose; their second change makes the merged save conflict again.
+  session.edit(util.id, '// my header v2\n' + original + '// their footer\n');
+  host.externalEdit(projectId, util.id, '// their header\n' + original + '// their footer\n');
+  await rejectsWith(session.save(util.id), 'Conflict');
+  const overlap = await session.prepareMerge(util.id);
+  assert.equal(overlap.conflicts, 1);
+  session.applyMerge(util.id, resolve(overlap.segments, ['both']), overlap.theirsRevisionId);
+  host.externalEdit(projectId, util.id, 'changed again\n');
+  await rejectsWith(session.save(util.id), 'Conflict');
+  assert.equal(session.file(util.id).mergedOnto, null, 'merge again from the latest version');
+});
+
 test('user lock keeps drafts hidden; unlock reports files changed meanwhile as conflicts', async () => {
   const { host, session, projectId, byName } = await opened();
   const main = byName('main.ts');
