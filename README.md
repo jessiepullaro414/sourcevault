@@ -37,3 +37,9 @@ The demo uses an ephemeral RSA fixture inside the test executable and never acce
 Security limits: source becomes plaintext in an authorized editor and builder; local administrators are trusted; capture exclusion is best effort; arbitrary editable code and readable output can intentionally carry source. No RAM-only or absolute anti-extraction guarantee is made.
 
 No license has been selected yet. Choose a license before public distribution; no license grant is implied by this development repository.
+
+## Install on a computer
+
+To install SourceVault on another Windows computer, run `powershell -ExecutionPolicy Bypass -File scripts\Build-Installer.ps1`. It builds a standalone package (`artifacts\installer\SourceVault-Setup-<date>.zip`): the service, the editor, the lab client, a private .NET runtime, the setup and uninstall scripts, and a SHA-256 manifest of every file.
+
+On the target computer, run `Setup-SourceVault.ps1` from an elevated PowerShell. It installs, provisions the TPM key, creates the vault, starts the service, and adds a Start menu shortcut. [docs/user-guide.md](docs/user-guide.md), shipped in the package as `README.md`, covers setup, daily use and the current limits.
