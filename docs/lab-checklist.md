@@ -2,7 +2,18 @@
 
 Owner-run tests that development cannot do: they need the installed service, administrator rights, real hardware, a sign-out or a reboot. Tick each one and add the date and anything odd. Use synthetic projects only. **Needs** says what the test disturbs, so tests can wait until the machine is free.
 
-Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run `Setup-SourceVault.ps1 -Update` from it, elevated. (Needs: admin; closes editors; restarts the services.)
+Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run `Setup-SourceVault.ps1 -Update` from it, elevated. (Needs: admin; closes editors; restarts the services.) Run scripts as `powershell -ExecutionPolicy Bypass -File .\<script>.ps1`, because Windows blocks running `.ps1` files directly by default. Run setup from the package folder, not from the repository's `installer\` folder.
+
+## Results
+
+- **2026-10-18, Windows 11 Pro 25H2 (build 26200), firmware TPM 2.0:** `Setup-SourceVault.ps1 -Update` installed the hardening build. The installed service, `SourceVault.Windows.dll` and lab client hashes match the package, and the service is RUNNING. Then the installed lab client `check` passed all 8 steps:
+  - listed 3 projects, all authenticated at startup;
+  - saved and decrypted `check.txt`, with the stale edit refused;
+  - decrypted `README.md` from *Synthetic demo 1*;
+  - refused a forged capability.
+
+  So on the real service, the new **client hash pins** and the **PID-reuse check** accept an untouched installed client. The tamper half of the pin test (row below) is still to do.
+- **2026-10-18, Docker:** Docker Desktop 4.95 was installed **per user** (no `com.docker.service`). `docker desktop engine use windows` refused with *engine is disabled*, and `\\.\pipe\docker_engine` answered as Docker Desktop (paused). The first `New-WindowsBuildContainer.ps1` run then failed on a script bug: its helper called itself instead of `docker.exe`. That is fixed, and the script now targets `npipe:////./pipe/docker_engine` explicitly. Decision: Microsoft's standalone engine for Windows, Docker Engine in WSL for Linux, no Docker Desktop.
 
 ## Editor and vault (no sign-out or reboot)
 
@@ -17,21 +28,23 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | Profile canary: type a unique marker, save, close; search `%LOCALAPPDATA%\SourceVault\profiles`, `%LOCALAPPDATA%\Temp` and `%LOCALAPPDATA%\CrashDumps` for it (UTF-8 and UTF-16) | — |
 | [ ] | Delete a project (typed name); another open editor gets "no longer exists" | — |
 | [ ] | `SourceVault.Import.exe` on a synthetic folder with `--dry-run`, then a real import, then `--delete-source` (type `DELETE`) | — |
-| [ ] | **Client hash pin (new):** after setup, the editor and importer connect. Then, as admin, append one byte to a copy of `client\SourceVault.Import.dll`, swap it in, and check the importer is refused ("only accepts the installed…"). Restore it with `Setup-SourceVault.ps1 -Update` | admin |
+| [~] | **Client hash pin (new):** after setup, the editor and importer connect (lab client connected 2026-10-18; editor and importer not yet run). Then, as admin, append one byte to a copy of `client\SourceVault.Import.dll`, swap it in, and check the importer is refused ("only accepts the installed…"). Restore it with `Setup-SourceVault.ps1 -Update` | admin |
 | [ ] | `Setup-SourceVault.ps1 -Status` reports everything OK | admin |
 
 ## Builds (no sign-out or reboot)
 
 | Done | Test | Needs |
 |---|---|---|
-| [ ] | Docker installed in a WSL distro and running (you install it; e.g. Docker Engine from Docker's apt repository) | your install |
-| [ ] | **Build container (new):** `New-BuildContainer.ps1 -Distro <name>`, run as your normal user. It pulls the pinned .NET SDK image (about 335 MB), creates `sourcevault-build-linux`, and must end with "a fictional console app built and ran with no network". Record the output | download; Docker in the distro |
-| [ ] | Run `Setup-SourceVault.ps1 -Update -WithBuilds`, write `build.json` from `build.example.json` (or the target `New-BuildContainer.ps1` printed), then run `Grant-BuildDockerAccess.ps1` | admin; restarts Docker access for the build service |
-| [ ] | WSL target: `New-WslDockerTls.ps1 -Distro <name>`, apply the printed dockerd settings, restart that distro's Docker | the WSL distro restarts |
-| [ ] | Import `samples\dotnet-hello` from the package (`SourceVault.Import.exe <package>\samples\dotnet-hello --project "Hello sample"`), then **Build** it on the Linux target: succeeds, log shown, the output folder has `Hello.dll`, `Hello`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
-| [ ] | Windows target prerequisites (this PC is now Windows 11 Pro): **Containers** and **Hyper-V** features on (*Turn Windows features on or off*, then restart), and a Docker engine running Windows containers | **restart**; your install |
+| [ ] | **Remove Docker Desktop** (or quit it and stop it starting at sign-in, and turn off its WSL integration). On 2026-10-18 it held `\\.\pipe\docker_engine` even while paused, which the standalone engine needs | your uninstall |
+| [ ] | **Windows engine:** follow Microsoft Learn's "Prep Windows for containers" (`install-docker-ce.ps1` from `microsoft/Windows-Containers`; read it first). It turns on **Containers** and restarts. Afterwards, `Get-Service docker` is Running and `docker version` reports server OS `windows` | admin; **restart**; download |
+| [ ] | Windows engine access: `New-LocalGroup -Name docker`, add `"group": "docker"` to `C:\ProgramData\docker\config\daemon.json`, `Restart-Service docker` | admin |
 | [ ] | **Windows build container (new):** elevated `New-WindowsBuildContainer.ps1`. It pulls the pinned Windows Server Core .NET SDK image (about 2.7 GB) and creates `sourcevault-build-windows`. **Record which isolation it used and whether the copy check passed**: that decides whether the Windows target can work at all | admin; download |
-| [ ] | Add the `windows` target it printed to `build.json`, run `Grant-BuildDockerAccess.ps1` for the Windows engine, then **Build** `Hello sample` on the Windows target: succeeds, and the output folder has `Hello.exe`, `Hello.dll`, `Hello.deps.json` and `Hello.runtimeconfig.json` (no `Hello.pdb`) | admin |
+| [ ] | **Linux engine:** Docker Engine installed in the WSL distro (Docker's "Install Docker Engine on Ubuntu" apt instructions), with systemd on in `/etc/wsl.conf` so `dockerd` starts with the distro | your install; `wsl --shutdown` |
+| [ ] | **Linux build container (new):** `New-BuildContainer.ps1 -Distro <name>`, run as your normal user. It pulls the pinned .NET SDK image (about 335 MB), creates `sourcevault-build-linux`, and must end with "a fictional console app built and ran with no network". Record the output | download |
+| [ ] | Run `Setup-SourceVault.ps1 -Update -WithBuilds`, then `Grant-BuildDockerAccess.ps1 -Group docker`, then `New-WslDockerTls.ps1 -Distro <name>` and apply the dockerd settings it prints (restart that distro's Docker) | admin; the WSL distro's Docker restarts |
+| [ ] | Write `C:\ProgramData\SourceVault\config\build.json` with the `windows` and `linux` targets the two container scripts printed (the `tls` thumbprint comes from `New-WslDockerTls.ps1`), then run `Setup-SourceVault.ps1 -Update -WithBuilds` again and `-Status` | admin |
+| [ ] | Import `samples\dotnet-hello` from the package (`SourceVault.Import.exe <package>\samples\dotnet-hello --project "Hello sample"`). **Build** it on the Linux target: the output folder has `Hello.dll`, `Hello`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
+| [ ] | **Build** `Hello sample` on the Windows target: the output folder has `Hello.exe`, `Hello.dll`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
 | [ ] | **Dropped files (new):** the `dotnet-hello` build lists `Hello.pdb` as left out (DebugSymbols) at the end of its log, and *Left out: 1 file* in the result | — |
 | [ ] | A build that runs past `timeoutSeconds` is *timed out*; a container with a network gets *refused* when `allowNetwork` is false | — |
 

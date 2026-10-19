@@ -78,31 +78,52 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
 
 SourceVault can send a project's saved files to an **already-running, named Docker container**, run the build command there, and copy the build's output to a folder on this PC. A separate service, **SourceVault Build** (`NT SERVICE\SourceVaultBuild`), does this; the vault service never gets Docker access.
 
-**The C#/.NET build container.** The supported compiler is Microsoft's .NET SDK image (`mcr.microsoft.com/dotnet/sdk`), pinned by digest, on Docker inside a WSL distro. To create it, run from the package folder, as your normal user, with Docker running in the distro:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\New-BuildContainer.ps1 -Distro Ubuntu-24.04
-```
-- **What it creates:** `sourcevault-build-linux`, with no network, dropped privileges, and restart with the engine.
-- **What it checks:** that an offline test build runs.
-- **What it prints:** the `build.json` target to use.
+#### The supported setup: two Docker engines, two build containers
 
-Each project needs a `build.sh` at its top level that writes its output to `/sourcevault/out`. The package's `samples\dotnet-hello` is a fictional example: import it, then build it.
-- **No network in builds:** NuGet packages can't be downloaded, so projects with package references don't build yet.
+The compiler is Microsoft's .NET SDK image (`mcr.microsoft.com/dotnet/sdk`), pinned by digest, in two containers:
+- a **Windows** container, for Windows-only code such as WPF or WinForms, on Microsoft's standalone Docker engine for Windows;
+- a **Linux** container, for Linux-only or cross-platform code, on Docker Engine inside a WSL distro.
 
-**The Windows build container** builds Windows-only code, such as WPF or WinForms projects. It needs Windows 11 Pro, Enterprise or Education.
-1. Turn on the **Containers** and **Hyper-V** features (*Turn Windows features on or off*), then restart.
-2. Install a Docker engine that runs Windows containers, for example Docker Desktop switched to Windows containers.
-3. From the package folder, as administrator:
+A project with a Windows part and a Linux part has both build scripts: `build.cmd` builds the Windows part and `build.sh` the Linux part. Every build sends the whole project; operators pick the target in the editor. The package's `samples\dotnet-hello` is a fictional example with both.
+
+**0. Remove Docker Desktop first.** Docker Desktop takes the standard Windows engine pipe, `\\.\pipe\docker_engine`. On the development PC it held that pipe even while paused, so the standalone engine can't serve it. Uninstall Docker Desktop, or at least quit it and turn off *Start Docker Desktop when you sign in*. Also turn off its WSL integration, which puts its own `docker` command into your distro.
+
+**1. The Windows engine** (needs Windows 11 Pro, Enterprise or Education; as administrator):
+1. Follow Microsoft Learn's *"Prep Windows for containers"* page. It uses Microsoft's `install-docker-ce.ps1` from the `microsoft/Windows-Containers` GitHub repository.
+   - Read the script before running it. It turns on the **Containers** feature, needs a restart, and may ask you to run it again afterwards.
+   - The result is a Windows service called `docker` that serves `\\.\pipe\docker_engine` and starts at boot, so Windows builds also work when nobody is signed in.
+2. Let only the build service use it:
+   - create a local group: `New-LocalGroup -Name docker`;
+   - add `"group": "docker"` to `C:\ProgramData\docker\config\daemon.json`;
+   - run `Restart-Service docker`;
+   - after the build service is installed (step 1 of the list below), run `Grant-BuildDockerAccess.ps1 -Group docker`.
+3. Create the container from the package folder:
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\New-WindowsBuildContainer.ps1
    ```
    - **What it creates:** `sourcevault-build-windows`, from Microsoft's Windows Server Core .NET SDK image (about 2.7 GB), pinned by digest, with no network.
-   - **What it checks:** that a file can be copied into the running container and back out. That is the step the build service needs, and Docker may refuse it for Hyper-V-isolated containers. If this check fails, the Windows target can't build yet; keep the output.
+   - **What it uses:** it talks to `npipe:////./pipe/docker_engine` directly, the pipe `build.json` names, whatever your Docker CLI's context says.
+   - **The key check:** that a file can be copied into the **running** container and back out. That is the step the build service needs, and Docker may refuse it for Hyper-V-isolated containers. If this check fails, the Windows target can't build yet; keep the output.
    - **What it prints:** the `windows` target for `build.json`.
 
-Each project builds on the Windows target with a `build.cmd` at its top level that writes to `C:\sourcevault\out`.
+   Projects need a `build.cmd` at their top level that writes to `C:\sourcevault\out`.
 
-**A project with a Windows part and a Linux part** has both scripts: `build.cmd` builds the Windows part and `build.sh` the Linux part. Every build sends the whole project; pick the target in the editor.
+**2. The Linux engine** (in your WSL distro, for example Ubuntu-24.04):
+1. Install Docker Engine in the distro by following Docker's *"Install Docker Engine on Ubuntu"* page (Docker's apt repository).
+   - To make `dockerd` start with the distro, turn on systemd: add `[boot]` and `systemd=true` to `/etc/wsl.conf`, then run `wsl --shutdown`.
+   - The distro runs under your Windows account and stops at sign-out or when idle, so Linux builds work only while it runs.
+2. After the build service is installed, run `New-WslDockerTls.ps1 -Distro Ubuntu-24.04` (below) and apply the Docker settings it prints. The build service reaches this engine only over TLS.
+3. Create the container, as your normal user:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\New-BuildContainer.ps1 -Distro Ubuntu-24.04
+   ```
+   - **What it creates:** `sourcevault-build-linux`, with no network, dropped privileges, and restart with the engine.
+   - **What it checks:** that an offline test build runs.
+   - **What it prints:** the `linux` target for `build.json`.
+
+   Projects need a `build.sh` at their top level that writes to `/sourcevault/out`.
+
+**No network in builds:** NuGet packages can't be downloaded in either container, so projects with package references don't build yet.
 
 1. **Install the build service** (as administrator, from the package folder):
    ```powershell
@@ -121,9 +142,9 @@ Each project builds on the Windows target with a `build.cmd` at its top level th
    Also set `artifactRoot`: where output lands on this PC. Only an administrator can set these paths. Every field is described in `docs/files-history-builds-design.md`.
 3. **Give the build service Docker access:**
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1            # Docker Desktop: group docker-users
-   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1 -Group docker   # standalone dockerd with "group": "docker"
+   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1 -Group docker   # the supported setup: standalone engine with "group": "docker"
    ```
+   (Only with an all-users Docker Desktop, which is not the supported setup, is the group `docker-users`, the script's default.) The Linux engine needs no group: the build service reaches it with the TLS client certificate from step 4.
    **Docker access is administrator-equivalent** on this PC. That's why only the build service gets it.
 4. **For a Docker engine inside WSL**, set up TLS client certificates:
    ```powershell

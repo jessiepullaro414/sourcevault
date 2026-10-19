@@ -26,9 +26,14 @@ param(
     [string]$Name = 'sourcevault-build-windows',
     [ValidateRange(1, 64)][int]$MemoryGB = 4,
     [ValidateSet('auto', 'process', 'hyperv')][string]$Isolation = 'auto',
+    [ValidatePattern('^npipe:////\./pipe/[A-Za-z0-9._-]{1,128}$')][string]$Engine = 'npipe:////./pipe/docker_engine',
     [switch]$Replace
 )
 $ErrorActionPreference = 'Stop'
+# Talk to exactly the engine build.json names (default: the standard Windows engine pipe, served by Microsoft's
+# standalone Docker engine), whatever docker context or Docker Desktop setting this PC's CLI would otherwise pick.
+$env:DOCKER_HOST = $Engine
+Remove-Item Env:DOCKER_CONTEXT -ErrorAction SilentlyContinue
 # Pinned 2026-10-18: tag 10.0.402-windowsservercore-ltsc2025 (the SDK this repository builds with), manifest digest
 # from mcr.microsoft.com. To move to a newer SDK, look up the new tag's digest and change both here, in one reviewed commit.
 $imageRepo = 'mcr.microsoft.com/dotnet/sdk'
@@ -38,12 +43,14 @@ $sdkVersion = '10.0.402'
 $image = "$imageRepo@$imageDigest"
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') { throw 'Invalid container name.' }
 
-function Docker {
+function Invoke-Docker {
     # Native call; output lines returned. Throws on a non-zero exit unless -AllowFailure is the first argument.
     $allow = $args.Count -gt 0 -and $args[0] -eq '-AllowFailure'
-    $rest = if ($allow) { $args[1..($args.Count - 1)] } else { $args }
+    # @() keeps a one-item list a list (PowerShell would unroll it to a plain string).
+    $rest = @(if ($allow) { if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } } else { $args })
+    if ($rest.Count -eq 0) { throw 'Invoke-Docker needs a docker command.' }
     $ErrorActionPreference = 'Continue' # Windows PowerShell turns native stderr lines into terminating errors under Stop
-    $output = & docker @rest 2>&1 | ForEach-Object { "$_" }
+    $output = & docker.exe @rest 2>&1 # docker.exe, never a PowerShell function or alias | ForEach-Object { "$_" }
     if ($LASTEXITCODE -ne 0 -and !$allow) { throw "docker $($rest[0]) failed (exit $LASTEXITCODE): $($output -join ' ')" }
     return $output
 }
@@ -51,20 +58,21 @@ function Ok([string]$text) { Write-Host "   OK   $text" -ForegroundColor Green }
 function Encoded([string]$script) { [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script)) }
 
 Write-Host "SourceVault Windows build container: $imageRepo`:$imageTag pinned to $imageDigest" -ForegroundColor White
-if (!(Get-Command docker -ErrorAction SilentlyContinue)) { throw 'The docker CLI is not installed on this PC.' }
-$serverOs = (Docker -AllowFailure version --format '{{.Server.Os}}') -join ''
-if ($serverOs -ne 'windows') { throw "The Docker engine is not running Windows containers (reported '$serverOs'). Start it, or switch it to Windows containers." }
+if (!(Get-Command docker.exe -CommandType Application -ErrorAction SilentlyContinue)) { throw 'The docker CLI (docker.exe) is not installed on this PC.' }
+$serverOs = (Invoke-Docker -AllowFailure version --format '{{.Server.Os}}') -join ''
+if ($LASTEXITCODE -ne 0 -or !$serverOs) { throw "No Docker engine answers on $Engine. Install or start the Windows engine (Microsoft's standalone Docker engine runs as the 'docker' service: Start-Service docker)." }
+if ($serverOs -ne 'windows') { throw "The engine on $Engine runs $serverOs containers, not Windows containers. If Docker Desktop is also installed, quit or uninstall it: it can take over that pipe." }
 Ok 'Docker engine running Windows containers'
 
-if ((Docker -AllowFailure container inspect --format '{{.Name}}' $Name) -and $LASTEXITCODE -eq 0) {
+if ((Invoke-Docker -AllowFailure container inspect --format '{{.Name}}' $Name) -and $LASTEXITCODE -eq 0) {
     if (!$Replace) { throw "A container named '$Name' already exists. Rerun with -Replace to delete and recreate it (nothing in it is kept)." }
-    Docker rm -f $Name | Out-Null
+    Invoke-Docker rm -f $Name | Out-Null
     Ok "removed the old '$Name'"
 }
 
 Write-Host "Pulling $image (about 2.7 GB; Docker verifies every layer against the digest)..."
-Docker pull $image | Out-Null
-$digests = Docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' $image
+Invoke-Docker pull $image | Out-Null
+$digests = Invoke-Docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' $image
 if (!(@($digests) -contains $image)) { throw 'The pulled image does not carry the pinned digest; not creating the container.' }
 Ok 'image pulled and matches the pinned digest'
 
@@ -76,18 +84,18 @@ $common = @('--network', 'none', '--memory', "${MemoryGB}g", '--restart', 'unles
 $modes = if ($Isolation -eq 'auto') { 'process', 'hyperv' } else { @($Isolation) }
 $created = $null
 foreach ($mode in $modes) {
-    $result = Docker -AllowFailure run -d --name $Name --isolation $mode @common $image powershell -NoProfile -Command $keepAlive
+    $result = Invoke-Docker -AllowFailure run -d --name $Name --isolation $mode @common $image powershell -NoProfile -Command $keepAlive
     if ($LASTEXITCODE -eq 0) { $created = $mode; break }
     Write-Host "   NOTE $mode isolation was refused: $($result -join ' ')" -ForegroundColor Yellow
-    Docker -AllowFailure rm -f $Name | Out-Null
+    Invoke-Docker -AllowFailure rm -f $Name | Out-Null
 }
 if (!$created) { throw 'The container could not be started with any isolation mode (see the notes above).' }
-Docker exec $Name cmd /d /c 'mkdir C:\sourcevault\src C:\sourcevault\out' | Out-Null
+Invoke-Docker exec $Name cmd /d /c 'mkdir C:\sourcevault\src C:\sourcevault\out' | Out-Null
 Ok "container '$Name' created with $created isolation (no network, restarts with the engine)"
 
-$network = (Docker inspect --format '{{.HostConfig.NetworkMode}}' $Name) -join ''
+$network = (Invoke-Docker inspect --format '{{.HostConfig.NetworkMode}}' $Name) -join ''
 if ($network -ne 'none') { throw "The container's network mode is '$network', not 'none'." }
-$version = (Docker exec $Name dotnet --version) -join ''
+$version = (Invoke-Docker exec $Name dotnet --version) -join ''
 if ($version -ne $sdkVersion) { throw "The container reports SDK $version, expected $sdkVersion." }
 Ok "network mode none; SDK $version"
 
@@ -97,11 +105,11 @@ New-Item -ItemType Directory -Path $local | Out-Null
 try {
     $marker = 'SourceVault copy check (fictional) ' + [guid]::NewGuid().ToString('N')
     [IO.File]::WriteAllText((Join-Path $local 'copy-check.txt'), $marker)
-    $in = Docker -AllowFailure cp (Join-Path $local 'copy-check.txt') "${Name}:C:\sourcevault\src\copy-check.txt"
+    $in = Invoke-Docker -AllowFailure cp (Join-Path $local 'copy-check.txt') "${Name}:C:\sourcevault\src\copy-check.txt"
     $copyIn = $LASTEXITCODE -eq 0
-    $out = Docker -AllowFailure cp "${Name}:C:\sourcevault\src\copy-check.txt" (Join-Path $local 'back.txt')
+    $out = Invoke-Docker -AllowFailure cp "${Name}:C:\sourcevault\src\copy-check.txt" (Join-Path $local 'back.txt')
     $copyOut = $LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $local 'back.txt')) -and ([IO.File]::ReadAllText((Join-Path $local 'back.txt')) -eq $marker)
-    Docker -AllowFailure exec $Name cmd /d /c 'del /q C:\sourcevault\src\copy-check.txt' | Out-Null
+    Invoke-Docker -AllowFailure exec $Name cmd /d /c 'del /q C:\sourcevault\src\copy-check.txt' | Out-Null
     if (!$copyIn -or !$copyOut) {
         Write-Host "   FAIL copying into/out of the running container: in=$copyIn out=$copyOut" -ForegroundColor Red
         Write-Host "        $(($in + $out) -join ' ')" -ForegroundColor Red
@@ -124,7 +132,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 dotnet "$d\out\SvCheck.dll"
 Remove-Item $d -Recurse -Force
 '@
-$check = Docker -AllowFailure exec $Name powershell -NoProfile -EncodedCommand (Encoded $build)
+$check = Invoke-Docker -AllowFailure exec $Name powershell -NoProfile -EncodedCommand (Encoded $build)
 if (@($check) -notcontains 'sourcevault offline build ok') { throw "The offline test build did not run: $($check -join ' ')" }
 Ok 'a fictional console app built and ran with no network'
 
@@ -133,7 +141,7 @@ Write-Host 'Done. Use this target in C:\ProgramData\SourceVault\config\build.jso
 @"
     {
       "name": "windows",
-      "engine": "npipe://./pipe/docker_engine",
+      "engine": "$($Engine -replace '^npipe:////', 'npipe://')",
       "container": "$Name",
       "platform": "windows",
       "sourcePath": "C:\\sourcevault\\src",
