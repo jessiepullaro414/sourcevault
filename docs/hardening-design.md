@@ -29,7 +29,7 @@ Setup (and the lab install scripts) already write `install-manifest.sha256`, whi
 
 ## 3. Durable HEAD publication
 
-Commit already flushes the document, manifest and pointer-file data before `File.Replace` swaps `HEAD`. The rename itself was not flushed. After the replace, the store now opens `HEAD` and flushes it (`FlushFileBuffers`), which commits the NTFS metadata for that file. A new test runs commits in a child process, kills it at random points (`Process.Kill`, no cleanup), and then checks that the store always opens at a complete snapshot. This is process-crash evidence, not power-loss evidence; the power-loss test is a lab step.
+Commit already flushes the document, manifest and pointer-file data before swapping `HEAD`. The rename itself was not flushed. (Update 2026-10-19: the kill test then showed `File.Replace` itself is two renames and could leave no `HEAD`; publication now uses two single renames, see `revision-store.md`.) After the replace, the store now opens `HEAD` and flushes it (`FlushFileBuffers`), which commits the NTFS metadata for that file. A new test runs commits in a child process, kills it at random points (`Process.Kill`, no cleanup), and then checks that the store always opens at a complete snapshot. This is process-crash evidence, not power-loss evidence; the power-loss test is a lab step.
 
 ## 4. Monaco assets under `PreviewPolicy`
 

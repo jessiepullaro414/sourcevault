@@ -3,7 +3,7 @@ namespace SourceVault.Service;
 internal static class Program
 {
     internal static string ParseCommand(string[] args) => args.Length == 1 && args[0] is "metadata-probe" or "service" or "build-service" or "build-config-check" or "vault-root-check" or "vault-root-sddl"
-        ? args[0] : throw new ArgumentException();
+        ? args[0] : args.Length == 2 && args[0] == "sender-check" ? args[0] : throw new ArgumentException();
     public static int Main(string[] args)
     {
         try
@@ -22,6 +22,18 @@ internal static class Program
                         return 0;
                     }
                     catch (SourceVault.Build.BuildConfigException e) { Console.WriteLine("invalid: " + e.Message); return 4; }
+                case "sender-check":
+                    // Read-only, for setup -RegisterSender: validates a SourceVault Pack sender file exactly as the service does.
+                    try
+                    {
+                        var bytes = File.ReadAllBytes(args[1]);
+                        var sender = SourceVault.Packaging.PublicKeyFile.Parse(bytes, SourceVault.Packaging.PublicKeyFile.SenderFormat);
+                        Console.WriteLine($"computer={sender.Computer}");
+                        Console.WriteLine($"fingerprint={Convert.ToHexStringLower(sender.Fingerprint)}");
+                        Console.WriteLine($"display={sender.FingerprintText}");
+                        return 0;
+                    }
+                    catch (Exception e) when (e is SourceVault.Packaging.KeyFileException or IOException or UnauthorizedAccessException) { Console.WriteLine("invalid: " + e.Message); return 4; }
                 case "vault-root-sddl":
                     // The exact root DACL the validator requires, for the administrator provisioning script.
                     Console.WriteLine(TrustedStorageRoot.ExpectedRootSddl(VaultRoot.Principals));
@@ -37,7 +49,7 @@ internal static class Program
             Console.WriteLine("hardwareProvider=available; persistedKeysOpened=false; sourceEndpoints=disabled; serviceDeployment=unverified");
             return 0;
         }
-        catch (ArgumentException) { Console.Error.WriteLine("usage: SourceVault.Service metadata-probe | service | build-service | build-config-check | vault-root-check | vault-root-sddl"); return 2; }
+        catch (ArgumentException) { Console.Error.WriteLine("usage: SourceVault.Service metadata-probe | service | build-service | build-config-check | vault-root-check | vault-root-sddl | sender-check <file>"); return 2; }
         catch { Console.Error.WriteLine("unavailable; no-fallback=true; sourceEndpoints=disabled"); return 3; }
     }
 }

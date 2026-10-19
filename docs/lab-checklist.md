@@ -31,6 +31,20 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [~] | **Client hash pin (new):** after setup, the editor and importer connect (lab client connected 2026-10-18; editor and importer not yet run). Then, as admin, append one byte to a copy of `client\SourceVault.Import.dll`, swap it in, and check the importer is refused ("only accepts the installed…"). Restore it with `Setup-SourceVault.ps1 -Update` | admin |
 | [ ] | `Setup-SourceVault.ps1 -Status` reports everything OK | admin |
 
+## Encrypted import from another computer (no sign-out or reboot)
+
+Needs a second Windows computer with a TPM 2.0 (the "source computer"), and synthetic code only.
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | After `Setup-SourceVault.ps1 -Update`: the *TPM key for package import* step says "created" (or "already exists"), and `-Status` lists `package senders registered: (none)` | admin |
+| [ ] | `SourceVault.Import.exe --export-recipient recipient.json` writes the file and prints a fingerprint | — |
+| [ ] | On the source computer: copy `tools\SourceVault-Pack`, run `pack\SourceVault.Pack.exe init`. **Record whether the TPM created the key**, then copy its sender file back | source computer |
+| [ ] | `Setup-SourceVault.ps1 -RegisterSender <file>`: the fingerprint matches what `init` printed; type YES | admin |
+| [ ] | On the source computer: `SourceVault.Pack.exe <synthetic folder> --to recipient.json --out test.svpkg`. The recipient fingerprint matches the vault PC's. **Record whether the TPM signed** (RSA-PSS) | source computer |
+| [ ] | `SourceVault.Import.exe --package test.svpkg --project "Packed sample"`: imports N files, names the sender computer, and the project opens in the editor with the same files | — |
+| [ ] | Refusals: the same package with one byte changed is *rejected*; a package from an unregistered computer gives *not registered*; importing to a taken name gives *already exists*. Nothing is created in any of them | — |
+| [ ] | Search the vault PC's `%TEMP%` and the importer's folder for a marker inside the packed files: nothing (plaintext only ever existed in the service's memory) | — |
 ## Builds (no sign-out or reboot)
 
 | Done | Test | Needs |

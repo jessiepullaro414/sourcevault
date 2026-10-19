@@ -95,16 +95,17 @@ Test("fault interruption and retry " + stage, () =>
     else Assert(reopened.Commit(before.SnapshotId, "fault.cs", Text("synthetic-retry")).Files.Count == 1);
 });
 
-Test("killed mid-commit: the store always reopens at a complete snapshot and accepts the next commit", () =>
+Test("killed mid-commit, 50 times: the store always reopens at a complete snapshot and accepts the next commit", () =>
 {
-    // Process.Kill (TerminateProcess) at random points, 20 times: no finally blocks, no flushes, no cleanup run.
+    // Process.Kill (TerminateProcess) at random points, 50 times: no finally blocks, no flushes, no cleanup run. It caught
+    // File.Replace leaving no HEAD when killed between its two renames (fixed 2026-10-19: Publish uses single renames).
     // Process-crash evidence only; power loss is a lab test (docs/lab-checklist.md).
     using var rsa = RSA.Create(2048);
     using var shared = new ImportedProtector(rsa);
     var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); var project = Guid.NewGuid();
     new RevisionStore(path, project, shared).Initialize();
     var random = new Random(20261018);
-    for (int round = 0; round < 20; round++)
+    for (int round = 0; round < 50; round++)
     {
         var reported = new List<Guid>();
         var info = new ProcessStartInfo(Environment.ProcessPath!) { RedirectStandardInput = true, RedirectStandardOutput = true, UseShellExecute = false };

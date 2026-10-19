@@ -36,6 +36,15 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'artifacts\editor-publish') -Destina
 if (Test-Path -LiteralPath (Join-Path $payload 'editor\assets\dev')) { throw 'The editor build contains the development fake host.' }
 Get-ChildItem -LiteralPath (Join-Path $payload 'service') -Filter 'sourcevault.service.json' -Recurse | Remove-Item -Force # setup writes its own
 
+# 3b. SourceVault Pack for the other computer: its own folder with only the base runtime (no desktop parts).
+$packTool = Join-Path $package 'tools\SourceVault-Pack'
+New-Item -ItemType Directory -Path (Join-Path $packTool 'runtime\shared\Microsoft.NETCore.App') | Out-Null
+foreach ($file in 'dotnet.exe', 'LICENSE.txt', 'ThirdPartyNotices.txt') { Copy-Item -LiteralPath (Join-Path $sdkRoot $file) -Destination (Join-Path $packTool 'runtime') }
+Copy-Item -LiteralPath (Join-Path $sdkRoot 'host') -Destination (Join-Path $packTool 'runtime') -Recurse
+Copy-Item -LiteralPath $base.FullName -Destination (Join-Path $packTool 'runtime\shared\Microsoft.NETCore.App') -Recurse
+Copy-Item -LiteralPath (Join-Path $repoRoot 'artifacts\pack-publish') -Destination (Join-Path $packTool 'pack') -Recurse
+Copy-Item -LiteralPath (Join-Path $repoRoot 'installer\Pack-README.txt') -Destination (Join-Path $packTool 'README.txt')
+
 # 4. Scripts, guide and third-party licenses.
 Copy-Item -LiteralPath (Join-Path $repoRoot 'installer\Setup-SourceVault.ps1'), (Join-Path $repoRoot 'installer\Uninstall-SourceVault.ps1'),
     (Join-Path $repoRoot 'installer\Grant-BuildDockerAccess.ps1'), (Join-Path $repoRoot 'installer\New-WslDockerTls.ps1'), (Join-Path $repoRoot 'installer\New-BuildContainer.ps1'), (Join-Path $repoRoot 'installer\New-WindowsBuildContainer.ps1'), (Join-Path $repoRoot 'installer\build.example.json') -Destination $package
@@ -53,7 +62,10 @@ $files = Get-ChildItem -LiteralPath $package -Recurse -File | Sort-Object FullNa
 $lines = foreach ($f in $files) { '{0}  {1}' -f (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash, $f.FullName.Substring($package.Length + 1) }
 [IO.File]::WriteAllLines((Join-Path $package 'package-manifest.sha256'), [string[]]$lines, (New-Object Text.UTF8Encoding $false))
 
-# 6. Zip for transfer.
+# 6. Zips for transfer: the setup package, and SourceVault Pack on its own for the other computer.
+$packZip = Join-Path $outRoot ('SourceVault-Pack-{0:yyyyMMdd}.zip' -f (Get-Date))
+if (Test-Path -LiteralPath $packZip) { Remove-Item -LiteralPath $packZip -Force }
+Compress-Archive -Path $packTool -DestinationPath $packZip -CompressionLevel Optimal
 $zip = Join-Path $outRoot ('SourceVault-Setup-{0:yyyyMMdd}.zip' -f (Get-Date))
 if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
 Compress-Archive -Path $package -DestinationPath $zip -CompressionLevel Optimal
@@ -61,3 +73,4 @@ $size = (Get-Item -LiteralPath $zip).Length / 1MB
 Write-Output ("Package: {0} ({1} files, runtime {2})" -f $package, $files.Count, $base.Name)
 Write-Output ("Zip:     {0} ({1:N0} MB)" -f $zip, $size)
 Write-Output ("SHA-256: {0}" -f (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash)
+Write-Output ("Pack:    {0} ({1:N0} MB), SHA-256 {2}" -f $packZip, ((Get-Item -LiteralPath $packZip).Length / 1MB), (Get-FileHash -LiteralPath $packZip -Algorithm SHA256).Hash)

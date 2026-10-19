@@ -2,11 +2,14 @@ using System.ComponentModel;
 using SourceVault.Client;
 using SourceVault.Import;
 
-// Imports a folder of source into a new SourceVault project. Run as an operator, from the installed copy:
+// Imports a folder of source, or an encrypted package from another computer, into a new SourceVault project. Run as
+// an operator, from the installed copy:
 //   "C:\Program Files\SourceVault\client\SourceVault.Import.exe" <folder> --project "<new project name>" [--exclude <folder name>]... [--dry-run] [--delete-source]
+//   "C:\Program Files\SourceVault\client\SourceVault.Import.exe" --package <file.svpkg> --project "<new project name>"
+//   "C:\Program Files\SourceVault\client\SourceVault.Import.exe" --export-recipient <file.json>
 // Prints paths and counts only, never file content. Your original folder is not changed unless --delete-source is
 // given, and then only after every file verified and you type DELETE.
-string? folder = null, project = null;
+string? folder = null, project = null, package = null, recipientOut = null;
 bool dryRun = false, deleteSource = false;
 var excludes = new List<string>();
 for (int i = 0; i < args.Length; i++)
@@ -17,17 +20,24 @@ for (int i = 0; i < args.Length; i++)
         case "--exclude" when i + 1 < args.Length: excludes.Add(args[++i]); break;
         case "--dry-run": dryRun = true; break;
         case "--delete-source": deleteSource = true; break;
+        case "--package" when i + 1 < args.Length: package = args[++i]; break;
+        case "--export-recipient" when i + 1 < args.Length: recipientOut = args[++i]; break;
         default:
             if (folder is null && !args[i].StartsWith("--", StringComparison.Ordinal)) folder = args[i];
             else return Usage();
             break;
     }
 }
-if (folder is null || (!dryRun && string.IsNullOrWhiteSpace(project))) return Usage();
+bool folderMode = package is null && recipientOut is null;
+if (folderMode && (folder is null || (!dryRun && string.IsNullOrWhiteSpace(project)))) return Usage();
+if (package is not null && (folder is not null || recipientOut is not null || dryRun || deleteSource || excludes.Count > 0 || string.IsNullOrWhiteSpace(project))) return Usage();
+if (recipientOut is not null && (folder is not null || package is not null || project is not null || dryRun || deleteSource || excludes.Count > 0)) return Usage();
 
 try
 {
-    var plan = ImportPlan.Scan(folder, excludes);
+    if (recipientOut is not null) return PackageImport.ExportRecipient(recipientOut, VaultClient.ConnectInstalled, Console.Out);
+    if (package is not null) return PackageImport.Run(package, project!.Trim(), VaultClient.ConnectInstalled, Console.Out);
+    var plan = ImportPlan.Scan(folder!, excludes);
     Importer.PrintPlan(plan, Console.Out);
     if (dryRun)
     {
@@ -52,5 +62,7 @@ catch (Exception e) when (e is IOException or EndOfStreamException) { Console.Er
 static int Usage()
 {
     Console.Error.WriteLine("usage: SourceVault.Import.exe <folder> --project \"<new project name>\" [--exclude <folder name>]... [--dry-run] [--delete-source]");
+    Console.Error.WriteLine("       SourceVault.Import.exe --package <file.svpkg> --project \"<new project name>\"");
+    Console.Error.WriteLine("       SourceVault.Import.exe --export-recipient <file.json>");
     return 2;
 }

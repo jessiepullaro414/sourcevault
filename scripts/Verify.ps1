@@ -33,7 +33,8 @@ $checks = @(
     @{ Assembly='tests/SourceVault.Editor.Host.Tests/bin/Release/net10.0/SourceVault.Editor.Host.Tests.dll'; Args=@() },
     @{ Assembly='tests/SourceVault.Windows.Tests/bin/Release/net10.0-windows/SourceVault.Windows.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/windows-tests')) },
     @{ Assembly='tests/SourceVault.Endpoints.Tests/bin/Release/net10.0-windows/SourceVault.Endpoints.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/endpoint-tests')) },
-    @{ Assembly='tests/SourceVault.Build.Tests/bin/Release/net10.0-windows/SourceVault.Build.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/build-tests')) }
+    @{ Assembly='tests/SourceVault.Build.Tests/bin/Release/net10.0-windows/SourceVault.Build.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/build-tests')) },
+    @{ Assembly='tests/SourceVault.Packaging.Tests/bin/Release/net10.0/SourceVault.Packaging.Tests.dll'; Args=@() }
 )
 foreach ($check in $checks) {
     $testAssembly = Join-Path $repoRoot $check.Assembly

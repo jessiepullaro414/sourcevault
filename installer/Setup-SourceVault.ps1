@@ -6,6 +6,7 @@
 #   Setup-SourceVault.ps1 -Update                     replace program files, keep key, vault and settings
 #   Setup-SourceVault.ps1 -Status                     health check of an installed vault
 #   Setup-SourceVault.ps1 -Update -WithBuilds         also install/refresh the build service (Docker builds; see README)
+#   Setup-SourceVault.ps1 -RegisterSender <file>      allow encrypted packages signed by another computer (SourceVault Pack)
 #
 # DEVELOPMENT BUILD: use synthetic data only until an independent security review says otherwise.
 param(
@@ -15,7 +16,8 @@ param(
     [switch]$Status,
     [switch]$WithSyntheticDemo,
     [switch]$ManualStart,
-    [switch]$WithBuilds
+    [switch]$WithBuilds,
+    [string]$RegisterSender
 )
 $ErrorActionPreference = 'Stop'
 $package = $PSScriptRoot
@@ -31,6 +33,8 @@ $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'SourceVa
 $buildServiceName = 'SourceVaultBuild'
 $buildAccount = 'NT SERVICE\SourceVaultBuild'
 $configDir = Join-Path $vaultParent 'config'
+# Registered SourceVault Pack senders (docs/package-import-design.md): administrators change it, the service reads it.
+$sendersDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault\senders'
 $buildConfig = Join-Path $configDir 'build.json'
 $exitReasons = @{
     10 = 'vault folder missing or its permissions are not locked down'
@@ -171,8 +175,9 @@ function Set-ExactSecurity([string]$path, [string]$sddl) {
     $applied = (Get-Item -LiteralPath $path).GetAccessControl($sections).GetSecurityDescriptorSddlForm($sections)
     if ((Get-SddlShape $applied) -ne (Get-SddlShape $sddl)) { Fail "Permissions on $path did not apply exactly." }
 }
-function Invoke-ServiceTool([string]$command) {
-    $output = & (Join-Path $installRoot 'runtime\dotnet.exe') (Join-Path $installRoot 'service\SourceVault.Service.dll') $command
+function Invoke-ServiceTool([string]$command, [string]$argument) {
+    $toolArgs = @($command) + $(if ($argument) { @($argument) } else { @() })
+    $output = & (Join-Path $installRoot 'runtime\dotnet.exe') (Join-Path $installRoot 'service\SourceVault.Service.dll') @toolArgs
     return @{ Output = ($output | Out-String).Trim(); Exit = $LASTEXITCODE }
 }
 
@@ -191,6 +196,10 @@ function Show-Status {
     } else { Warn "local group '$groupName' is missing" }
     $check = Invoke-ServiceTool 'vault-root-check'
     if ($check.Exit -eq 0) { Ok 'vault folder permissions trusted' } else { Warn "vault folder check failed:`n$($check.Output)" }
+    if (Test-Path -LiteralPath $sendersDir) {
+        $registered = @(Get-ChildItem -LiteralPath $sendersDir -Filter '*.json' -File | ForEach-Object { try { (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).computer } catch { "$($_.Name) (unreadable)" } })
+        Ok "package senders registered: $(if ($registered) { $registered -join ', ' } else { '(none)' })"
+    } else { Warn 'no package senders folder (run setup -Update)' }
     if ($service.Status -eq 'Running') {
         $pipe = [bool]([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -like '*\SourceVault.v1' })
         if ($pipe) { Ok 'service RUNNING and listening' } else { Warn 'service running but its pipe was not found' }
@@ -221,6 +230,24 @@ if ($Status) {
 Step 'Pre-flight checks'
 Test-Package
 Test-Machine
+if ($RegisterSender) {
+    if (!(Test-Admin)) { Fail 'Run -RegisterSender from an elevated PowerShell (Run as administrator).' }
+    Step 'Register a SourceVault Pack sender'
+    if (!(Test-Path -LiteralPath $sendersDir)) { Fail "$sendersDir is missing. Run Setup-SourceVault.ps1 -Update first." }
+    $file = (Resolve-Path -LiteralPath $RegisterSender).Path
+    $check = Invoke-ServiceTool 'sender-check' $file
+    if ($check.Exit -ne 0) { Fail "That is not a valid SourceVault sender file: $($check.Output)" }
+    $fields = @{}; foreach ($line in $check.Output -split "`r?`n") { if ($line -match '^(\w+)=(.*)$') { $fields[$Matches[1]] = $Matches[2] } }
+    if ($fields.fingerprint -notmatch '^[0-9a-f]{64}$') { Fail 'The service tool did not report a fingerprint.' }
+    Write-Host "   computer:    $($fields.computer)"
+    Write-Host "   fingerprint: $($fields.display)"
+    Write-Host '   Compare the fingerprint with what "SourceVault.Pack.exe init" printed on that computer.'
+    if ((Read-Host '   Type YES to allow packages signed by this computer') -ne 'YES') { Write-Host 'Nothing was registered.'; return }
+    $target = Join-Path $sendersDir "$($fields.fingerprint).json"
+    Copy-Item -LiteralPath $file -Destination $target -Force
+    Ok "registered $($fields.computer); remove it later by deleting $target"
+    return
+}
 if ($CheckOnly) { Write-Host "`nPre-flight passed. Nothing was changed." -ForegroundColor Green; return }
 if (!(Test-Admin)) { Fail 'Run setup from an elevated PowerShell (right-click > Run as administrator).' }
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -269,6 +296,14 @@ else {
     Fail "Key provisioning failed (Win32 $($result.Win32), code $($result.Specific): $what)."
 }
 
+Step 'TPM key for package import'
+# A separate decrypt-only key for encrypted packages from other computers (docs/package-import-design.md, D1).
+# Optional: without it, package import is unavailable and everything else works.
+$result = Invoke-ServiceOnce 'provision-import-key'
+if ($result.Win32 -eq 0) { Ok "created decrypt-only import key $keyName.Import under $serviceAccount (export refused, test round trip passed)" }
+elseif ($result.Win32 -eq 1066 -and $result.Specific -eq 1) { Ok 'import key already exists (kept)' }
+else { Warn "the package import key could not be created (Win32 $($result.Win32), code $($result.Specific)); package import stays unavailable" }
+
 Step "Vault folder ($vaultRoot)"
 $serviceSid = ([Security.Principal.NTAccount]$serviceAccount).Translate([Security.Principal.SecurityIdentifier]).Value
 if (Test-Path -LiteralPath $vaultParent) {
@@ -286,6 +321,13 @@ if (Test-Path -LiteralPath $vaultParent) {
     if ($check.Exit -ne 0) { Write-Host $check.Output; Fail 'The new vault folder did not pass the service check.' }
     Ok 'created; only the service, SYSTEM and Administrators can access it'
 }
+
+Step "Package senders folder ($sendersDir)"
+if (!(Test-Path -LiteralPath $sendersDir)) {
+    New-Item -ItemType Directory -Path $sendersDir | Out-Null
+    Set-ExactSecurity $sendersDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSid)"
+    Ok 'created; administrators register senders here, the service can only read it'
+} else { Ok 'kept' }
 
 if ($WithSyntheticDemo) {
     Step 'Synthetic demo project'

@@ -162,6 +162,16 @@ Design: [hardening-design.md](hardening-design.md), sections 1 and 2.
 - **Limits.** An administrator can rewrite the manifest, and only files on disk are checked, not the running image. The shared `runtime\` is checked by `-Status`, not per connection.
 - **Verified:** in-process tests only (the endpoint tests). Lab check: [lab-checklist.md](lab-checklist.md).
 
+## Package import key and registered senders (2026-10-19)
+
+Design: [package-import-design.md](package-import-design.md).
+
+- **Import key:** `sc start SourceVault provision-import-key` creates a second decrypt-only, non-exportable TPM key, `<vault key name>.Import`, the same way `provision-key` creates the vault key. Setup runs it on every install and update; exit code 1066/1 means it already exists.
+- **At startup:** the service opens the import key if it exists. If it can't, package import is `Unavailable`, and nothing else changes: the vault still starts.
+- **Senders:** `C:\ProgramData\SourceVault\senders\<fingerprint>.json`. Administrators and SYSTEM have full control, and the service can only read it. The service reads it for each import; deleting a file unregisters that computer.
+- **Tool command:** `SourceVault.Service.dll sender-check <file>` (read-only, used by `Setup-SourceVault.ps1 -RegisterSender`) validates a sender file and prints its computer name and fingerprint.
+- **Verified:** in process only, with software stand-ins for both TPM keys. Lab steps are in [lab-checklist.md](lab-checklist.md).
+
 ## Build service role (2026-10-18)
 
 The same service program also runs as a second service, **SourceVaultBuild**, under its own virtual account `NT SERVICE\SourceVaultBuild`, started with the argument `build-service`. Setup registers it only with `-WithBuilds`.

@@ -247,6 +247,41 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 - **Not a secure erase.** SSDs, backups, shadow copies, OneDrive/Dropbox sync and the recycle bin of other tools may keep earlier copies.
 - After this, **the vault project is the only copy**: readable only on this computer, with no recovery if the TPM is cleared. Think twice before using it on code you can't recreate.
 
+### Import from another computer (encrypted)
+
+Code that lives on another computer can come in **encrypted**. **SourceVault Pack**, a small program on that computer, encrypts a project folder so that only this PC can open it, and signs it with that computer's TPM. You carry the package file over any way you like.
+
+**Once per source computer:**
+1. **Get Pack onto it.** Copy the `SourceVault-Pack` folder (in the setup package under `tools\`, or `SourceVault-Pack-<date>.zip`) to that computer. It needs a TPM 2.0 and nothing installed.
+2. **Create its signing key there:** run `pack\SourceVault.Pack.exe init`. It prints a fingerprint and writes `SourceVault-sender-<computer>.json`.
+3. **Register it here** (administrator). Compare the fingerprint with what `init` printed, then type `YES`:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -RegisterSender C:\path\SourceVault-sender-DEVPC.json
+   ```
+   To unregister it later, delete its file in `C:\ProgramData\SourceVault\senders`.
+4. **Export this PC's recipient file** (operator) and copy it to the other computer. It holds no secrets.
+   ```powershell
+   & "C:\Program Files\SourceVault\client\SourceVault.Import.exe" --export-recipient C:\path\recipient.json
+   ```
+
+**Each time:**
+1. **Pack it, on the other computer.** Try `--dry-run` first to see what's included and skipped:
+   ```powershell
+   pack\SourceVault.Pack.exe C:\code\my-app --to recipient.json --out my-app.svpkg
+   ```
+   - It shows the recipient's fingerprint: check it matches this PC's.
+   - Type `YES` to write the package.
+   - The same rules as a folder import apply: UTF-8 text up to 256 KiB, at most 1,024 files, and `.git`, `bin`, `obj` and the like skipped.
+2. **Import it here** (operator):
+   ```powershell
+   & "C:\Program Files\SourceVault\client\SourceVault.Import.exe" --package C:\path\my-app.svpkg --project "My app"
+   ```
+   - The vault service checks the signature, decrypts the package in memory and creates the **new** project. Plaintext never touches this PC's disk.
+   - It refuses a package that was changed, was made for another PC, or comes from an unregistered computer, and then nothing is created.
+
+**Be aware:**
+- On the other computer the code is still ordinary, unencrypted files. Pack doesn't protect or delete them.
+- Anyone who has the recipient file can encrypt *to* this PC, but only registered computers' packages are accepted.
 ### Build a project
 
 **Builds** in the Explorer opens the build view (only if your administrator set up builds).

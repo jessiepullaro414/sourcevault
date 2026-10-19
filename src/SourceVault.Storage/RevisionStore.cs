@@ -72,7 +72,7 @@ public sealed partial class RevisionStore
             throw new IOException("Store is not empty.");
         var snapshot = Snapshot(Guid.NewGuid(), []);
         var manifest = WriteManifest(snapshot, new Dictionary<Guid, byte[]>(), new Dictionary<Guid, HistoryRef?>(), []);
-        Publish(snapshot.SnapshotId, false);
+        Publish(snapshot.SnapshotId, previousId: null);
         cache = manifest;
         return snapshot;
     }
@@ -208,7 +208,7 @@ public sealed partial class RevisionStore
         var next = Snapshot(Guid.NewGuid(), entries);
         var written = WriteManifest(next, hashes, history, deleted);
         FaultInjection?.Invoke(CommitStage.ManifestFlushed);
-        Publish(next.SnapshotId, true);
+        Publish(next.SnapshotId, previousId: current.SnapshotId); // current was authenticated above, under the lock
         cache = written;
         return next;
     }
@@ -491,21 +491,35 @@ public sealed partial class RevisionStore
         stream.Write(encrypted);
         stream.Flush(true);
     }
-    private void Publish(Guid id, bool replace)
+    // A flushed, opaque same-directory pointer file holding one snapshot id. Leftovers from interruptions are allowed.
+    private string WritePointer(Guid id)
+    {
+        var path = Path.Combine(root, Guid.NewGuid().ToString("D") + ".head");
+        CheckAncestors(path);
+        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        stream.Write(Utf8.GetBytes(id.ToString("D")));
+        stream.Flush(true);
+        return path;
+    }
+
+    // Each step is a single rename (MoveFileEx, replacing the target), so an interruption at any point leaves either
+    // the old HEAD or the new one, never neither. File.Replace is two renames (HEAD to PREVIOUS, then the temporary to
+    // HEAD) and a process killed between them left no HEAD at all (found by the kill test, 2026-10-19). After an
+    // interrupted commit PREVIOUS may equal HEAD; it is a recovery aid only and is never read automatically.
+    private void Publish(Guid id, Guid? previousId)
     {
         var head = Path.Combine(root, "HEAD");
         var previous = Path.Combine(root, "PREVIOUS");
-        var temporary = Path.Combine(root, Guid.NewGuid().ToString("D") + ".head");
-        CheckAncestors(head); CheckAncestors(previous); CheckAncestors(temporary);
-        using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-        {
-            stream.Write(Utf8.GetBytes(id.ToString("D")));
-            stream.Flush(true);
-        }
+        CheckAncestors(head); CheckAncestors(previous);
+        var temporary = WritePointer(id);
         FaultInjection?.Invoke(CommitStage.BeforeHeadPublish);
-        if (replace) File.Replace(temporary, head, previous);
+        if (previousId is { } prior)
+        {
+            File.Move(WritePointer(prior), previous, overwrite: true);
+            File.Move(temporary, head, overwrite: true);
+        }
         else File.Move(temporary, head, false);
-        // The pointer's data was flushed above; the swap itself is file-system metadata. FlushFileBuffers on the new
+        // The pointer's data was flushed in WritePointer; the swap itself is file-system metadata. FlushFileBuffers on the new
         // HEAD forces NTFS to commit its log, which holds the rename, so a returned commit survives a crash. Power
         // loss and device write caches still need the lab test (docs/lab-checklist.md).
         using (var published = new FileStream(head, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)) published.Flush(true);

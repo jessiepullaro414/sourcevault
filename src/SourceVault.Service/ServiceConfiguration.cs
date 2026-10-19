@@ -6,6 +6,8 @@ namespace SourceVault.Service;
 internal sealed record ServiceConfiguration(string KeyName)
 {
     internal const string FileName = "sourcevault.service.json";
+    /// <summary>The package import key (docs/package-import-design.md, D1): a separate TPM key named after the vault key.</summary>
+    internal string ImportKeyName => KeyName + ".Import";
     internal static ServiceConfiguration LoadFromApplicationDirectory()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

@@ -140,3 +140,25 @@ See `docs/files-history-builds-design.md`, section 4. Every operation also takes
 
   The reply is `{ok, …}`; the build reply carries `state`, `reason`, `exitCode`, `logBase64` (≤ 512 KiB), `logTruncated`, `artifactFolder`, `artifactFiles`, `artifactBytes` and `artifactsDropped`.
 - **The build service** never receives project names and never opens the vault or the TPM key.
+
+## Addition: encrypted package import (owner-approved, 2026-10-19)
+
+See `docs/package-import-design.md`. Every operation also takes `capability`. Without a provisioned import key every one of these returns `Unavailable`.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| GetImportRecipient | — | `computer`, `publicKey` (base64 SubjectPublicKeyInfo), `fingerprint` (hex SHA-256) |
+| BeginPackageImport | `length` | `{}` |
+| PackageImportPart | `offset`, `dataBase64` | `received` |
+| FinishPackageImport | `projectName` | `projectId`, `snapshotId`, `imported`, `packageId`, `sender` |
+
+- **Upload rules:**
+  - one upload per connection, and one across the whole service; a second gets `Unavailable`;
+  - `length` must be at least 624 bytes and at most `Package.MaxPackageBytes` (about 270 MB), otherwise `LimitExceeded`;
+  - parts must start exactly where the last one ended; a part is at most 512 KiB, and must not go past `length`.
+- **Finishing:**
+  - `FinishPackageImport` ends the upload whatever its result. So does closing the connection.
+  - It creates a **new** project only. A taken name is `AlreadyExists`, and nothing is written.
+- **New error codes:**
+  - `PackageRejected`: the package is malformed, altered, made for another recipient, or contains files the vault does not accept. Nothing is created.
+  - `UnknownSender`: the signature is valid, but its computer is not registered in `C:\ProgramData\SourceVault\senders`.
