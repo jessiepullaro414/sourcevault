@@ -1,7 +1,8 @@
-// Bootstrap: block export paths first, then ask the host which mode to run. Nothing is rendered from either mode
-// until the mode is known, so a vault editor never shows the synthetic sample.
-import { installExportBlocks } from './shell.mjs';
+// Bootstrap: block network and export paths first, then ask the host which mode to run. Nothing is rendered from
+// either mode until the mode is known, so a vault editor never shows the synthetic sample.
+import { installNetworkBlocks, installExportBlocks } from './shell.mjs';
 
+installNetworkBlocks();
 installExportBlocks();
 const mode = await detectMode();
 if (mode.kind === 'vault') (await import('./vault-app.mjs')).startVault(mode.transport, mode.metadata, mode.onSession);
