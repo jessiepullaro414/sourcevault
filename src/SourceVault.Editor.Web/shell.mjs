@@ -15,6 +15,24 @@ export function installExportBlocks() {
   Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: false });
 }
 
+// Network APIs the editor never uses. The page CSP, the native host's request filter and its dead-proxy browser
+// arguments already block their traffic; removing them first is one more layer, and the only page-level one for
+// WebRTC, whose STUN/peer traffic CSP does not cover. Same-origin fetch/XHR stay: Monaco loads its own files.
+// This is page script, not a boundary: Monaco's workers keep their own globals (CSP and the host still apply there).
+export const blockedNetworkGlobals = ['WebSocket', 'WebSocketStream', 'WebTransport', 'EventSource', 'RTCPeerConnection', 'webkitRTCPeerConnection',
+  'RTCDataChannel', 'RTCIceTransport', 'SharedWorker', 'PresentationRequest'];
+
+export function installNetworkBlocks(scope = globalThis) {
+  const lock = (target, name, value) => Object.defineProperty(target, name, { value, writable: false, configurable: false });
+  for (const name of blockedNetworkGlobals) lock(scope, name, undefined);
+  lock(scope, 'open', () => null); // Monaco's link opener calls window.open; the host refuses new windows as well
+  const nav = scope.navigator;
+  if (nav) {
+    lock(nav, 'sendBeacon', () => false);
+    lock(nav, 'serviceWorker', undefined);
+  }
+}
+
 let activityCount = 1;
 /** Status bar and activity panel. Messages are fixed UI text and names, never document content. */
 export function announce(message) {

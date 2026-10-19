@@ -28,11 +28,22 @@ internal static class PreviewPolicy
     internal const string ReadyType = "sourcevault.preview.ready";
     internal const string StatusType = "sourcevault.preview.status";
 
-    /// <summary>True when <paramref name="value"/> is an absolute URI on exactly https://sourcevault.local (port 443, no userinfo).</summary>
-    internal static bool IsAppUri(string? value) => TryParseAppUri(value, out _, out _);
+    /// <summary>The one document the editor ever shows.</summary>
+    internal const string EntryPath = "/index.html";
+    internal const string EntryUri = AppOrigin + EntryPath;
 
-    /// <summary>Navigation (top level and frames) may only target the app origin.</summary>
-    internal static bool IsNavigationAllowed(string? uri) => IsAppUri(uri);
+    /// <summary>True when <paramref name="value"/> is an absolute URI on exactly https://sourcevault.local (port 443, no userinfo).</summary>
+    internal static bool IsAppUri(string? value) => TryParseAppUri(value, out _, out _, out _);
+
+    /// <summary>
+    /// Top-level navigation may only load the bundled app itself: exactly https://sourcevault.local/index.html,
+    /// with no query or fragment and the path in its exact case. Other assets on the app origin (Monaco files,
+    /// licences), other origins, and every other scheme (mailto:, file:, data:, about:, ms-settings:, ...) are refused.
+    /// Frames are never allowed; the host cancels every frame navigation and the page's CSP blocks frames too.
+    /// </summary>
+    internal static bool IsNavigationAllowed(string? uri) =>
+        TryParseAppUri(uri, out string path, out bool hasQuery, out bool hasFragment) &&
+        !hasQuery && !hasFragment && string.Equals(path, EntryPath, StringComparison.Ordinal);
 
     /// <summary>
     /// True for blob URIs minted by the app origin (Monaco workers): blob:https://sourcevault.local/&lt;guid&gt;
@@ -41,7 +52,7 @@ internal static class PreviewPolicy
     internal static bool IsAppBlobUri(string? value)
     {
         if (value is null || !value.StartsWith("blob:", StringComparison.Ordinal)) return false;
-        if (!TryParseAppUri(value[5..], out string path, out bool hasQuery) || hasQuery) return false;
+        if (!TryParseAppUri(value[5..], out string path, out bool hasQuery, out _) || hasQuery) return false;
         return path.Length == 37 && path[0] == '/' && Guid.TryParseExact(path[1..], "D", out _);
     }
 
@@ -50,10 +61,11 @@ internal static class PreviewPolicy
 
     // Strict, string-level origin parse. The framework Uri class is consulted afterwards as a second opinion,
     // never as the only check: it normalizes case, dot segments, IDN and backslashes, which hides hostile forms.
-    private static bool TryParseAppUri(string? value, out string path, out bool hasQuery)
+    private static bool TryParseAppUri(string? value, out string path, out bool hasQuery, out bool hasFragment)
     {
         path = string.Empty;
         hasQuery = false;
+        hasFragment = false;
         if (value is null || value.Length == 0 || value.Length > MaxUriLength) return false;
         foreach (char c in value)
             if (c < 0x21 || c > 0x7E || c == '\\') return false; // no controls, spaces, non-ASCII (IDN/homoglyphs), backslashes
@@ -64,6 +76,7 @@ internal static class PreviewPolicy
         int end = rest.IndexOfAny(['?', '#']);
         string rawPath = end < 0 ? rest : rest[..end];
         hasQuery = end >= 0 && rest[end] == '?';
+        hasFragment = rest.Contains('#');
         if (!IsSafePath(rawPath)) return false;
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
             uri.Scheme != Uri.UriSchemeHttps || uri.Host != AppHost || uri.Port != 443 || uri.UserInfo.Length != 0)

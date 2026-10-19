@@ -44,7 +44,6 @@ internal static class Program
 
 internal sealed class EditorWindow : Window
 {
-    private const string AppOrigin = PreviewPolicy.AppOrigin;
     private static readonly TimeSpan KeepAliveAfter = TimeSpan.FromMinutes(2);
     private readonly EditorMode mode;
     private readonly Grid surface = new();
@@ -98,6 +97,12 @@ internal sealed class EditorWindow : Window
                 ShowNotice("Browser override detected", "The editor will not start with WEBVIEW2_ environment overrides, including browser debugging or alternate profiles. Launch from a clean environment.");
                 return;
             }
+            // Registry overrides are applied by the WebView2 loader after ours and could replace the browser arguments below.
+            if (NetworkPolicy.FindRegistryOverride(ReadWebView2PolicyValues(), Path.GetFileName(Environment.ProcessPath) ?? "") is not null)
+            {
+                ShowNotice("Browser policy override detected", "The editor will not start while a WebView2 policy override (Software\\Policies\\Microsoft\\Edge\\WebView2) could apply to it, because such an override can change its browser settings or network access. Ask your workstation administrator to remove it.");
+                return;
+            }
             string assets = Path.Combine(AppContext.BaseDirectory, "assets");
             if (!File.Exists(Path.Combine(assets, "index.html")))
             {
@@ -109,7 +114,18 @@ internal sealed class EditorWindow : Window
             // WPF WebView2 must join the loaded visual tree before initialization.
             // Keep the startup notice above it until the offline document is ready.
             surface.Children.Insert(0, webView);
-            var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: ProfilePath);
+            var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: ProfilePath, options: new CoreWebView2EnvironmentOptions
+            {
+                // Keeps the browser off the network: dead proxy, no DNS, no non-proxied WebRTC, no background services (NetworkPolicy).
+                AdditionalBrowserArguments = NetworkPolicy.AdditionalBrowserArguments,
+                // Crash dumps can hold document text: never send them to Microsoft. They stay in the profile folder,
+                // which vault mode deletes after each run.
+                IsCustomCrashReportingEnabled = true,
+                AllowSingleSignOnUsingOSPrimaryAccount = false,
+                AreBrowserExtensionsEnabled = false,
+                // No other process may attach a WebView to this browser process and profile.
+                ExclusiveUserDataFolderAccess = true,
+            });
             environment.BrowserProcessExited += (_, _) => browserExited.TrySetResult();
             if (closing) return;
             await webView.EnsureCoreWebView2Async(environment);
@@ -126,18 +142,31 @@ internal sealed class EditorWindow : Window
             core.Settings.IsPasswordAutosaveEnabled = false;
             core.Settings.IsWebMessageEnabled = true;
             core.Settings.IsZoomControlEnabled = false;
+            core.Settings.IsPinchZoomEnabled = false;
+            core.Settings.IsSwipeNavigationEnabled = false;
+            core.Settings.IsReputationCheckingRequired = false; // SmartScreen would send visited URLs to Microsoft
             webView.AllowExternalDrop = false;
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
+            core.ScreenCaptureStarting += (_, e) => e.Cancel = true;
+            // Only the bundled app may load: one entry document, no frames, no external URI schemes, no auth prompts.
             core.NavigationStarting += (_, e) => e.Cancel = !PreviewPolicy.IsNavigationAllowed(e.Uri);
-            core.FrameNavigationStarting += (_, e) => e.Cancel = !PreviewPolicy.IsNavigationAllowed(e.Uri);
-            core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+            core.FrameNavigationStarting += (_, e) => e.Cancel = true;
+            core.LaunchingExternalUriScheme += (_, e) => e.Cancel = true;
+            core.BasicAuthenticationRequested += (_, e) => e.Cancel = true;
+            core.ClientCertificateRequested += (_, e) => { e.Cancel = true; e.Handled = true; };
+            core.ServerCertificateErrorDetected += (_, e) => e.Action = CoreWebView2ServerCertificateErrorAction.Cancel;
+            // Every URI, every resource context, and every request source: pages and dedicated workers, shared workers and service workers.
+            core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All, CoreWebView2WebResourceRequestSourceKinds.All);
             core.WebResourceRequested += (_, e) =>
             {
                 if (!PreviewPolicy.IsResourceAllowed(e.Request.Uri))
                     e.Response = environment.CreateWebResourceResponse(Stream.Null, 403, "Blocked", "Content-Type: text/plain\r\n");
             };
+            // WebRTC is the one network path the proxy and request filter do not cover: remove it before any page script.
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(NetworkPolicy.DocumentCreatedScript);
+            if (closing) return;
             core.WebMessageReceived += ReceiveMessage;
             core.ProcessFailed += (_, _) => ShowNotice("Editor stopped", "Close the editor and launch it again.");
             webView.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 16, 20, 29);
@@ -155,7 +184,7 @@ internal sealed class EditorWindow : Window
             }
             foreach (UIElement child in surface.Children.Cast<UIElement>().Where(child => child != webView).ToArray())
                 surface.Children.Remove(child);
-            core.Navigate(AppOrigin + "/index.html");
+            core.Navigate(PreviewPolicy.EntryUri);
         }
         catch (WebView2RuntimeNotFoundException)
         {
@@ -165,6 +194,24 @@ internal sealed class EditorWindow : Window
         {
             if (!closing) ShowNotice("Unable to open editor", "The local editor could not initialize. Check the offline assets, the WebView2 Runtime, and that your local application data folder is writable.");
         }
+    }
+
+    // Every (setting, value name) pair under HKLM and HKCU Software\Policies\Microsoft\Edge\WebView2\<setting>. Read only.
+    private static List<(string Setting, string ValueName)> ReadWebView2PolicyValues()
+    {
+        var found = new List<(string, string)>();
+        foreach (var root in new[] { Microsoft.Win32.Registry.LocalMachine, Microsoft.Win32.Registry.CurrentUser })
+        {
+            using var policy = root.OpenSubKey(NetworkPolicy.PolicyKey);
+            if (policy is null) continue;
+            foreach (string setting in policy.GetSubKeyNames())
+            {
+                using var key = policy.OpenSubKey(setting);
+                if (key is null) { found.Add((setting, "*")); continue; } // present but unreadable: fail closed
+                foreach (string valueName in key.GetValueNames()) found.Add((setting, valueName));
+            }
+        }
+        return found;
     }
 
     private void ReceiveMessage(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
