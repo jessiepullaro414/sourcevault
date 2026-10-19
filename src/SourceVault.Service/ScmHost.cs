@@ -113,7 +113,7 @@ internal sealed class ScmHost
         }
         catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.VaultServiceMissing); }
         if (self.User is null || !expectedSelf.Equals(self.User)) throw new StartupRefusedException(StartupRefusedException.WrongIdentity);
-        var pipeServer = new BuildPipeServer(BuildChannel.PipeName, self.User!, vault, () => BuildConfig.Load(BuildConfig.DefaultPath),
+        var pipeServer = new BuildPipeServer(BuildChannel.PipeName, self.User!, vault, () => BuildConfig.Load(BuildConfig.DefaultPath, VaultRoot.ConfiguredVaultFolder()),
             target => new DockerEngineClient(target.Engine, target.CaFile, target.ClientCertificateThumbprint));
         try { pipeServer.Start(); }
         catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
@@ -154,11 +154,11 @@ internal sealed class ScmHost
     {
         TpmKeyProtector.RequireServiceIdentity();
         var config = ServiceConfiguration.LoadFromApplicationDirectory();
-        if (!VaultRoot.Validate().Passed) throw new StartupRefusedException(StartupRefusedException.VaultRootUntrusted);
+        VaultRoot.RequireTrusted(config.VaultRootPath);
         var key = TpmKeyProtector.OpenExisting(config.KeyName);
         try
         {
-            var catalog = new ProjectCatalog(VaultRoot.Path, key);
+            var catalog = new ProjectCatalog(config.VaultRootPath, key);
             IReadOnlyList<ProjectInfo> projects;
             try { projects = catalog.OpenAndVerify(); }
             catch (VaultCatalogException e)

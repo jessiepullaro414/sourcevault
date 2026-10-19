@@ -1,6 +1,8 @@
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace SourceVault.Windows;
 
@@ -23,10 +25,13 @@ public static class TrustedStorageRoot
             inspector ??= new FileSystemStorageRootInspector();
             var findings = new List<StorageRootFinding>();
             var volume = inspector.ObserveVolume(path!);
+            // A missing, offline or locked drive is reported on its own: there is nothing on it to judge.
+            if (!volume.Available) return new([new StorageRootFinding(FindingCodes.VolumeUnavailable, "volume")]);
             if (volume.DriveType != DriveType.Fixed) findings.Add(new(FindingCodes.VolumeNotFixed, "volume"));
             if (!string.Equals(volume.FileSystem, "NTFS", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(volume.FileSystem, "ReFS", StringComparison.OrdinalIgnoreCase))
                 findings.Add(new(FindingCodes.VolumeFilesystemUnsupported, "volume"));
+            if (!volume.LocalDisk) findings.Add(new(FindingCodes.VolumeNotLocalDisk, "volume"));
             var chain = new List<DirectoryObservation>();
             for (var current = path; current is not null; current = Path.GetDirectoryName(current))
                 chain.Add(inspector.ObserveDirectory(current));
@@ -47,7 +52,8 @@ public static class TrustedStorageRoot
         var sb = new StringBuilder();
         sb.AppendLine("Trusted storage root: required provisioning (performed by a reviewed lab/installer step, never by the service).");
         sb.AppendLine("Layout: <volume>\\<dedicated trusted directory>\\<store root>. The store root's parent must NOT be the volume root and the store root must not be a volume root.");
-        sb.AppendLine("Volume: local fixed NTFS or ReFS. No UNC, \\\\?\\ or device paths, no relative segments, no junction/symlink/mount point at the root or any ancestor.");
+        sb.AppendLine("Volume: local fixed NTFS or ReFS on a drive letter that maps to a disk volume (not subst), on a non-removable SATA/ATA/SAS/SCSI/NVMe/RAID/Storage Spaces disk (not USB, 1394, SD/MMC, iSCSI or a mounted VHD/VHDX).");
+        sb.AppendLine("No UNC, \\\\?\\ or device paths, no relative segments, no junction/symlink/mount point at the root or any ancestor.");
         sb.AppendLine("Store root (and, recommended, its parent):");
         sb.AppendLine("  Owner: one of the trusted principals (recommended " + Name(PreferredOwner(principals)) + ").");
         sb.AppendLine("  DACL: protected (inheritance from the parent disabled; no inherited ACEs).");
@@ -109,6 +115,20 @@ public static class StorageRootPolicy
     private static readonly string[] ReservedNames =
         ["CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
          "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+
+    // Allow-list of STORAGE_BUS_TYPE values (winioctl.h) for a vault disk: SCSI 1, ATA 3, RAID 8, SAS 10, SATA 11,
+    // Storage Spaces 16, NVMe 17. Everything else fails closed, notably USB 7, 1394 4, SD 12, MMC 13, iSCSI 9,
+    // Fibre 6, Virtual 14 and FileBackedVirtual 15 (a mounted VHD/VHDX, whose file lives on an unchecked volume).
+    // Limits: a Thunderbolt NVMe or eSATA enclosure reports NVMe/SATA, and Storage Spaces hides its physical disks.
+    public static bool IsLocalDiskBus(uint busType, bool removableMedia) => !removableMedia && busType is 1 or 3 or 8 or 10 or 11 or 16 or 17;
+
+    /// <summary>True only for a drive letter's DOS-device target that is a disk volume, e.g. <c>\Device\HarddiskVolume3</c>; a <c>subst</c> drive maps to <c>\??\C:\...</c>.</summary>
+    public static bool IsVolumeDeviceTarget(string? target)
+    {
+        const string prefix = @"\Device\HarddiskVolume";
+        return target is not null && target.Length > prefix.Length && target.Length <= prefix.Length + 5 &&
+            target.StartsWith(prefix, StringComparison.Ordinal) && !target.AsSpan(prefix.Length).ContainsAnyExceptInRange('0', '9');
+    }
 
     public static IReadOnlyList<StorageRootFinding> ValidatePathSyntax(string? path)
     {
@@ -184,7 +204,10 @@ public sealed class FileSystemStorageRootInspector : IStorageRootInspector
         try
         {
             var drive = new DriveInfo(Path.GetPathRoot(path)!);
-            return new(drive.DriveType, drive.DriveFormat);
+            var type = drive.DriveType;
+            if (type == DriveType.NoRootDirectory || (type == DriveType.Fixed && !drive.IsReady)) return new(type, null, Available: false);
+            if (!drive.IsReady) return new(type, null);
+            return new(type, drive.DriveFormat, LocalDisk.Probe(path[0]));
         }
         catch (Exception) { return new(DriveType.Unknown, null); }
     }
@@ -203,4 +226,34 @@ public sealed class FileSystemStorageRootInspector : IStorageRootInspector
         }
         catch (Exception) { return new(DirectoryState.Unreadable, null); }
     }
+}
+
+/// <summary>Read-only device query for one drive letter. Opens the volume with no access rights (metadata only); never throws.</summary>
+internal static class LocalDisk
+{
+    internal static bool Probe(char driveLetter)
+    {
+        try
+        {
+            if (!char.IsAsciiLetter(driveLetter)) return false;
+            var buffer = new char[1024];
+            var length = QueryDosDeviceW(driveLetter + ":", buffer, buffer.Length);
+            if (length == 0) return false;
+            var end = Array.IndexOf(buffer, '\0', 0, (int)length);
+            var target = new string(buffer, 0, end < 0 ? (int)length : end);
+            if (!StorageRootPolicy.IsVolumeDeviceTarget(target)) return false;
+            using var volume = CreateFileW(@"\\.\" + driveLetter + ":", 0, FileShareReadWrite, IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
+            if (volume.IsInvalid) return false;
+            var query = new byte[12]; // STORAGE_PROPERTY_QUERY { StorageDeviceProperty = 0, PropertyStandardQuery = 0 }
+            var descriptor = new byte[1024]; // STORAGE_DEVICE_DESCRIPTOR
+            if (!DeviceIoControl(volume, IoctlStorageQueryProperty, query, query.Length, descriptor, descriptor.Length, out var returned, IntPtr.Zero) || returned < 32) return false;
+            return StorageRootPolicy.IsLocalDiskBus(BitConverter.ToUInt32(descriptor, 28), descriptor[10] != 0); // BusType, RemovableMedia
+        }
+        catch (Exception) { return false; }
+    }
+
+    private const uint FileShareReadWrite = 0x1 | 0x2, OpenExisting = 3, IoctlStorageQueryProperty = 0x2D1400;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint QueryDosDeviceW(string device, [Out] char[] target, int max);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool DeviceIoControl(SafeFileHandle device, uint code, byte[] input, int inputSize, byte[] output, int outputSize, out int returned, IntPtr overlapped);
 }

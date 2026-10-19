@@ -6,7 +6,9 @@
 #   3. With everything restored                   -> normal start must reach RUNNING again
 $ErrorActionPreference = 'Stop'
 $serviceName = 'SourceVault'
-$vault = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault\vault'
+# The configured root: schema 2 names it (e.g. K:\SourceVault\vault), schema 1 means the default.
+$config = Get-Content -LiteralPath (Join-Path $env:ProgramFiles 'SourceVault\service\sourcevault.service.json') -Raw | ConvertFrom-Json
+$vault = if ($config.schemaVersion -eq 2) { [string]$config.vaultRoot } else { Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault\vault' }
 $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
 if (!$service) { throw 'Service not installed.' }
 if ($service.Status -ne 'Stopped') { throw "Service is $($service.Status); stop it first." }

@@ -8,6 +8,8 @@ internal sealed record ServiceConfiguration(string KeyName)
     internal const string FileName = "sourcevault.service.json";
     /// <summary>The package import key (docs/package-import-design.md, D1): a separate TPM key named after the vault key.</summary>
     internal string ImportKeyName => KeyName + ".Import";
+    /// <summary>Schema 1: the default root. Schema 2: the administrator-chosen <c>vaultRoot</c> (see <see cref="VaultRoot.IsAcceptablePath"/>).</summary>
+    internal string VaultRootPath { get; private init; } = VaultRoot.DefaultPath;
     internal static ServiceConfiguration LoadFromApplicationDirectory()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -27,14 +29,15 @@ internal sealed record ServiceConfiguration(string KeyName)
         using var doc = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 4 });
         if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new InvalidDataException();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        string? keyName = null;
+        string? keyName = null, vaultRoot = null;
+        var version = 0;
         foreach (var property in doc.RootElement.EnumerateObject())
         {
             if (!seen.Add(property.Name)) throw new InvalidDataException();
             switch (property.Name)
             {
                 case "schemaVersion":
-                    if (property.Value.ValueKind != JsonValueKind.Number || !property.Value.TryGetInt32(out var version) || version != 1) throw new InvalidDataException();
+                    if (property.Value.ValueKind != JsonValueKind.Number || !property.Value.TryGetInt32(out version) || version is not (1 or 2)) throw new InvalidDataException();
                     break;
                 case "mode":
                     if (property.Value.ValueKind != JsonValueKind.String || property.Value.GetString() != "MetadataOnly") throw new InvalidDataException();
@@ -43,11 +46,16 @@ internal sealed record ServiceConfiguration(string KeyName)
                     if (property.Value.ValueKind != JsonValueKind.String) throw new InvalidDataException();
                     keyName = property.Value.GetString();
                     break;
+                case "vaultRoot":
+                    if (property.Value.ValueKind != JsonValueKind.String) throw new InvalidDataException();
+                    vaultRoot = property.Value.GetString();
+                    break;
                 default: throw new InvalidDataException();
             }
         }
-        if (seen.Count != 3 || keyName is null) throw new InvalidDataException();
+        if (seen.Count != (version == 2 ? 4 : 3) || keyName is null || (version == 2) != (vaultRoot is not null)) throw new InvalidDataException();
         TpmKeyProtector.ValidateKeyName(keyName);
-        return new(keyName);
+        if (vaultRoot is not null && !VaultRoot.IsAcceptablePath(vaultRoot)) throw new InvalidDataException();
+        return new(keyName) { VaultRootPath = vaultRoot ?? VaultRoot.DefaultPath };
     }
 }

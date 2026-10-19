@@ -20,6 +20,7 @@ Wait-State 'Running', 'Stopped' 60
 $state = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
 if ($service.Status -ne 'Running') {
     $reason = if ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 10) { 'vault root missing or untrusted; run New-VaultRoot.ps1 or the service''s vault-root-check' }
+        elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 17) { 'the vault drive is missing, offline or locked (e.g. BitLocker); unlock or attach it' }
         elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 11) { 'unexpected entry in the vault, or the project index failed authentication' }
         elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 12) { 'a project failed authentication' }
         elseif ($state.ExitCode -eq 1066 -and $state.ServiceSpecificExitCode -eq 13) { 'local group SourceVault Operators is missing; run New-OperatorsGroup.ps1' }
