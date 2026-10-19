@@ -45,6 +45,28 @@ Needs a second Windows computer with a TPM 2.0 (the "source computer"), and synt
 | [ ] | `SourceVault.Import.exe --package test.svpkg --project "Packed sample"`: imports N files, names the sender computer, and the project opens in the editor with the same files | — |
 | [ ] | Refusals: the same package with one byte changed is *rejected*; a package from an unregistered computer gives *not registered*; importing to a taken name gives *already exists*. Nothing is created in any of them | — |
 | [ ] | Search the vault PC's `%TEMP%` and the importer's folder for a marker inside the packed files: nothing (plaintext only ever existed in the service's memory) | — |
+## Vault on another drive (e.g. K:)
+
+The full owner-run steps are in [vault-location-design.md](vault-location-design.md), "Lab checklist". Most need an elevated prompt, and step 6 a reboot.
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | Record the drive's type, file system, bus and root ACL (step 1) | admin |
+| [ ] | Fresh install with `-VaultRoot K:\SourceVault\vault -WithSyntheticDemo`: RUNNING, and `-Status` shows the K: path; an existing C: install still passes after `-Update` (steps 2-3) | admin; a test machine or fresh install |
+| [ ] | K: offline or locked: start refuses with 1066/17 and creates nothing; back online, RUNNING (step 4). A USB drive is refused (step 5) | admin; service down |
+| [ ] | Reboot with the vault on K: (step 6); uninstall keeps it and a reinstall authenticates it (step 7); the tamper drill on K: (step 8) | **reboot**; admin |
+
+## Editor: Monaco only, no network
+
+The full steps are in [editor-preview-checks.md](editor-preview-checks.md), "Owner lab checklist: no network".
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | Find the editor's `msedgewebview2.exe` processes, then watch them with Resource Monitor or a packet capture through 10 minutes of use and 10 idle: no connection, UDP or DNS to any non-loopback address (steps 1-2) | — |
+| [ ] | Links in content open nothing; no external application or "open this app?" prompt (steps 3-4) | — |
+| [ ] | A `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment variable is refused (step 5) | — |
+| [ ] | A registry `AdditionalBrowserArguments` policy for the editor is refused, and one for another program isn't (step 6; undo afterwards) | admin; lab VM; machine policy |
+| [ ] | Crash data: the profile, including `Crashpad`, is gone after a vault session, and nothing is reported to Microsoft (step 7) | — |
 ## Builds (no sign-out or reboot)
 
 | Done | Test | Needs |
