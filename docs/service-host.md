@@ -66,11 +66,25 @@ Still open: start after reboot; missing/wrong key and config cases under SCM; sh
 
 ## Vault-root gate
 
-The vault root is fixed at `%ProgramData%\SourceVault\vault` (`VaultRoot.Path`). It is never taken from config, arguments or the environment. On every normal start the service checks identity, then config, then validates the root with `TrustedStorageRoot` against SYSTEM, Administrators, TrustedInstaller and its own service SID, and only then opens its key. An untrusted or missing root stops the service before RUNNING with Win32 1066, service-specific code 10. The store is still not opened.
+The vault root defaults to `%ProgramData%\SourceVault\vault` (`VaultRoot.DefaultPath`). An administrator can choose another one at install (`Setup-SourceVault.ps1 -VaultRoot K:\SourceVault\vault`; owner decisions in `docs/vault-location-design.md`, 2026-10-19). The only place it is read from is `service\sourcevault.service.json`, beside the service under Program Files:
+
+- schema 1 (`schemaVersion`, `mode`, `keyName`) means the default root;
+- schema 2 requires exactly one more field, `vaultRoot`.
+
+The parser rejects unknown, duplicate or missing fields, and any `vaultRoot` that is not a canonical `X:\folder\leaf` path at least two levels below the drive root. It also rejects paths over 120 characters and paths that overlap the install folder, `%ProgramData%\SourceVault\config` or Windows. The root is never taken from arguments or the environment.
+
+On every normal start the service checks identity, then config, then validates the root with `TrustedStorageRoot` against SYSTEM, Administrators, TrustedInstaller and its own service SID, and only then opens its key. The store is still not opened. Refusals stop the service before RUNNING with Win32 1066 and a service-specific code:
+
+- **17:** the drive letter is missing, or its volume is not ready (offline or BitLocker-locked). Nothing on it is inspected. There is no automatic retry; an administrator starts the service once the drive is back.
+- **10:** any other finding, including a missing or untrusted root.
+
+The validator applies the same rules to every root, C: included. The volume must be fixed NTFS or ReFS. It must also be a local disk (`volume_not_local_disk` otherwise): the drive letter must map to `\Device\HarddiskVolumeN`, which rules out `subst`. The disk's `STORAGE_BUS_TYPE` must be SCSI, ATA, RAID, SAS, SATA, Storage Spaces or NVMe, with no removable media; USB, 1394, SD, MMC, iSCSI, Fibre, Virtual and FileBackedVirtual (mounted VHD/VHDX) are refused. Both queries are read-only and request no access rights, and a failed query fails closed. Limits: an NVMe or SATA disk in a Thunderbolt or eSATA enclosure reports as internal, and Storage Spaces hides its physical disks.
+
+On a data drive the ancestor rules are unchanged. The drive root is a higher ancestor, so create-folder rights for users are tolerated there, but Delete, DeleteChild, WRITE_DAC and WRITE_OWNER are not. A drive root granting Authenticated Users Modify on itself is therefore refused. Setup never changes it; the user guide documents an owner-run fix.
 
 Console commands, both read-only:
 
-- `vault-root-check` prints findings as codes, locations and SIDs; exit 0 means trusted, 4 means not. Run it elevated, because the root grants nobody else read access.
+- `vault-root-check` reads the configured root from `sourcevault.service.json` and prints it (`vaultRoot=...`) with findings as codes, locations and SIDs. Exit 0 means trusted, 4 means not, or that the configuration is invalid. Run it elevated, because the root grants nobody else read access.
 - `vault-root-sddl` prints the exact root DACL the validator requires. `scripts/lab/New-VaultRoot.ps1` uses it to create the root, then verifies the result.
 
 Owner-run lab, 2026-10-17:
@@ -167,7 +181,7 @@ Design: [hardening-design.md](hardening-design.md), sections 1 and 2.
 The same service program also runs as a second service, **SourceVaultBuild**, under its own virtual account `NT SERVICE\SourceVaultBuild`, started with the argument `build-service`. Setup registers it only with `-WithBuilds`.
 
 - **What it never touches:** the vault, the TPM key and the operator pipe. Its account has no access to the vault folder or the key.
-- **What it serves:** only `\.\pipe\SourceVault.Build.v1`, for `NT SERVICE\SourceVault`. It reads `%ProgramData%\SourceVault\config\build.json` on every request, so edits apply without a restart.
+- **What it serves:** only `\.\pipe\SourceVault.Build.v1`, for `NT SERVICE\SourceVault`. It reads `%ProgramData%\SourceVault\config\build.json` on every request, so edits apply without a restart. It also reads the vault location from `sourcevault.service.json` (read-only), and refuses an `artifactRoot` inside, or containing, the folder that holds the vault.
 - **Docker:** it talks to the configured Docker engines directly (Docker Engine API v1.41 over the engine's named pipe, or loopback TLS with a client certificate) and writes artifacts under `artifactRoot`.
 - **Startup refusal codes:** 15 means `NT SERVICE\SourceVault` doesn't exist; 16 means the service isn't running as `NT SERVICE\SourceVaultBuild`; 14 means its pipe couldn't be created.
 - **Not verified on a real machine yet:** service registration, Docker group membership of the virtual account, and the Docker Engine API against real engines (Windows containers in particular, where copying into a running Hyper-V-isolated container may not be supported; process isolation is recommended).

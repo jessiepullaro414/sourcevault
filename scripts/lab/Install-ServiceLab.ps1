@@ -6,7 +6,8 @@ param(
     [string]$KeyName = 'SourceVault.Lab.Service01',
     [string]$InstallRoot = (Join-Path $env:ProgramFiles 'SourceVault'),
     [string]$PublishPath,
-    [string]$RuntimePath
+    [string]$RuntimePath,
+    [string]$VaultRoot # optional, e.g. K:\SourceVault\vault; omitted = the default C:\ProgramData\SourceVault\vault
 )
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -19,6 +20,9 @@ $account = 'NT SERVICE\SourceVault'
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) { throw "Service '$serviceName' already exists. Run Uninstall-ServiceLab.ps1 first." }
 if (Test-Path -LiteralPath $InstallRoot) { throw "$InstallRoot already exists. Remove it or choose -InstallRoot." }
 if ($KeyName -notmatch '^SourceVault\.Lab\.[A-Za-z0-9._-]{1,64}$') { throw 'Key name must be SourceVault.Lab.<letters, digits, . _ ->' }
+if ($VaultRoot -and ($VaultRoot.Length -gt 120 -or $VaultRoot -notmatch '^[A-Za-z]:\\[^\\]+(\\[^\\]+)+$' -or [IO.Path]::GetFullPath($VaultRoot) -cne $VaultRoot)) {
+    throw '-VaultRoot must be a full path at least two folders below a drive root, such as K:\SourceVault\vault (the service checks the rest).'
+}
 if (!(Test-Path -LiteralPath (Join-Path $PublishPath 'SourceVault.Service.dll'))) { throw "Published service not found in $PublishPath. Run scripts\lab\Publish-ServiceLab.ps1 first (as your normal user)." }
 $framework = Get-ChildItem -LiteralPath (Join-Path $RuntimePath 'shared\Microsoft.NETCore.App') -Directory -ErrorAction SilentlyContinue | Where-Object Name -like '10.*' | Sort-Object Name | Select-Object -Last 1
 if (!(Test-Path -LiteralPath (Join-Path $RuntimePath 'dotnet.exe')) -or !$framework) { throw "No .NET 10 runtime found under $RuntimePath" }
@@ -34,7 +38,8 @@ foreach ($file in 'dotnet.exe', 'LICENSE.txt', 'ThirdPartyNotices.txt') {
 Copy-Item -LiteralPath (Join-Path $RuntimePath 'host') -Destination $runtimeDir -Recurse
 Copy-Item -LiteralPath $framework.FullName -Destination (Join-Path $runtimeDir 'shared\Microsoft.NETCore.App') -Recurse
 Copy-Item -Path (Join-Path $PublishPath '*') -Destination $serviceDir -Recurse
-$config = '{"schemaVersion":1,"mode":"MetadataOnly","keyName":"' + $KeyName + '"}'
+$config = if ($VaultRoot) { '{"schemaVersion":2,"mode":"MetadataOnly","keyName":"' + $KeyName + '","vaultRoot":' + ($VaultRoot | ConvertTo-Json) + '}' }
+          else { '{"schemaVersion":1,"mode":"MetadataOnly","keyName":"' + $KeyName + '"}' }
 [IO.File]::WriteAllText((Join-Path $serviceDir 'sourcevault.service.json'), $config, (New-Object Text.UTF8Encoding $false))
 
 # The folder inherits the Program Files ACL. Refuse if ordinary users could modify anything in it.

@@ -1,8 +1,8 @@
-# Vault location: design note (awaiting owner decisions)
+# Vault location: design note
 
 Owner request (2026-10-19): "I would like the vault to be settable so it can be on a different drive like drive K:".
 
-Status: **proposal only, nothing built.** Today the root is fixed at `%ProgramData%\SourceVault\vault` (`VaultRoot.Path`). The goal is an administrator-chosen root such as `K:\SourceVault\vault` with every existing check kept: path syntax, fixed NTFS/ReFS volume, no reparse points, trusted owners, the protected root DACL from `vault-root-sddl`, and the per-level ancestor masks. No record, manifest or catalog format changes. Encrypted records bind project, file and revision ids, not paths, so the files are location-independent.
+Status: **owner approved every recommendation (2026-10-19)**: D1 R, D2 (a), D3 (a), D4 (a), D5 (a), D6 (a), D7 R, D8. These are now implemented. Tests use synthetic folders and synthetic ACLs only. Everything in the lab checklist below is unverified until the owner runs it, including the documented drive-root fix (D5), which has only been checked against the validator with a synthetic ACL. Before this change, the root was fixed at `%ProgramData%\SourceVault\vault` (`VaultRoot.Path`). The goal is an administrator-chosen root such as `K:\SourceVault\vault` with every existing check kept: path syntax, fixed NTFS/ReFS volume, no reparse points, trusted owners, the protected root DACL from `vault-root-sddl`, and the per-level ancestor masks. No record, manifest or catalog format changes. Encrypted records bind project, file and revision ids, not paths, so the files are location-independent.
 
 Each decision below has a recommendation (**R**). Answer by number, e.g. "D1 R, D3 b, ...".
 

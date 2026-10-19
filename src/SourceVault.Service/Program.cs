@@ -16,7 +16,7 @@ internal static class Program
                     // Read-only, for setup and -Status: validates build.json exactly as the build service does.
                     try
                     {
-                        var config = SourceVault.Build.BuildConfig.Load(SourceVault.Build.BuildConfig.DefaultPath);
+                        var config = SourceVault.Build.BuildConfig.Load(SourceVault.Build.BuildConfig.DefaultPath, VaultRoot.ConfiguredVaultFolder());
                         Console.WriteLine($"artifactRoot={config.ArtifactRoot}");
                         Console.WriteLine($"targets={string.Join(",", config.Targets.Select(t => t.Name))}");
                         return 0;
@@ -28,8 +28,13 @@ internal static class Program
                     return 0;
                 case "vault-root-check":
                     // Read-only. Findings carry codes, levels and SIDs only. Run elevated: the root grants nobody else read.
-                    var result = VaultRoot.Validate();
-                    Console.WriteLine($"vaultRoot={VaultRoot.Path}; trusted={(result.Passed ? "yes" : "no")}");
+                    // The root comes from sourcevault.service.json (schema 1: the default), exactly as the service reads it.
+                    string root;
+                    try { root = ServiceConfiguration.LoadFromApplicationDirectory().VaultRootPath; }
+                    catch (Exception e) when (e is IOException or InvalidDataException or UnauthorizedAccessException or System.Text.Json.JsonException)
+                    { Console.WriteLine("invalid: sourcevault.service.json is missing or not valid"); return 4; }
+                    var result = VaultRoot.Validate(root);
+                    Console.WriteLine($"vaultRoot={root}; trusted={(result.Passed ? "yes" : "no")}");
                     foreach (var f in result.Findings) Console.WriteLine($"{f.Severity.ToString().ToLowerInvariant()} {f.Code} at {f.Location}{(f.Subject is null ? "" : " (" + f.Subject + ")")}");
                     return result.Passed ? 0 : 4;
             }

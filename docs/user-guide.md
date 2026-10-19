@@ -36,6 +36,7 @@ SourceVault keeps source code encrypted on disk with a key that never leaves thi
    ```
    - With no `-Operators`, the account running setup becomes the only operator.
    - Add `-WithSyntheticDemo` to create a small fictional project to try things on.
+   - Add `-VaultRoot K:\SourceVault\vault` to keep the vault on another internal drive. Read [Vault on another drive](#vault-on-another-drive) first. The location can only be chosen at install.
 
 Setup prints `OK` for each step and stops at the first problem with an explanation. It does the following:
 
@@ -45,7 +46,7 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
 | Program files | Installs to `C:\Program Files\SourceVault` with its own private .NET runtime, checks that ordinary users can't modify anything there, and records the hash of every file. |
 | Service | Registers **SourceVault** running as its own account, `NT SERVICE\SourceVault`, starting automatically at boot (delayed start). |
 | TPM key | The service creates its own **decrypt-only, non-exportable** key in the TPM, then tests it. |
-| Vault folder | Creates `C:\ProgramData\SourceVault\vault`, readable only by the service, SYSTEM and Administrators. Operators can't open it directly. |
+| Vault folder | Creates `C:\ProgramData\SourceVault\vault`, or the `-VaultRoot` folder, readable only by the service, SYSTEM and Administrators. Operators can't open it directly. |
 | Start | Starts the service and confirms it verified the vault and is listening. |
 | Shortcut | Adds **SourceVault Editor** to the Start menu for everyone. |
 
@@ -57,22 +58,55 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Status
   ```
-  Reports the service account and state, whether installed files still match their hashes, the operators, and whether the vault folder's permissions are trusted.
+  Reports the service account and state, whether installed files still match their hashes, the operators, where the vault is, what kind of drive it is on, and whether the vault folder's permissions are trusted.
 - **Installed files are checked on every connection.** The service accepts the editor and importer only while every file in their folders matches `install-manifest.sha256`. If a file was changed, added or removed, they are refused ("only accepts the installed…"); run `-Update` from the package to restore them.
 - **Update to a newer package.** Close all editors, then from the new package:
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update
   ```
-  Program files are replaced. The key, the vault and the settings are kept.
+  Program files are replaced. The key, the vault, its location and the settings are kept.
 - **Add or remove an operator:** *Computer Management → Local Users and Groups → Groups → SourceVault Operators*, or `Add-LocalGroupMember -Group "SourceVault Operators" -Member "COMPUTER\name"`. The person signs out and in afterwards.
 - **Uninstall** (as administrator, from the package):
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Uninstall-SourceVault.ps1
   ```
-  - By default this keeps the encrypted vault, so a later install **on this same computer** can open it again.
-  - `-DeleteVaultData` permanently deletes all projects. It asks you to type a confirmation.
+  - By default this keeps the encrypted vault, so a later install **on this same computer** can open it again. For a vault on another drive, uninstall prints the command to use, which is the same `-VaultRoot` as before.
+  - `-DeleteVaultData` permanently deletes all projects. It asks you to type a confirmation. For a vault on another drive, it also removes the folder setup created above it, if that folder is now empty. It never touches the drive itself. If the vault's drive is missing or locked, nothing is removed.
   - `-RemoveOperatorsGroup` also removes the group.
   - The TPM key itself is never deleted.
+
+### Vault on another drive
+
+By default the vault is in `C:\ProgramData\SourceVault\vault`. To put it on another internal drive, choose the folder **at install**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -CheckOnly -VaultRoot K:\SourceVault\vault
+powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -VaultRoot K:\SourceVault\vault
+```
+
+- **The drive** must be a fixed, local NTFS or ReFS drive with a drive letter, on an internal SATA, ATA, SAS, SCSI, NVMe, RAID or Storage Spaces disk. USB disks (even ones Windows calls "fixed"), SD cards, network and iSCSI drives, mounted VHD/VHDX files and `subst` drives are refused. An NVMe or SATA disk in an external Thunderbolt or eSATA case can't be told apart from an internal one, so don't use one.
+- **The folder** must be at least two levels below the drive root, such as `K:\SourceVault\vault`, with at most 120 characters. Setup creates the last two folders itself and locks both down. It never changes a folder that already exists, the drive root, or anything above the parent folder.
+- **The location is fixed after install.** `-Update` keeps it, and setup can't move a vault. To start over elsewhere, uninstall (which keeps the vault) and install again with a different `-VaultRoot`. That gives a new, empty vault. The old one stays where it was, untouched.
+- **Configuration and build settings** stay in `C:\ProgramData\SourceVault\config`. The build output folder may not be inside the vault's folder or contain it.
+
+**If setup says the drive or the folders above the vault are not locked down enough**, look at the findings it prints. The common case is `untrusted_write_access at ancestor:2 (S-1-5-11)`. Many data drives give *Authenticated Users* "Modify" on the drive root itself, and Modify includes the right to delete the root. SourceVault accepts ordinary users being able to create folders in the drive root, but not that. Setup never changes the drive root. If you decide to, an administrator can narrow it so that existing folders keep exactly the access they inherit today:
+
+```powershell
+$root = Get-Item -LiteralPath 'K:\'
+$acl = $root.GetAccessControl('Access')
+$au = New-Object Security.Principal.SecurityIdentifier 'S-1-5-11'   # Authenticated Users
+$acl.PurgeAccessRules($au)
+# On K:\ itself: read, list and create folders. For everything below: Modify, inherited as before.
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($au, 'ReadAndExecute, AppendData', 'None', 'None', 'Allow')))
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($au, 'Modify', 'ContainerInherit, ObjectInherit', 'InheritOnly', 'Allow')))
+$root.SetAccessControl($acl)
+```
+
+Afterwards, ordinary users can no longer create *files* directly in `K:\`. They can still create folders there, and folders and files below keep their access. Windows re-applies the inherited permissions across the drive, which can take a while on a full drive. This snippet has not yet been run on a real drive. Check the result with `Get-Acl K:\ | Format-List Owner, AccessToString` and setup's findings. A drive root owned by an account other than SYSTEM, Administrators or TrustedInstaller (`owner_untrusted`) needs its owner changed first.
+
+**At boot**, if the drive is missing, offline or BitLocker-locked, the service stays stopped and `-Status` reports "the vault drive is not available". Nothing is opened or created. Unlock or attach the drive, then start the service with `Start-Service SourceVault` (as administrator). For a BitLocker data drive, turn on *auto-unlock*. Whether auto-unlock finishes before the service starts at boot is not yet verified.
+
+**Security notes.** A vault on a separate disk is easier to unplug, copy or swap than one on the system drive. A copy can't be decrypted without this computer's TPM. But an **older copy of the same vault**, put back, would be accepted: rolling back a whole vault is not detected. A missing drive also stops SourceVault. Keep the computer and the drive physically secure.
 
 ### Builds (optional): run builds in your Docker containers
 
@@ -295,7 +329,7 @@ Different files never conflict: two people can edit different files of the same 
 
 **Don't**
 - **Don't clear or reset the TPM**, reinstall Windows, or replace the motherboard on a vault computer. The key exists only in this TPM, there is **no recovery key**, and the vault would become permanently unreadable. Check with your administrator before BIOS/UEFI or TPM firmware changes.
-- **Don't try to copy `C:\ProgramData\SourceVault` to another computer as a backup.** The files can only be decrypted by this computer's TPM. There is no supported backup or migration yet.
+- **Don't try to copy the vault folder (`C:\ProgramData\SourceVault`, or your `-VaultRoot` drive) to another computer as a backup.** The files can only be decrypted by this computer's TPM. There is no supported backup or migration yet.
 - Don't add people to *SourceVault Operators* who shouldn't read every project: every operator can open every project, by design (owner decision 2026-10-18).
 - Don't run the editor from anywhere except the Start menu shortcut. Other copies are rejected.
 - Don't screen-share the editor and expect the viewer to see it. Capture exclusion blanks it, though not reliably for every tool, so don't rely on it either way.

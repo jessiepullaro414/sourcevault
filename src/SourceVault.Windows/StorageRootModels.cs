@@ -27,6 +27,8 @@ public static class FindingCodes
     public const string PathNotCanonical = "path_not_canonical";
     public const string VolumeNotFixed = "volume_not_fixed";
     public const string VolumeFilesystemUnsupported = "volume_filesystem_unsupported";
+    public const string VolumeNotLocalDisk = "volume_not_local_disk";
+    public const string VolumeUnavailable = "volume_unavailable";
     public const string RootIsVolumeRoot = "root_is_volume_root";
     public const string Missing = "missing";
     public const string NotADirectory = "not_a_directory";
@@ -70,7 +72,9 @@ public enum DirectoryState { Directory, Missing, NotADirectory, ReparsePoint, Un
 
 public sealed record DirectoryObservation(DirectoryState State, DirectorySecurityInfo? Security);
 
-public sealed record VolumeObservation(DriveType DriveType, string? FileSystem);
+/// <param name="LocalDisk">The drive letter maps to a volume on a non-removable disk on an allowed bus. Defaults to false (fail closed).</param>
+/// <param name="Available">False when the drive letter does not exist or its volume is not ready (offline, BitLocker-locked).</param>
+public sealed record VolumeObservation(DriveType DriveType, string? FileSystem, bool LocalDisk = false, bool Available = true);
 
 /// <summary>Read-only view of the filesystem. Real implementation: <see cref="FileSystemStorageRootInspector"/>.</summary>
 public interface IStorageRootInspector
