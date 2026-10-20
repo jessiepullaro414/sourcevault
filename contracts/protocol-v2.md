@@ -227,3 +227,11 @@ See `docs/vault-any-file-design.md`. The vault stores files of any kind (binary,
 **Limits** (`LimitExceeded`): 1 GiB per file, 25,000 files and 8 GiB per project, and 4 GiB of free disk kept on the vault volume.
 
 **New error code:** `NotText`: the operation needs text and the revision is binary.
+
+## Addition: offline projects (owner decision, 2026-10-20)
+
+A project that fails authentication at service start, or later fails `VerifyProject`, is **offline** instead of stopping the service.
+- `ListProjects` gains `unavailable[]`: `{projectId, name}` for each offline project. They are not in `projects[]`.
+- Every operation on an offline project returns `Unavailable`, except `DeleteProject`.
+- An unexpected entry in the vault root or a damaged project index still refuses the whole service (1066/11).
+- The service writes `%ProgramData%\SourceVault\status\vault.json` (version, time, count of available projects, ids of offline ones; never names) for `Setup-SourceVault.ps1 -Status`.

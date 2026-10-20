@@ -147,7 +147,7 @@ Each project's current state is an encrypted manifest (schema 4): file ids, encr
 - **Every operation** checks that each referenced record exists, has its exact expected size and is not a reparse point.
 - **Every content read** also checks the record's SHA-256 at the end of the stream, and every segment is authenticated before use.
 - **A full check** (`VerifyProject`) decrypts every file; the importer runs it after every import.
-- **Startup** authenticates the project index and every project's manifest, and checks every record's existence and size. Any failure refuses the whole service (codes 11 and 12). Since decision C4 (2026-10-19), a same-size change to a file record is caught when that file is read rather than at startup; a changed manifest is still refused at startup.
+- **Startup** authenticates the project index and every project's manifest, and checks every record's existence and size. A damaged index or an unexpected entry refuses the whole service (code 11). Since 2026-10-20 a project that fails is taken **offline** (listed as unavailable, refusing everything but deletion, reported by id to administrators) and the rest of the vault starts. Since decision C4 (2026-10-19), a same-size change to a file record is caught when that file is read rather than at startup; a changed manifest is still refused at startup.
 
 ### 5.4 Packages
 
@@ -157,6 +157,7 @@ A package (`.svpkg`) carries a project from another computer.
 - Contents in 1 MiB AES-256-GCM chunks bound to the header and the chunk index.
 - An **RSA-PSS-SHA256 signature** by the sender's TPM key over SHA-256 of the header and all chunks. The signature is checked against the hash of the bytes as they arrived **before anything is decrypted**, and the sender must be registered in an administrator-only folder.
 - **Version 2** (coordinator-reviewed) keeps this construction, raises the limits to the vault's, and is streamed: Pack reads files as it writes and stops if one changes; the service spools the ciphertext in its staging folder, verifies the signature, then re-hashes the spool while importing.
+- **People compare a check code,** the first 96 bits of the fingerprint as six groups of four characters. A key with a matching code takes about 2⁹⁶ attempts to make. Software always compares all 256 bits.
 - **Be aware:** the recipient file is public, so anyone can encrypt *to* this PC, but only registered computers' packages are accepted. A package can be imported more than once; each import creates a new project and never overwrites one. A signature proves which registered computer packed the files, not who wrote them.
 
 ### 5.5 Algorithms
@@ -232,7 +233,9 @@ The WPF host owns the service connection through `SourceVault.Client`. The rende
 
 ### 8.3 Reducing accidental export
 
-- **Blocked:** copy, cut, paste, drag-and-drop, the context menu, printing, developer tools, browser shortcuts, downloads, new windows, permission prompts, autofill and password storage. Startup refuses `WEBVIEW2_*` environment overrides and WebView2 registry policy overrides that could apply to the editor.
+- **Clipboard:** nothing copied in the editor reaches the Windows clipboard. Since 2026-10-20 copy and cut work inside the editor: the text stays in the page's memory, and the Windows clipboard gets only a fixed notice. Pasting text in from other programs is allowed, because it brings code in rather than out.
+- **Drops:** files and folders dropped on the explorer are passed to the host unread, and the host reads and imports them. Every other drop, and every drag out, is refused.
+- **Blocked:** dragging out, the context menu, printing, developer tools, browser shortcuts, downloads, new windows, permission prompts, autofill and password storage. Startup refuses `WEBVIEW2_*` environment overrides and WebView2 registry policy overrides that could apply to the editor.
 - **No network, in layers that don't depend on each other:** navigation only to the bundled entry page; a host filter on every resource request from every context; a dead loopback proxy and `MAP * ~NOTFOUND` host resolution; WebRTC removed before page script runs and restricted to the proxy; SmartScreen, crash upload, single sign-on and extensions off; a `default-src 'none'` CSP; and network APIs removed in the page.
   - **Measured (2026-10-19):** from a deliberately unrestricted probe page, loopback listeners received 0 TCP connections and 0 UDP packets, and after 60 s idle the browser process tree held no sockets. A control run with WebView2 defaults reached them, and held TLS connections to Microsoft addresses unprompted.
 - **Capture exclusion:** in vault mode the host asks Windows to exclude the window from capture (`WDA_EXCLUDEFROMCAPTURE`) and reports whether it succeeded. **This is best effort.** Cameras, some capture tools and anyone with access to the session can bypass it.

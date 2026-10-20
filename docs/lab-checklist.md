@@ -35,6 +35,18 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | **Demo (new):** `Build-EditorDemo.ps1`, copy the zip to a PC **without** SourceVault, unzip, run *Start SourceVault Demo*: the window is red and titled *DEMO (not encrypted)*, the demo controls work, and a screenshot captures it. Close it: `%LOCALAPPDATA%\SourceVault\profiles\demo` is empty | a second PC (or this one) |
 | [ ] | **Close warning (new):** with an unsaved edit, closing the window asks *Close anyway?*; **No** keeps it open with the edit; with nothing unsaved it closes without asking | — |
 
+## Easier everyday use (2026-10-20; synthetic files only)
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | **Clipboard:** in the installed editor, Ctrl+C a line, paste it into another vault file (it pastes the line); paste into Notepad (it pastes only the *Copied inside SourceVault…* notice). Copy text in Notepad and Ctrl+V into the editor (it pastes). Lock and unlock: Ctrl+V pastes the notice text no more | — |
+| [ ] | **Drops:** drag a file and a folder (containing a `.git` folder) from Explorer onto the Explorer panel: they are added, `.git` skipped. Drop on the editor, a tab or the inspector: nothing happens. Drag text out of the editor into Notepad: nothing arrives | — |
+| [ ] | **Import a folder:** the folder dialog, the skipped list, Import, the new project opens; a second import with the same name says it is taken | — |
+| [ ] | **Open folder** in the build view opens the output folder in Explorer | builds |
+| [ ] | **Guided setup:** double-click `SourceVault Setup.cmd` on a test PC: the elevation prompt, the questions, the summary, the install. Then Start menu → *SourceVault Administration*: status ends with *All good*; add a second account (the sign-out prompt), remove it (the "until they sign out" note) | admin; a test PC |
+| [ ] | **Offline project:** `scripts/lab/Test-VaultTamper.ps1` now expects the service to start with the tampered project offline and `status\vault.json` to list it; the editor shows it struck through; Delete works; `-Status` warns | admin; service down |
+| [ ] | **Check codes:** Pack (window and `init`), `--export-recipient` and `-RegisterSender` all show the same six-group code for the same key | second PC |
+
 ## Any-file vault (no sign-out or reboot; synthetic files only)
 
 Generate the files; never use real source or downloaded binaries. Start from a vault backup you can restore, because **the upgrade is one-way**: after the first change to a project, an older version refuses the vault.

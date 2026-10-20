@@ -36,7 +36,7 @@ namespace SourceVault.Pack
                 PackCore.WriteNew(path, sender.ToJson());
                 output.WriteLine(created ? "Created this computer's signing key in its TPM (it cannot be exported)." : "This computer already has its signing key; wrote its sender file again.");
                 output.WriteLine($"Sender file: {path}");
-                output.WriteLine($"Fingerprint: {sender.FingerprintText}");
+                output.WriteLine($"Check code: {sender.FingerprintText}");
                 output.WriteLine("It holds no secrets. Give it to the vault PC's administrator, who registers it with: Setup-SourceVault.ps1 -RegisterSender <file>");
                 return 0;
             }
@@ -71,16 +71,16 @@ namespace SourceVault.Pack
             output.WriteLine($"{plan.Files.Count} file(s) to pack ({plan.TotalBytes:N0} bytes); {plan.Skipped.Count} skipped:");
             foreach (var skipped in plan.Skipped) output.WriteLine($"  skipped {skipped.Path}  ({skipped.Reason})");
             if (PackCore.Problem(plan) is { } problem) throw new PackException(problem);
-            output.WriteLine($"Encrypting for the vault PC \"{recipient.Computer}\", recipient fingerprint:");
+            output.WriteLine($"Encrypting for the vault PC \"{recipient.Computer}\", recipient check code:");
             output.WriteLine($"  {recipient.FingerprintText}");
-            output.WriteLine("Check that this matches the fingerprint the vault PC showed when its recipient file was exported.");
+            output.WriteLine("Check that this matches the check code the vault PC showed when its recipient file was exported.");
             if (dryRun) { output.WriteLine("Dry run: no package was written."); return 0; }
 
             var target = Path.GetFullPath(outPath!);
             if (File.Exists(target)) throw new PackException($"{target} already exists; choose a new file name.");
             using var key = (openSigner ?? SenderKey.Open)();
             var sender = PackCore.SenderFile(key);
-            output.WriteLine($"Signing as \"{sender.Computer}\", sender fingerprint {sender.FingerprintText}");
+            output.WriteLine($"Signing as \"{sender.Computer}\", sender check code {sender.FingerprintText}");
             if (!yes)
             {
                 output.Write("Type YES to write the encrypted package: ");

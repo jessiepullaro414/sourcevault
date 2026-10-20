@@ -26,7 +26,11 @@ WHAT IS IN IT
   - "Demo controls" (bottom right) make the events other people and the service cause: someone else edits or
     deletes the open file, replaces it with a binary, a Windows lock, session expiry, a failed unlock, a failed
     build. Click its title to fold it.
-  - Copy, paste, drag and right-click are blocked, as in the vault, and the editor has no network access.
+  - Copy and paste work inside the editor, as in the vault: what you copy never reaches the Windows clipboard (it
+    gets a short notice instead), and pasting from other programs works. Dragging out and right-click are blocked,
+    and the editor has no network access.
+  - "Import a folder..." and dropping files on the explorer make up demo files: NOTHING IS READ FROM THIS PC.
+  - Demo controls also take a project offline, as when one fails its integrity check.
 
 A SHORT DEMO
   1. Open "Synthetic C++ demo", open src/gadget.cpp, press Alt+O (header) and Ctrl+Shift+O (outline).
