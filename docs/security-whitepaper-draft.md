@@ -106,7 +106,11 @@ SourceVault keeps a team's source code encrypted on one Windows PC, so that it i
 
 SourceVault does not require BitLocker or Secure Boot on the Windows volume. A thief with the **whole PC** cannot read the vault from the disk alone, because the key never leaves the TPM. But if the Windows volume is unencrypted, they can modify it offline, for example by planting a service, and on the next boot run code as an administrator on that same TPM, which is outside this model and gives access to the key.
 
-**Recommendation (not yet in setup or the lab checklist):** require BitLocker with TPM and a startup PIN on the Windows volume and the vault drive, plus Secure Boot, and have `Setup-SourceVault.ps1 -Status` report them. This is an owner decision still to make (section 14).
+**Status (2026-10-20):**
+- **The deployment PC has BitLocker and Secure Boot on.** This is as reported by the owner; it is not yet confirmed by a recorded check.
+- **`Setup-SourceVault.ps1 -Status` now reports both,** for the Windows drive and the vault drive, and warns if either is off. Running it on the vault PC is a lab row.
+- **Every vault PC needs them.** SourceVault reports them but does not enforce them.
+- **Still recommended:** a BitLocker startup PIN. With TPM-only unlock, Windows starts without one, and the remaining attacks need the running machine (outside this model).
 
 ---
 
@@ -315,7 +319,7 @@ SourceVault does **not** claim:
 
 | Risk | Current mitigation | Status |
 |---|---|---|
-| Stolen whole PC with an unencrypted Windows volume (section 4.5) | None in SourceVault | **Open:** recommend requiring BitLocker (TPM + PIN) and Secure Boot |
+| Stolen whole PC with an unencrypted Windows volume (section 4.5) | BitLocker and Secure Boot on the deployment PC (owner-reported); `-Status` warns if either is off | Mitigated on the deployment PC once the `-Status` lab row confirms it; a startup PIN is still recommended |
 | Administrator or same-user malware | Out of scope; documented | Accepted |
 | Operator exports code through a build | Output folder and artifact filtering; documented as an export path | Accepted; owner-approval release step not built |
 | Project key in memory during a read | Unwrapped once per operation, zeroed after, never cached | Accepted trade-off (owner, 2026-10-19) |
@@ -332,7 +336,7 @@ SourceVault does **not** claim:
 ## 14. Before this paper can be final
 
 1. **Run the lab checklist** ([lab-checklist.md](lab-checklist.md)): reboot and power loss, the installed editor and importer, package import on real TPMs, real Docker builds, the deployment drive, the any-file vault at scale, capture tools, and the remaining native editor checks. Record each result in `status.md` and update this paper.
-2. **Owner decisions** ([next-tasks.md](next-tasks.md)): the operator and administrator threat model, intentional-export policy, supported hardware and OS, signing and release ownership, and whether to require BitLocker and Secure Boot (section 4.5).
+2. **Owner decisions** ([next-tasks.md](next-tasks.md)): the operator and administrator threat model, intentional-export policy, supported hardware and OS, signing and release ownership, and whether to add a BitLocker startup PIN (section 4.5; BitLocker and Secure Boot are on the deployment PC).
 3. **Independent security audit** by a third party, covering the cryptographic formats (`SVR1`, `SVR2`, manifests, packages v1 and v2), the service's access checks, the editor's lockdown and the build path. Development-time reviews by the coordinator and workers are not an audit.
 4. **Measurements:** TPM and AES-GCM throughput at 25,000 files, replacing this paper's estimates.
 
