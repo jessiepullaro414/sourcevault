@@ -28,6 +28,13 @@ Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-de
 - **Unsaved edits that survive a crash:** designed in [drafts-design.md](drafts-design.md); **waiting for owner decisions D1–D4 and coordinator review C1–C3.**
 - **Any-file vault (2026-10-19):** binary, UTF-16 and large files up to 1 GiB, 25,000 files and 8 GiB per project: record format `SVR2` with a per-project key, manifest schema 4, uploads in parts, streamed builds (build pipe v2), the importer and Pack on package format v2, and the editor's info panel, add/replace from disk, revert and keep mine/theirs ([vault-any-file-design.md](vault-any-file-design.md)). In process only; its lab rows are in the checklist. Upgrading a vault is one-way.
 
+**Internal security review (2026-10-20).** Five findings from reading the code; none was exploited here. This is not an independent audit.
+1. ~~**Docker pipe not checked (high).**~~ Fixed 2026-10-20. The build service now requires the engine's named pipe to be owned by SYSTEM or Administrators before sending anything; otherwise the build stops with `EngineUntrusted`. It also connects for identification only. Before, a local user could create `\\.\pipe\docker_engine` while Docker was down and receive a build's plaintext source.
+2. **Artifact folder not checked (medium).** The build service doesn't check `artifactRoot` and its parents for links or ordinary-user write access, as the vault root is checked. With a parent that users can rename (the default data-drive ACL), a non-operator could redirect build output to their own folder.
+3. **Startup hooks not disabled (medium).** No client sets `StartupHookSupport=false`, so `DOTNET_STARTUP_HOOKS` runs any code inside an installed, hash-pinned client. The executable and hash checks are therefore weaker than the docs say against the operator's own programs. The .NET profiler variables still apply after that fix.
+4. **Package spool skips the free-space reserve (low).** The spool (up to about 8 GiB) doesn't check the 4 GiB reserve that uploads check.
+5. **`--delete-source` deletes by path (low).** It deletes by path after verifying the file through a handle. A writer to the source folder could swap the path between the two; deleting through the verified handle closes the gap.
+
 Still open:
 
 1. **Editor native validation (T06).** The interactive items are in the lab checklist. Still for development: anything those runs turn up. Pagefile and hibernation persistence remain out of scope and documented.

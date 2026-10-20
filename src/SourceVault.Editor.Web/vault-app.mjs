@@ -46,6 +46,7 @@ const BUILD_REASONS = {
   UnknownTarget: 'that build target no longer exists', VaultError: 'the vault could not read the project',
   SourceUnavailable: 'a file in the vault failed its integrity check while it was copied; nothing was built from it',
   CopyTimedOut: 'copying the project into the container took longer than 30 minutes',
+  EngineUntrusted: 'something other than the Docker engine answered on its connection, so nothing was sent to it; tell your administrator',
 };
 const duration = (from, to) => { const s = Math.max(0, (new Date(to) - new Date(from)) / 1000); return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`; };
 const formatBytes = n => n < 1024 ? `${n} bytes` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MiB` : `${(n / 1073741824).toFixed(2)} GiB`;

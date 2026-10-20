@@ -30,6 +30,7 @@ public static class BuildRunner
     {
         ContainerInfo info;
         try { info = await engine.InspectAsync(target.Container, ct).ConfigureAwait(false); }
+        catch (Exception e) when (IsUntrusted(e)) { return Unavailable("EngineUntrusted"); } // nothing was sent
         catch (DockerException e) { return Unavailable(e.Status == 404 ? "ContainerNotFound" : "EngineUnavailable"); }
         catch (Exception e) when (e is HttpRequestException or IOException or TimeoutException) { return Unavailable("EngineUnavailable"); }
         if (!info.Running) return Unavailable("ContainerNotRunning");
@@ -62,6 +63,7 @@ public static class BuildRunner
             }
             return new(BuildState.Succeeded, null, 0, WithDroppedNotice(run.Output, published), run.Truncated, published);
         }
+        catch (Exception e) when (IsUntrusted(e)) { return Unavailable("EngineUntrusted"); } // a later connection: refused before sending
         catch (DockerException) { return Unavailable("EngineFailed"); }
         catch (Exception e) when (e is HttpRequestException or IOException or UnauthorizedAccessException) { return Unavailable("EngineFailed"); }
         finally
@@ -73,6 +75,13 @@ public static class BuildRunner
     }
 
     private static BuildOutcome Unavailable(string reason) => new(BuildState.Unavailable, reason, null, [], false, null);
+
+    // The engine's pipe wasn't the engine's (HttpClient wraps connection failures).
+    private static bool IsUntrusted(Exception? e)
+    {
+        for (; e is not null; e = e.InnerException) if (e is DockerEngineUntrustedException) return true;
+        return false;
+    }
 
     // Streams the source into sourcePath as a tar: a producer writes tar entries into a pipe while the engine reads the
     // upload body from it, so memory is the pipe's window. Null on success; otherwise the build's outcome.
