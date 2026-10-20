@@ -33,8 +33,9 @@ public sealed record BuildConfig(string ArtifactRoot, IReadOnlyList<BuildTarget>
     private static readonly Regex PipeEngine = new(@"^npipe://\./pipe/([A-Za-z0-9._-]{1,128})$", RegexOptions.CultureInvariant);
     private static readonly Regex TcpEngine = new(@"^tcp://(127\.0\.0\.1|\[::1\]):([0-9]{1,5})$", RegexOptions.CultureInvariant);
     private static readonly Regex LinuxPath = new("^(/[A-Za-z0-9._-]+){2,16}$", RegexOptions.CultureInvariant);
-    // Windows container paths are spliced into a cmd.exe cleanup line, so only plain characters are allowed.
-    private static readonly Regex WindowsPath = new(@"^[A-Za-z]:(\\[A-Za-z0-9._ -]+){2,16}$", RegexOptions.CultureInvariant);
+    // Windows container paths go into a cmd.exe cleanup line as bare words: only plain characters, and no spaces, since
+    // quoting doesn't survive the engine (it re-escapes quotes in a way cmd.exe doesn't read; see BuildRunner.CleanupCommand).
+    private static readonly Regex WindowsPath = new(@"^[A-Za-z]:(\\[A-Za-z0-9._-]+){2,16}$", RegexOptions.CultureInvariant);
     private static readonly Regex Thumbprint = new("^[0-9A-Fa-f]{40}$", RegexOptions.CultureInvariant);
 
     /// <param name="vaultFolder">The folder holding the configured vault; <c>artifactRoot</c> may not be inside it or contain it.</param>
@@ -128,7 +129,7 @@ public sealed record BuildConfig(string ArtifactRoot, IReadOnlyList<BuildTarget>
             var value = Text(item, field, 1, 200);
             var segments = value.Split(platform == "linux" ? '/' : '\\');
             if (!pathRule.IsMatch(value) || segments.Any(s => s is "." or "..") || value.EndsWith(' ') || value.EndsWith('.'))
-                throw new BuildConfigException($"{where}: {field} must be an absolute {platform} path at least two folders deep, like {(platform == "linux" ? "/sourcevault/src" : @"C:\sourcevault\src")}.");
+                throw new BuildConfigException($"{where}: {field} must be an absolute {platform} path at least two folders deep, with only letters, digits, '.', '_' and '-' in its names, like {(platform == "linux" ? "/sourcevault/src" : @"C:\sourcevault\src")}.");
             return value;
         }
         var sourcePath = ContainerPath("sourcePath");
