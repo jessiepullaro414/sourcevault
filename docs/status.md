@@ -81,6 +81,14 @@ Also on 2026-10-19, merged from background sessions:
   - registry and environment overrides refused;
   - network APIs removed in the renderer.
 - **Both are tested in process only.** Their lab checks are in [lab-checklist.md](lab-checklist.md).
+**Offline deployment drive** (2026-10-19, [deployment-kit-design.md](deployment-kit-design.md)):
+- `scripts\Build-DeploymentKit.ps1` assembles, on a connected PC:
+  - SourceVault and SourceVault Pack;
+  - Docker for Windows and Linux;
+  - WSL and Ubuntu;
+  - both .NET SDK build images, fetched from Microsoft's registry without Docker and checked digest by digest.
+- `Deploy-SourceVault.ps1` sets up a fresh, offline Windows 11 Pro PC from the drive, in resumable phases.
+- **Tested here:** pinned-source metadata, the image fetch in metadata mode (including refusing a wrong image ID), and the drive integrity check (intact, changed, extra and missing files). Everything that installs software or loads images is a lab step.
 ## Gates still open
 
 Passed on this machine and no longer open: service identity, key provisioning under it with export refused, vault-root and catalog gates, pipe DACL, and the client executable path check (see the Windows service row).

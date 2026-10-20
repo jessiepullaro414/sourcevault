@@ -199,6 +199,38 @@ To publish a kind anyway, add it to the target, for example `"keepFileTypes": ["
 
 ---
 
+### Deploying from a drive (no internet)
+
+One drive can set up a SourceVault PC with no internet: SourceVault, Docker for Windows and Linux, WSL with Ubuntu, both build images and the scripts. The design is in `docs/deployment-kit-design.md`.
+
+**Build the drive** on a connected PC, as a normal user, from the repository. About 4.5 GB is downloaded; Docker isn't needed.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\Build-DeploymentKit.ps1 -Destination E:\SourceVaultKit -RecordNewHashes
+```
+- `-RecordNewHashes` is needed on the first run only. Docker publishes no checksums for its archives, so their SHA-256 is recorded in `installer\kit-sources.json`; review and commit it.
+- Every other download, and every image layer, is checked against a pinned hash.
+- The drive ends with `kit-manifest.sha256`, a hash of every file on it.
+
+**Deploy** on the target: Windows 11 Pro, Enterprise or Education with a TPM 2.0, from an elevated PowerShell on the drive.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Deploy-SourceVault.ps1
+```
+1. It checks the drive, the Windows edition, the TPM and virtualization, and asks where the vault goes.
+2. It turns on the Windows features. **Restart, then run it again.**
+3. It installs the following from the drive:
+   - Docker's Windows engine;
+   - WSL with Ubuntu and Docker's Linux engine (no network);
+   - both build containers, from the drive's images, each checked by its image ID;
+   - SourceVault itself, with builds set up for both targets.
+4. **Sign out and back in, then run it again.** It writes this PC's recipient file to the drive's `transfer\` folder and shows its fingerprint.
+
+**Bring projects in (two short legs):**
+1. Take `transfer\recipient-<PC>.json` to the computer where the code lives, by any channel; it's public. Encrypt the project there with SourceVault Pack.
+2. Put the `.svpkg` in the drive's `transfer\` folder, by any channel; it's ciphertext. On the vault PC, run `Deploy-SourceVault.ps1 -ImportPackages`. That source computer must be registered once with `Setup-SourceVault.ps1 -RegisterSender`.
+
+**Be aware:**
+- `kit-manifest.sha256` catches damage and changes, but it isn't signed. Keep the drive in your custody.
+- The Linux build target runs in the deploying user's WSL. A sign-in task keeps it running while that user is signed in.
 ## Part 2: Using SourceVault
 
 ### Open the editor

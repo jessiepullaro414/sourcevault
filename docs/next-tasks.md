@@ -20,6 +20,8 @@ Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-de
 - **Vault on another drive (2026-10-19):** `Setup-SourceVault.ps1 -VaultRoot` ([vault-location-design.md](vault-location-design.md)).
 - **Editor network lockdown (2026-10-19):** Monaco only, with no route to the network ([editor-host.md](editor-host.md)).
 
+- **Offline deployment drive (2026-10-19):** `Build-DeploymentKit.ps1` and `Deploy-SourceVault.ps1`, with pinned sources and images fetched without Docker ([deployment-kit-design.md](deployment-kit-design.md)). Its lab run is in the checklist.
+
 Still open:
 
 1. **Editor native validation (T06).** The interactive items are in the lab checklist. Still for development: anything those runs turn up. Pagefile and hibernation persistence remain out of scope and documented.

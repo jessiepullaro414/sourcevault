@@ -68,6 +68,19 @@ The full steps are in [editor-preview-checks.md](editor-preview-checks.md), "Own
 | [ ] | A `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment variable is refused (step 5) | — |
 | [ ] | A registry `AdditionalBrowserArguments` policy for the editor is refused, and one for another program isn't (step 6; undo afterwards) | admin; lab VM; machine policy |
 | [ ] | Crash data: the profile, including `Crashpad`, is gone after a vault session, and nothing is reported to Microsoft (step 7) | — |
+## Offline deployment drive
+
+Builds on a connected PC, then a **fresh Windows 11 Pro PC with a TPM 2.0 and no internet** (needs restarts and a sign-out). Steps are in the user guide, "Deploying from a drive".
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | `Build-DeploymentKit.ps1 -Destination <drive>\SourceVaultKit -RecordNewHashes`: every download verified; both images saved; review and commit the recorded Docker hashes in `installer\kit-sources.json` | about 4.5 GB download |
+| [ ] | `Test-DeploymentKit.ps1` on the drive: OK. Change one byte of any file: FAIL | — |
+| [ ] | On the target: `Deploy-SourceVault.ps1` phases 1-2, then restart | admin; **restart** |
+| [ ] | Run it again: the Windows engine, WSL and Ubuntu, and the Linux engine come up from the drive. **Record the Windows container's isolation and copy check**, and that both images load with their pinned image IDs | admin |
+| [ ] | SourceVault is installed in the chosen vault location, with builds for the targets that work; `-Status` OK. Sign out and in, run it again: `transfer\recipient-<PC>.json` is written | admin; **sign-out** |
+| [ ] | Two legs: Pack encrypts the sample to that recipient on the source computer; `-ImportPackages` imports it; build it on each target | source computer |
+| [ ] | After a restart and sign-in, the WSL keep-alive task is running and a Linux build still works | **restart** |
 ## Builds (no sign-out or reboot)
 
 | Done | Test | Needs |

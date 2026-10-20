@@ -4,7 +4,10 @@
 # 2026-10-18). Needs Windows 11 Pro/Enterprise/Education with the Containers and Hyper-V features, and a Docker engine
 # in Windows-container mode.
 #
-#   New-WindowsBuildContainer.ps1 [-Name sourcevault-build-windows] [-MemoryGB 4] [-Isolation auto|process|hyperv] [-Replace]
+#   New-WindowsBuildContainer.ps1 [-Name sourcevault-build-windows] [-MemoryGB 4] [-Isolation auto|process|hyperv] [-Replace] [-ImageArchive <images\sdk-windows.tar>]
+#
+# -ImageArchive (offline, the deployment drive): loads the image from that archive instead of pulling, and accepts it
+# only if its image ID is the pinned configuration digest below.
 #
 # What it does, with the docker CLI on this PC:
 #   1. Checks that the engine is running Windows containers.
@@ -27,7 +30,8 @@ param(
     [ValidateRange(1, 64)][int]$MemoryGB = 4,
     [ValidateSet('auto', 'process', 'hyperv')][string]$Isolation = 'auto',
     [ValidatePattern('^npipe:////\./pipe/[A-Za-z0-9._-]{1,128}$')][string]$Engine = 'npipe:////./pipe/docker_engine',
-    [switch]$Replace
+    [switch]$Replace,
+    [string]$ImageArchive
 )
 $ErrorActionPreference = 'Stop'
 # Talk to exactly the engine build.json names (default: the standard Windows engine pipe, served by Microsoft's
@@ -41,6 +45,8 @@ $imageTag = '10.0.402-windowsservercore-ltsc2025'
 $imageDigest = 'sha256:c3fad2bdfc6637eef231ed3acb6718737643b88ca4877233ef29053ae3b329e5'
 $sdkVersion = '10.0.402'
 $image = "$imageRepo@$imageDigest"
+# Its configuration digest: the image ID after `docker load` (kit-sources.json).
+$imageId = 'sha256:22585ab055b5a2dfee1cc9311445592a1000e5dfbd92c16828fa4721c9a33854'
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') { throw 'Invalid container name.' }
 
 function Invoke-Docker {
@@ -70,11 +76,21 @@ if ((Invoke-Docker -AllowFailure container inspect --format '{{.Name}}' $Name) -
     Ok "removed the old '$Name'"
 }
 
-Write-Host "Pulling $image (about 2.7 GB; Docker verifies every layer against the digest)..."
-Invoke-Docker pull $image | Out-Null
-$digests = Invoke-Docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' $image
-if (!(@($digests) -contains $image)) { throw 'The pulled image does not carry the pinned digest; not creating the container.' }
-Ok 'image pulled and matches the pinned digest'
+if ($ImageArchive) {
+    $archive = (Resolve-Path -LiteralPath $ImageArchive).Path
+    Write-Host "Loading the image from $archive (no download; a few minutes)..."
+    Invoke-Docker load -i $archive | Out-Null
+    $loaded = (Invoke-Docker -AllowFailure image inspect --format '{{.Id}}' $imageId) -join ''
+    if ($loaded -ne $imageId) { throw "The archive did not load the pinned image $imageId; not creating the container." }
+    $image = $imageId # create the container from the verified image ID
+    Ok 'image loaded from the archive and matches the pinned image ID'
+} else {
+    Write-Host "Pulling $image (about 2.7 GB; Docker verifies every layer against the digest)..."
+    Invoke-Docker pull $image | Out-Null
+    $digests = Invoke-Docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' $image
+    if (!(@($digests) -contains $image)) { throw 'The pulled image does not carry the pinned digest; not creating the container.' }
+    Ok 'image pulled and matches the pinned digest'
+}
 
 $keepAlive = 'while ($true) { Start-Sleep -Seconds 3600 }'
 $common = @('--network', 'none', '--memory', "${MemoryGB}g", '--restart', 'unless-stopped',

@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "comment": "Pinned sources for the offline deployment drive (docs/deployment-kit-design.md). Change versions only in a reviewed commit. A null sha256 is recorded by Build-DeploymentKit.ps1 -RecordNewHashes on first download (trust on first use) and must then be committed.",
+  "files": [
+    {
+      "name": "docker-windows",
+      "path": "docker-windows/docker-29.9.1.zip",
+      "url": "https://download.docker.com/win/static/stable/x86_64/docker-29.9.1.zip",
+      "size": 49729028,
+      "sha256": null,
+      "note": "Docker's static Windows engine and CLI. Docker publishes no checksum: trust on first use."
+    },
+    {
+      "name": "install-docker-ce",
+      "path": "docker-windows/install-docker-ce.ps1",
+      "url": "https://raw.githubusercontent.com/microsoft/Windows-Containers/Main/helpful_tools/Install-DockerCE/install-docker-ce.ps1",
+      "size": 23367,
+      "sha256": "09ded921d046ee98723ed533e6e517691c744a916769c181aa1c4a2dc784e63e",
+      "note": "Microsoft's installer; read in full 2026-10-19. Run offline with -DockerPath/-DockerDPath."
+    },
+    {
+      "name": "docker-linux",
+      "path": "wsl/docker-29.9.1.tgz",
+      "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.9.1.tgz",
+      "size": 86364663,
+      "sha256": null,
+      "note": "Docker's static Linux engine and CLI for the WSL distro. Trust on first use."
+    },
+    {
+      "name": "wsl",
+      "path": "wsl/wsl.3.0.3.0.x64.msi",
+      "url": "https://github.com/microsoft/WSL/releases/download/3.0.3/wsl.3.0.3.0.x64.msi",
+      "size": 367575040,
+      "sha256": "ae977286974255bd26bf925f00f40f5692c6b2084155cbc0563c09aea091f211",
+      "note": "SHA-256 from GitHub's release metadata."
+    },
+    {
+      "name": "ubuntu",
+      "path": "wsl/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+      "url": "https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz",
+      "size": 356739129,
+      "sha256": "8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea",
+      "note": "SHA-256 from Ubuntu's SHA256SUMS for release 20240423."
+    }
+  ],
+  "images": [
+    {
+      "name": "sdk-linux",
+      "path": "images/sdk-linux.tar",
+      "repository": "dotnet/sdk",
+      "registry": "mcr.microsoft.com",
+      "tag": "10.0.402",
+      "manifest": "sha256:3a48280a9a7c6276c3eeaba1efa6a08820f18c84fb9e6274c187719ecfaf9fbc",
+      "imageId": "sha256:9cd0d6fa04def99891bf4d5a29eb9a3878b6041f9cc25cb389ea0df2177d23fd",
+      "note": "linux/amd64 manifest of the 10.0.402 index sha256:0d99ebf1...5ffa (the digest New-BuildContainer.ps1 pins)."
+    },
+    {
+      "name": "sdk-windows",
+      "path": "images/sdk-windows.tar",
+      "repository": "dotnet/sdk",
+      "registry": "mcr.microsoft.com",
+      "tag": "10.0.402-windowsservercore-ltsc2025",
+      "manifest": "sha256:c3fad2bdfc6637eef231ed3acb6718737643b88ca4877233ef29053ae3b329e5",
+      "imageId": "sha256:22585ab055b5a2dfee1cc9311445592a1000e5dfbd92c16828fa4721c9a33854",
+      "note": "The digest New-WindowsBuildContainer.ps1 pins."
+    }
+  ]
+}

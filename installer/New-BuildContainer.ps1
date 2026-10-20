@@ -1,7 +1,10 @@
 # Creates the Linux build container for SourceVault builds: Microsoft's .NET SDK image, pinned by digest, on the
 # Docker engine inside a WSL distro (docs/files-history-builds-design.md, section 4; owner choice 2026-10-18).
 #
-#   New-BuildContainer.ps1 -Distro Ubuntu-24.04 [-Name sourcevault-build-linux] [-MemoryGB 4] [-Replace]
+#   New-BuildContainer.ps1 -Distro Ubuntu-24.04 [-Name sourcevault-build-linux] [-MemoryGB 4] [-Replace] [-ImageArchive <images\sdk-linux.tar>]
+#
+# -ImageArchive (offline, the deployment drive): loads the image from that archive instead of pulling, and accepts it
+# only if its image ID is the pinned configuration digest below.
 #
 # What it does, all inside the distro (as root):
 #   1. Checks that Docker is installed and its engine is running.
@@ -22,7 +25,8 @@ param(
     [Parameter(Mandatory)][string]$Distro,
     [string]$Name = 'sourcevault-build-linux',
     [ValidateRange(1, 64)][int]$MemoryGB = 4,
-    [switch]$Replace
+    [switch]$Replace,
+    [string]$ImageArchive
 )
 $ErrorActionPreference = 'Stop'
 # Pinned 2026-10-18: tag 10.0.402 (the SDK this repository builds with), multi-platform index digest from
@@ -31,6 +35,8 @@ $imageRepo = 'mcr.microsoft.com/dotnet/sdk'
 $imageTag = '10.0.402'
 $imageDigest = 'sha256:0d99ebf1ccad15037b5c98c9fe8979d6b8dbac23812feae2277a0b277b5c5ffa'
 $image = "$imageRepo@$imageDigest"
+# The linux/amd64 image of that index: its configuration digest is the image ID after `docker load` (kit-sources.json).
+$imageId = 'sha256:9cd0d6fa04def99891bf4d5a29eb9a3878b6041f9cc25cb389ea0df2177d23fd'
 
 if ($Distro -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw 'Invalid distro name.' }
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') { throw 'Invalid container name.' }
@@ -56,11 +62,23 @@ if ($exists) {
     Ok "removed the old '$Name'"
 }
 
-Write-Host "Pulling $image (about 335 MB for amd64; Docker verifies every layer against the digest)..."
-Invoke-Wsl "docker pull '$image'" | Out-Null
-$digests = Invoke-Wsl "docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' '$image'"
-if (!(@($digests) -contains $image)) { throw "The pulled image does not carry the pinned digest; not creating the container." }
-Ok "image pulled and matches the pinned digest"
+if ($ImageArchive) {
+    $archive = (Resolve-Path -LiteralPath $ImageArchive).Path
+    $linuxPath = (& wsl.exe -d $Distro -u root -- wslpath -u $archive) -join ''
+    if ($LASTEXITCODE -ne 0 -or $linuxPath -notmatch '^/') { throw "WSL could not see $archive." }
+    Write-Host "Loading the image from $archive (no download)..."
+    Invoke-Wsl "docker load -i '$($linuxPath -replace "'", "'\''")'" | Out-Null
+    $loaded = (Invoke-Wsl "docker image inspect --format '{{.Id}}' '$imageId' 2>/dev/null" -AllowFailure) -join ''
+    if ($loaded -ne $imageId) { throw "The archive did not load the pinned image $imageId; not creating the container." }
+    $image = $imageId # create the container from the verified image ID
+    Ok "image loaded from the archive and matches the pinned image ID"
+} else {
+    Write-Host "Pulling $image (about 335 MB for amd64; Docker verifies every layer against the digest)..."
+    Invoke-Wsl "docker pull '$image'" | Out-Null
+    $digests = Invoke-Wsl "docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' '$image'"
+    if (!(@($digests) -contains $image)) { throw "The pulled image does not carry the pinned digest; not creating the container." }
+    Ok "image pulled and matches the pinned digest"
+}
 
 $limitGB = $MemoryGB
 Invoke-Wsl @"
