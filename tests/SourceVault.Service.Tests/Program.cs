@@ -26,9 +26,50 @@ Check(SourceVault.Service.Program.ParseCommand(["metadata-probe"]) == "metadata-
 Check(SourceVault.Service.Program.ParseCommand(["vault-root-check"]) == "vault-root-check");
 Check(SourceVault.Service.Program.ParseCommand(["vault-root-sddl"]) == "vault-root-sddl");
 Reject(() => SourceVault.Service.Program.ParseCommand(["vault-root-check", @"D:\elsewhere"]));
-// The vault root is fixed under ProgramData, never supplied by config or arguments.
-Check(VaultRoot.Path == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SourceVault", "vault"));
-Check(Path.IsPathFullyQualified(VaultRoot.Path));
+// The vault root comes only from sourcevault.service.json: schema 1 means the default under ProgramData, schema 2
+// names an administrator-chosen root. Never from arguments or the environment.
+Check(VaultRoot.DefaultPath == Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SourceVault", "vault"));
+Check(Path.IsPathFullyQualified(VaultRoot.DefaultPath));
+Check(Parse(valid).VaultRootPath == VaultRoot.DefaultPath);
+string V2(object? root) => "{\"schemaVersion\":2,\"mode\":\"MetadataOnly\",\"keyName\":\"SourceVault.Lab.Unit\",\"vaultRoot\":" + JsonSerializer.Serialize(root) + "}";
+Check(Parse(V2(@"K:\SourceVault\vault")).VaultRootPath == @"K:\SourceVault\vault");
+Check(Parse(V2(@"K:\SourceVault\vault")).KeyName == "SourceVault.Lab.Unit");
+Check(Parse(V2(@"D:\Data\Work\SV\vault")).VaultRootPath == @"D:\Data\Work\SV\vault");
+Check(Parse(V2(VaultRoot.DefaultPath)).VaultRootPath == VaultRoot.DefaultPath);
+var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+foreach (var root in new object?[] { null, 7, "", "K:", @"K:\", @"K:\vault", @"K:\SourceVault\vault\", "K:/SourceVault/vault", @"K:\SourceVault\..\vault",
+    @"K:\SourceVault\.\vault", @"K:\SourceVault\vault.", @"K:\SourceVault\vault ", @"K:\SourceVault\CON", @"K:\SourceVault\nul.txt", @"SourceVault\vault",
+    @"\SourceVault\vault", @"K:SourceVault\vault", @"\server\share\SourceVault\vault", @"\?\K:\SourceVault\vault", @"\.\K:\SourceVault\vault",
+    @"K:\SourceVault\va*lt", "K:\\SourceVault\\vault\n", @"K:\" + new string('a', 60) + @"\" + new string('b', 60),
+    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "SourceVault", "vault"),
+    Path.Combine(ScmHost.InstallRoot, "vault"), Path.Combine(programData, "SourceVault"), Path.Combine(programData, "SourceVault", "config"),
+    Path.Combine(programData, "SourceVault", "config", "vault"), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Temp", "vault") })
+    Reject(() => Parse(V2(root)));
+// Schema and field set stay strict: v1 never carries vaultRoot, v2 always does, nothing else is accepted.
+var rootField = ",\"vaultRoot\":" + JsonSerializer.Serialize(@"K:\SourceVault\vault");
+Check(V2(@"K:\SourceVault\vault").Contains(rootField)); // the edits below really change the document
+Reject(() => Parse(valid.Replace("}", rootField + "}")));
+Reject(() => Parse(V2(@"K:\SourceVault\vault").Replace(rootField, "")));
+Reject(() => Parse(V2(@"K:\SourceVault\vault").Replace("\"schemaVersion\":2", "\"schemaVersion\":3")));
+Reject(() => Parse(V2(@"K:\SourceVault\vault").Replace("}", rootField.Replace("SourceVault", "Other") + "}")));
+Reject(() => Parse(V2(@"K:\SourceVault\vault").Replace("}", ",\"extra\":1}")));
+Reject(() => Parse(V2(@"K:\SourceVault\vault").Replace("SourceVault.Lab.Unit", "SourceVault.Production")));
+Check(VaultRoot.Overlaps(@"K:\A\vault", @"k:\a") && VaultRoot.Overlaps(@"K:\A", @"K:\A\vault\") && !VaultRoot.Overlaps(@"K:\AB\vault", @"K:\A"));
+
+// The startup gate: a missing, offline or locked drive is code 17; anything else untrusted is code 10.
+uint Refusal(Action action) { try { action(); } catch (StartupRefusedException e) { count++; return e.Code; } throw new InvalidOperationException("Refusal expected"); }
+Check(Refusal(() => VaultRoot.RequireTrusted(@"K:\SourceVault\vault", new SyntheticVolume(new(DriveType.NoRootDirectory, null, Available: false)))) == StartupRefusedException.VaultDriveUnavailable);
+Check(Refusal(() => VaultRoot.RequireTrusted(@"K:\SourceVault\vault", new SyntheticVolume(new(DriveType.Fixed, "NTFS", LocalDisk: true)))) == StartupRefusedException.VaultRootUntrusted);
+Check(Refusal(() => VaultRoot.RequireTrusted(@"K:\SourceVault\vault", new SyntheticVolume(new(DriveType.Fixed, "NTFS", LocalDisk: false)))) == StartupRefusedException.VaultRootUntrusted);
+Check(Refusal(() => VaultRoot.RequireTrusted(@"K:\SourceVault\vault", new SyntheticVolume(new(DriveType.Removable, "exFAT", LocalDisk: false)))) == StartupRefusedException.VaultRootUntrusted);
+// build.json may not put output in, or around, the configured vault's folder.
+var buildJson = Encoding.UTF8.GetBytes("{\"version\":1,\"artifactRoot\":" + JsonSerializer.Serialize(@"K:\SourceVault\out") + ",\"targets\":[{\"name\":\"web\",\"engine\":\"npipe://./pipe/docker_engine\",\"container\":\"sv-build\",\"platform\":\"linux\",\"sourcePath\":\"/work/src\",\"command\":[\"npm\",\"run\",\"build\"],\"artifactPath\":\"/work/out\"}]}");
+Check(SourceVault.Build.BuildConfig.Parse(buildJson, @"D:\Elsewhere").ArtifactRoot == @"K:\SourceVault\out");
+foreach (var folder in new[] { @"K:\SourceVault", @"k:\sourcevault\", @"K:\SourceVault\out", @"K:\SourceVault\out\deeper" })
+{
+    try { SourceVault.Build.BuildConfig.Parse(buildJson, folder); throw new InvalidOperationException("artifactRoot overlapping the vault folder accepted"); }
+    catch (SourceVault.Build.BuildConfigException) { count++; }
+}
 foreach (var commandArgs in new[] { Array.Empty<string>(), new[] { "console" }, new[] { "service", "--key", "untrusted" }, new[] { "metadata-probe", "--source", "x" } })
     Reject(() => SourceVault.Service.Program.ParseCommand(commandArgs));
 const string provider = "Microsoft Platform Crypto Provider";
@@ -99,7 +140,19 @@ using (var lifecycle = new ServiceLifecycle(s => statuses.Add(s)))
     Check(statuses.Select(s => s.State).SequenceEqual(new[] { ServiceState.StartPending, ServiceState.Stopped }));
     Check(statuses[^1].ExitCode == 1066 && statuses[^1].ServiceSpecificExitCode == 10);
 }
+statuses.Clear();
+using (var lifecycle = new ServiceLifecycle(s => statuses.Add(s)))
+{
+    lifecycle.Run(() => throw new StartupRefusedException(StartupRefusedException.VaultDriveUnavailable));
+    Check(statuses[^1].State == ServiceState.Stopped && statuses[^1].ExitCode == 1066 && statuses[^1].ServiceSpecificExitCode == 17);
+}
 Console.WriteLine($"serviceTests=passed; assertions={count}; tpmTouched=false; scmTouched=false; endpoints=pipe-v2 (see Endpoints.Tests)");
+/// <summary>Synthetic volume; every directory reads as missing. No filesystem access.</summary>
+sealed class SyntheticVolume(VolumeObservation volume) : IStorageRootInspector
+{
+    public VolumeObservation ObserveVolume(string path) => volume;
+    public DirectoryObservation ObserveDirectory(string path) => new(DirectoryState.Missing, null);
+}
 sealed class FakeResource : IDisposable
 {
     internal bool Disposed { get; private set; }

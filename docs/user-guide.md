@@ -36,6 +36,7 @@ SourceVault keeps source code encrypted on disk with a key that never leaves thi
    ```
    - With no `-Operators`, the account running setup becomes the only operator.
    - Add `-WithSyntheticDemo` to create a small fictional project to try things on.
+   - Add `-VaultRoot K:\SourceVault\vault` to keep the vault on another internal drive. Read [Vault on another drive](#vault-on-another-drive) first. The location can only be chosen at install.
 
 Setup prints `OK` for each step and stops at the first problem with an explanation. It does the following:
 
@@ -45,7 +46,7 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
 | Program files | Installs to `C:\Program Files\SourceVault` with its own private .NET runtime, checks that ordinary users can't modify anything there, and records the hash of every file. |
 | Service | Registers **SourceVault** running as its own account, `NT SERVICE\SourceVault`, starting automatically at boot (delayed start). |
 | TPM key | The service creates its own **decrypt-only, non-exportable** key in the TPM, then tests it. |
-| Vault folder | Creates `C:\ProgramData\SourceVault\vault`, readable only by the service, SYSTEM and Administrators. Operators can't open it directly. |
+| Vault folder | Creates `C:\ProgramData\SourceVault\vault`, or the `-VaultRoot` folder, readable only by the service, SYSTEM and Administrators. Operators can't open it directly. |
 | Start | Starts the service and confirms it verified the vault and is listening. |
 | Shortcut | Adds **SourceVault Editor** to the Start menu for everyone. |
 
@@ -57,26 +58,106 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Status
   ```
-  Reports the service account and state, whether installed files still match their hashes, the operators, and whether the vault folder's permissions are trusted.
+  Reports the service account and state, whether installed files still match their hashes, the operators, where the vault is, what kind of drive it is on, and whether the vault folder's permissions are trusted.
 - **Installed files are checked on every connection.** The service accepts the editor and importer only while every file in their folders matches `install-manifest.sha256`. If a file was changed, added or removed, they are refused ("only accepts the installed…"); run `-Update` from the package to restore them.
 - **Update to a newer package.** Close all editors, then from the new package:
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update
   ```
-  Program files are replaced. The key, the vault and the settings are kept.
+  Program files are replaced. The key, the vault, its location and the settings are kept.
 - **Add or remove an operator:** *Computer Management → Local Users and Groups → Groups → SourceVault Operators*, or `Add-LocalGroupMember -Group "SourceVault Operators" -Member "COMPUTER\name"`. The person signs out and in afterwards.
 - **Uninstall** (as administrator, from the package):
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Uninstall-SourceVault.ps1
   ```
-  - By default this keeps the encrypted vault, so a later install **on this same computer** can open it again.
-  - `-DeleteVaultData` permanently deletes all projects. It asks you to type a confirmation.
+  - By default this keeps the encrypted vault, so a later install **on this same computer** can open it again. For a vault on another drive, uninstall prints the command to use, which is the same `-VaultRoot` as before.
+  - `-DeleteVaultData` permanently deletes all projects. It asks you to type a confirmation. For a vault on another drive, it also removes the folder setup created above it, if that folder is now empty. It never touches the drive itself. If the vault's drive is missing or locked, nothing is removed.
   - `-RemoveOperatorsGroup` also removes the group.
   - The TPM key itself is never deleted.
+
+### Vault on another drive
+
+By default the vault is in `C:\ProgramData\SourceVault\vault`. To put it on another internal drive, choose the folder **at install**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -CheckOnly -VaultRoot K:\SourceVault\vault
+powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -VaultRoot K:\SourceVault\vault
+```
+
+- **The drive** must be a fixed, local NTFS or ReFS drive with a drive letter, on an internal SATA, ATA, SAS, SCSI, NVMe, RAID or Storage Spaces disk. USB disks (even ones Windows calls "fixed"), SD cards, network and iSCSI drives, mounted VHD/VHDX files and `subst` drives are refused. An NVMe or SATA disk in an external Thunderbolt or eSATA case can't be told apart from an internal one, so don't use one.
+- **The folder** must be at least two levels below the drive root, such as `K:\SourceVault\vault`, with at most 120 characters. Setup creates the last two folders itself and locks both down. It never changes a folder that already exists, the drive root, or anything above the parent folder.
+- **The location is fixed after install.** `-Update` keeps it, and setup can't move a vault. To start over elsewhere, uninstall (which keeps the vault) and install again with a different `-VaultRoot`. That gives a new, empty vault. The old one stays where it was, untouched.
+- **Configuration and build settings** stay in `C:\ProgramData\SourceVault\config`. The build output folder may not be inside the vault's folder or contain it.
+
+**If setup says the drive or the folders above the vault are not locked down enough**, look at the findings it prints. The common case is `untrusted_write_access at ancestor:2 (S-1-5-11)`. Many data drives give *Authenticated Users* "Modify" on the drive root itself, and Modify includes the right to delete the root. SourceVault accepts ordinary users being able to create folders in the drive root, but not that. Setup never changes the drive root. If you decide to, an administrator can narrow it so that existing folders keep exactly the access they inherit today:
+
+```powershell
+$root = Get-Item -LiteralPath 'K:\'
+$acl = $root.GetAccessControl('Access')
+$au = New-Object Security.Principal.SecurityIdentifier 'S-1-5-11'   # Authenticated Users
+$acl.PurgeAccessRules($au)
+# On K:\ itself: read, list and create folders. For everything below: Modify, inherited as before.
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($au, 'ReadAndExecute, AppendData', 'None', 'None', 'Allow')))
+$acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($au, 'Modify', 'ContainerInherit, ObjectInherit', 'InheritOnly', 'Allow')))
+$root.SetAccessControl($acl)
+```
+
+Afterwards, ordinary users can no longer create *files* directly in `K:\`. They can still create folders there, and folders and files below keep their access. Windows re-applies the inherited permissions across the drive, which can take a while on a full drive. This snippet has not yet been run on a real drive. Check the result with `Get-Acl K:\ | Format-List Owner, AccessToString` and setup's findings. A drive root owned by an account other than SYSTEM, Administrators or TrustedInstaller (`owner_untrusted`) needs its owner changed first.
+
+**At boot**, if the drive is missing, offline or BitLocker-locked, the service stays stopped and `-Status` reports "the vault drive is not available". Nothing is opened or created. Unlock or attach the drive, then start the service with `Start-Service SourceVault` (as administrator). For a BitLocker data drive, turn on *auto-unlock*. Whether auto-unlock finishes before the service starts at boot is not yet verified.
+
+**Security notes.** A vault on a separate disk is easier to unplug, copy or swap than one on the system drive. A copy can't be decrypted without this computer's TPM. But an **older copy of the same vault**, put back, would be accepted: rolling back a whole vault is not detected. A missing drive also stops SourceVault. Keep the computer and the drive physically secure.
 
 ### Builds (optional): run builds in your Docker containers
 
 SourceVault can send a project's saved files to an **already-running, named Docker container**, run the build command there, and copy the build's output to a folder on this PC. A separate service, **SourceVault Build** (`NT SERVICE\SourceVaultBuild`), does this; the vault service never gets Docker access.
+
+#### The supported setup: two Docker engines, two build containers
+
+The compiler is Microsoft's .NET SDK image (`mcr.microsoft.com/dotnet/sdk`), pinned by digest, in two containers:
+- a **Windows** container, for Windows-only code such as WPF or WinForms, on Microsoft's standalone Docker engine for Windows;
+- a **Linux** container, for Linux-only or cross-platform code, on Docker Engine inside a WSL distro.
+
+A project with a Windows part and a Linux part has both build scripts: `build.cmd` builds the Windows part and `build.sh` the Linux part. Every build sends the whole project; operators pick the target in the editor. The package's `samples\dotnet-hello` is a fictional example with both.
+
+**0. Remove Docker Desktop first.** Docker Desktop takes the standard Windows engine pipe, `\\.\pipe\docker_engine`. On the development PC it held that pipe even while paused, so the standalone engine can't serve it. Uninstall Docker Desktop, or at least quit it and turn off *Start Docker Desktop when you sign in*. Also turn off its WSL integration, which puts its own `docker` command into your distro.
+
+**1. The Windows engine** (needs Windows 11 Pro, Enterprise or Education; as administrator):
+1. Follow Microsoft Learn's *"Prep Windows for containers"* page. It uses Microsoft's `install-docker-ce.ps1` from the `microsoft/Windows-Containers` GitHub repository.
+   - Read the script before running it. It turns on the **Containers** feature, needs a restart, and may ask you to run it again afterwards.
+   - The result is a Windows service called `docker` that serves `\\.\pipe\docker_engine` and starts at boot, so Windows builds also work when nobody is signed in.
+2. Let only the build service use it:
+   - create a local group: `New-LocalGroup -Name docker`;
+   - add `"group": "docker"` to `C:\ProgramData\docker\config\daemon.json`;
+   - run `Restart-Service docker`;
+   - after the build service is installed (step 1 of the list below), run `Grant-BuildDockerAccess.ps1 -Group docker`.
+3. Create the container from the package folder:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\New-WindowsBuildContainer.ps1
+   ```
+   - **What it creates:** `sourcevault-build-windows`, from Microsoft's Windows Server Core .NET SDK image (about 2.7 GB), pinned by digest, with no network.
+   - **What it uses:** it talks to `npipe:////./pipe/docker_engine` directly, the pipe `build.json` names, whatever your Docker CLI's context says.
+   - **The key check:** that a file can be copied into the **running** container and back out. That is the step the build service needs, and Docker may refuse it for Hyper-V-isolated containers. If this check fails, the Windows target can't build yet; keep the output.
+   - **What it prints:** the `windows` target for `build.json`.
+
+   Projects need a `build.cmd` at their top level that writes to `C:\sourcevault\out`.
+
+**2. The Linux engine** (in your WSL distro, for example Ubuntu-24.04):
+1. Install Docker Engine in the distro by following Docker's *"Install Docker Engine on Ubuntu"* page (Docker's apt repository).
+   - To make `dockerd` start with the distro, turn on systemd: add `[boot]` and `systemd=true` to `/etc/wsl.conf`, then run `wsl --shutdown`.
+   - The distro runs under your Windows account and stops at sign-out or when idle, so Linux builds work only while it runs.
+2. After the build service is installed, run `New-WslDockerTls.ps1 -Distro Ubuntu-24.04` (below) and apply the Docker settings it prints. The build service reaches this engine only over TLS.
+3. Create the container, as your normal user:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\New-BuildContainer.ps1 -Distro Ubuntu-24.04
+   ```
+   - **What it creates:** `sourcevault-build-linux`, with no network, dropped privileges, and restart with the engine.
+   - **What it checks:** that an offline test build runs.
+   - **What it prints:** the `linux` target for `build.json`.
+
+   Projects need a `build.sh` at their top level that writes to `/sourcevault/out`.
+
+**No network in builds:** NuGet packages can't be downloaded in either container, so projects with package references don't build yet.
 
 1. **Install the build service** (as administrator, from the package folder):
    ```powershell
@@ -95,9 +176,9 @@ SourceVault can send a project's saved files to an **already-running, named Dock
    Also set `artifactRoot`: where output lands on this PC. Only an administrator can set these paths. Every field is described in `docs/files-history-builds-design.md`.
 3. **Give the build service Docker access:**
    ```powershell
-   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1            # Docker Desktop: group docker-users
-   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1 -Group docker   # standalone dockerd with "group": "docker"
+   powershell -ExecutionPolicy Bypass -File .\Grant-BuildDockerAccess.ps1 -Group docker   # the supported setup: standalone engine with "group": "docker"
    ```
+   (Only with an all-users Docker Desktop, which is not the supported setup, is the group `docker-users`, the script's default.) The Linux engine needs no group: the build service reaches it with the TLS client certificate from step 4.
    **Docker access is administrator-equivalent** on this PC. That's why only the build service gets it.
 4. **For a Docker engine inside WSL**, set up TLS client certificates:
    ```powershell
@@ -118,6 +199,38 @@ To publish a kind anyway, add it to the target, for example `"keepFileTypes": ["
 
 ---
 
+### Deploying from a drive (no internet)
+
+One drive can set up a SourceVault PC with no internet: SourceVault, Docker for Windows and Linux, WSL with Ubuntu, both build images and the scripts. The design is in `docs/deployment-kit-design.md`.
+
+**Build the drive** on a connected PC, as a normal user, from the repository. About 4.5 GB is downloaded; Docker isn't needed.
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\Build-DeploymentKit.ps1 -Destination E:\SourceVaultKit -RecordNewHashes
+```
+- `-RecordNewHashes` is needed on the first run only. Docker publishes no checksums for its archives, so their SHA-256 is recorded in `installer\kit-sources.json`; review and commit it.
+- Every other download, and every image layer, is checked against a pinned hash.
+- The drive ends with `kit-manifest.sha256`, a hash of every file on it.
+
+**Deploy** on the target: Windows 11 Pro, Enterprise or Education with a TPM 2.0, from an elevated PowerShell on the drive.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Deploy-SourceVault.ps1
+```
+1. It checks the drive, the Windows edition, the TPM and virtualization, and asks where the vault goes.
+2. It turns on the Windows features. **Restart, then run it again.**
+3. It installs the following from the drive:
+   - Docker's Windows engine;
+   - WSL with Ubuntu and Docker's Linux engine (no network);
+   - both build containers, from the drive's images, each checked by its image ID;
+   - SourceVault itself, with builds set up for both targets.
+4. **Sign out and back in, then run it again.** It writes this PC's recipient file to the drive's `transfer\` folder and shows its fingerprint.
+
+**Bring projects in (two short legs):**
+1. Take `transfer\recipient-<PC>.json` to the computer where the code lives, by any channel; it's public. Encrypt the project there with SourceVault Pack.
+2. Put the `.svpkg` in the drive's `transfer\` folder, by any channel; it's ciphertext. On the vault PC, run `Deploy-SourceVault.ps1 -ImportPackages`. That source computer must be registered once with `Setup-SourceVault.ps1 -RegisterSender`.
+
+**Be aware:**
+- `kit-manifest.sha256` catches damage and changes, but it isn't signed. Keep the drive in your custody.
+- The Linux build target runs in the deploying user's WSL. A sign-in task keeps it running while that user is signed in.
 ## Part 2: Using SourceVault
 
 ### Open the editor
@@ -152,6 +265,24 @@ If you see a lock screen instead, it explains why:
 - **Switch project** returns to the project list. Save or reload edited files first.
 - **Save** with **Ctrl+S** or the Save button. Each save becomes a new encrypted, unchangeable revision in the vault. Until you save, your edits exist only in the editor; a dot on the tab means unsaved changes.
 - Limits: 256 KiB per file (UTF-8 text), 1,024 files per project, 256 projects.
+- **Closing the editor with unsaved edits** asks *Close anyway?* first. Closing discards them.
+
+### Working in the editor
+
+**Ctrl+K Ctrl+S** (or **⌨** at the bottom left) shows every shortcut. **F1** lists every command.
+
+- **Go to a file:** **Ctrl+P**, then type part of its name: `gadcpp` finds `src/gadget.cpp`. Start with `:` to go to a line, `@` for a symbol in the file, or `>` for a command. **Ctrl+E** lists the files you opened recently; it starts on the one before the current file, so **Ctrl+E**, **Enter** switches back and forth.
+- **Search all files:** **Ctrl+Shift+F**, or the **⌕** button on the left. Type, press **Enter**, then click a result to jump to it. **Aa** matches case and **ab** matches whole words. Search is plain text (no wildcards), at most 500 results, and covers your unsaved edits too. Each search decrypts the project's files inside the service, so it is not run on every keystroke.
+- **Outline:** **Ctrl+Shift+O** lists the classes, functions and other symbols of the file. This works for TypeScript, JavaScript, C#, C and C++. For C#, C and C++ it is a quick outline, not a compiler, so an unusual layout can be missed.
+- **C and C++:** highlighting for `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp` and similar files. **Alt+O** switches between a header and its source file (`gadget.h` ↔ `gadget.cpp`). There is no C or C++ formatter or code completion in this editor.
+- **Save all:** **Ctrl+Alt+S**, the **Save all** button, or the **● N unsaved** count in the status bar. Files changed or deleted by someone else are skipped and named, because each needs your choice.
+- **Compare with saved:** **Ctrl+K D**, or **Compare with saved** above the editor. It shows your unsaved edits (green) against the saved version (red). **Revert to saved** drops your edits; **Ctrl+Z** in the editor brings them back.
+- **Format document:** **Shift+Alt+F**, for TypeScript and JavaScript (and any other type the editor has a formatter for). Otherwise, as for C, C++ and C#, the editor says it has none.
+- **Split editor:** **Ctrl+\\** shows two files side by side. Click a side, then a tab, to choose what it shows. **Ctrl+\\** again goes back to one.
+- **Focus mode:** **Ctrl+K Z** hides the side panels; press it again to bring them back.
+- **Editor settings:** **Ctrl+,** or **⚙**. Theme, font size, tab size, spaces or tabs, word wrap, minimap, whitespace and line numbers. Changes show at once; **Save** keeps them for your Windows account on this computer. Only these choices are stored, never file names or text. Each file keeps its own indentation; tab-size changes apply to new files and when you change them here.
+- **Status bar:** cursor and selection, indentation, line endings (LF or CRLF), and the file's size (amber close to the 256 KiB limit).
+- Recently opened files and search results are kept only while the editor runs. Locking clears the search results.
 
 ### Delete a project
 
@@ -200,6 +331,46 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 - **Not a secure erase.** SSDs, backups, shadow copies, OneDrive/Dropbox sync and the recycle bin of other tools may keep earlier copies.
 - After this, **the vault project is the only copy**: readable only on this computer, with no recovery if the TPM is cleared. Think twice before using it on code you can't recreate.
 
+### Import from another computer (encrypted)
+
+Code that lives on another computer can come in **encrypted**. **SourceVault Pack**, a small program on that computer, encrypts a project folder so that only this PC can open it, and signs it with that computer's TPM. You carry the package file over any way you like.
+
+**Once per source computer:**
+1. **Get Pack onto it.** Copy the `SourceVault-Pack` folder (in the setup package under `tools\`, or `SourceVault-Pack-<date>.zip`) to that computer. It needs a TPM 2.0 and nothing installed.
+2. **Create its signing key there.** Open `pack\SourceVaultPack.exe` (the window) and click **Set up this computer**, or run `pack\SourceVault.Pack.exe init` (the command line). Either one shows a fingerprint and saves `SourceVault-sender-<computer>.json`.
+3. **Register it here** (administrator). Compare the fingerprint with what `init` printed, then type `YES`:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -RegisterSender C:\path\SourceVault-sender-DEVPC.json
+   ```
+   To unregister it later, delete its file in `C:\ProgramData\SourceVault\senders`.
+4. **Export this PC's recipient file** (operator) and copy it to the other computer. It holds no secrets.
+   ```powershell
+   & "C:\Program Files\SourceVault\client\SourceVault.Import.exe" --export-recipient C:\path\recipient.json
+   ```
+
+**Each time:**
+1. **Pack it, on the other computer.** In the window:
+   - choose the recipient file and the project folder (every subfolder is included);
+   - check the **Included** and **Skipped** tabs;
+   - click **Create encrypted package**.
+
+   Or use the command line, with `--dry-run` first:
+   ```powershell
+   pack\SourceVault.Pack.exe C:\code\my-app --to recipient.json --out my-app.svpkg
+   ```
+   - It shows the recipient's fingerprint: check it matches this PC's.
+   - Type `YES` to write the package.
+   - The same rules as a folder import apply: UTF-8 text up to 256 KiB, at most 1,024 files, and `.git`, `bin`, `obj` and the like skipped.
+2. **Import it here** (operator):
+   ```powershell
+   & "C:\Program Files\SourceVault\client\SourceVault.Import.exe" --package C:\path\my-app.svpkg --project "My app"
+   ```
+   - The vault service checks the signature, decrypts the package in memory and creates the **new** project. Plaintext never touches this PC's disk.
+   - It refuses a package that was changed, was made for another PC, or comes from an unregistered computer, and then nothing is created.
+
+**Be aware:**
+- On the other computer the code is still ordinary, unencrypted files. Pack doesn't protect or delete them.
+- Anyone who has the recipient file can encrypt *to* this PC, but only registered computers' packages are accepted.
 ### Build a project
 
 **Builds** in the Explorer opens the build view (only if your administrator set up builds).
@@ -248,7 +419,7 @@ Different files never conflict: two people can edit different files of the same 
 
 **Don't**
 - **Don't clear or reset the TPM**, reinstall Windows, or replace the motherboard on a vault computer. The key exists only in this TPM, there is **no recovery key**, and the vault would become permanently unreadable. Check with your administrator before BIOS/UEFI or TPM firmware changes.
-- **Don't try to copy `C:\ProgramData\SourceVault` to another computer as a backup.** The files can only be decrypted by this computer's TPM. There is no supported backup or migration yet.
+- **Don't try to copy the vault folder (`C:\ProgramData\SourceVault`, or your `-VaultRoot` drive) to another computer as a backup.** The files can only be decrypted by this computer's TPM. There is no supported backup or migration yet.
 - Don't add people to *SourceVault Operators* who shouldn't read every project: every operator can open every project, by design (owner decision 2026-10-18).
 - Don't run the editor from anywhere except the Start menu shortcut. Other copies are rejected.
 - Don't screen-share the editor and expect the viewer to see it. Capture exclusion blanks it, though not reliably for every tool, so don't rely on it either way.

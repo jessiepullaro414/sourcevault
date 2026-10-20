@@ -1,3 +1,4 @@
+extern alias pack;
 using System.ComponentModel;
 using System.IO.Pipes;
 using System.Security.Cryptography;
@@ -6,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using SourceVault.Client;
 using SourceVault.Contracts;
+using SourceVault.Packaging;
 using SourceVault.Service;
 using SourceVault.Storage;
 using SourceVault.Windows;
@@ -916,6 +918,237 @@ Test("client pins: a link inside the client folder is refused", () =>
     Assert(Refused(() => pins.Verify(exe)), "junction refused");
 });
 
+// ---- encrypted packages from another computer (docs/package-import-design.md) -------------------------------------
+// Test-only software keys stand in for the vault PC's TPM import key and the source computer's TPM sender key.
+using var importRsa = RSA.Create(2048);
+using var senderRsa = RSA.Create(2048);
+using var otherImportRsa = RSA.Create(2048); // a second vault PC's import key
+var senderFile = SourceVault.Packaging.PublicKeyFile.Create(SourceVault.Packaging.PublicKeyFile.SenderFormat, "DEV-PC", senderRsa.ExportSubjectPublicKeyInfo());
+byte[] SenderSign(byte[] hash) => senderRsa.SignHash(hash, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+
+(VaultPipeServer Server, string Pipe, PackageImports Packages) StartPackageServer(bool registerSender = true, RSA? import = null)
+{
+    var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
+    var senders = Path.Combine(workspace, "senders-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(vault); Directory.CreateDirectory(senders);
+    if (registerSender) File.WriteAllBytes(Path.Combine(senders, Convert.ToHexStringLower(senderFile.Fingerprint) + ".json"), senderFile.ToJson());
+    var catalog = new ProjectCatalog(vault, key);
+    import ??= importRsa;
+    var packages = new PackageImports(new RsaTestKey(import), import.ExportSubjectPublicKeyInfo(), "TEST-VAULT", senders);
+    var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
+    var server = new VaultPipeServer(name, me, new PipePeerPolicy(authenticatedUsers, [self]), new VaultProtocol(catalog, catalog.OpenAndVerify(), packages: packages));
+    server.Start();
+    return (server, name, packages);
+}
+byte[] MakePackage(PackageImports packages, IReadOnlyList<(string, byte[])> files)
+{
+    using var output = new MemoryStream();
+    SourceVault.Packaging.Package.Write(output, "Fictional", files, packages.Recipient, senderFile, SenderSign);
+    return output.ToArray();
+}
+List<(string, byte[])> PackageFiles() => [("README.md", Encoding.UTF8.GetBytes("# Fictional package\n")), ("src/main.cs", Encoding.UTF8.GetBytes("class Synthetic { }\n"))];
+string Upload(Client c, byte[] package, string project)
+{
+    var code = c.Code("BeginPackageImport", ("length", package.Length));
+    if (code != "Ok") return code;
+    for (int offset = 0; offset < package.Length; offset += 512 * 1024)
+    {
+        code = c.Code("PackageImportPart", ("offset", offset), ("dataBase64", Convert.ToBase64String(package, offset, Math.Min(512 * 1024, package.Length - offset))));
+        if (code != "Ok") return code;
+    }
+    return c.Code("FinishPackageImport", ("projectName", project));
+}
+
+Test("package import: a registered computer's package becomes a new project with the same files", () =>
+{
+    var (server, pipe, packages) = StartPackageServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var recipient = c.Ok("GetImportRecipient");
+        Assert(recipient.GetProperty("fingerprint").GetString() == Convert.ToHexStringLower(packages.Recipient.Fingerprint) && recipient.GetProperty("computer").GetString() == "TEST-VAULT", "recipient");
+        var files = Enumerable.Range(0, 6).Select(i => ($"big/part{i}.txt", Encoding.UTF8.GetBytes(new string((char)('a' + i), 200 * 1024)))).Concat(PackageFiles()).ToList();
+        var package = MakePackage(packages, files); // about 1.2 MB: several upload parts and two chunks
+        Assert(Upload(c, package, "From DEV-PC") == "Ok", "imported");
+        var project = c.Ok("ListProjects").GetProperty("projects").EnumerateArray().Single(p => p.GetProperty("name").GetString() == "From DEV-PC");
+        var id = project.GetProperty("projectId").GetString()!;
+        var listing = c.Ok("ListFiles", ("projectId", id));
+        Assert(listing.GetProperty("files").GetArrayLength() == 8, "all files");
+        var main = listing.GetProperty("files").EnumerateArray().Single(f => f.GetProperty("name").GetString() == "src/main.cs");
+        var opened = c.Ok("OpenDocument", ("projectId", id), ("fileId", main.GetProperty("fileId").GetString()!), ("expectedSnapshotId", listing.GetProperty("snapshotId").GetString()!));
+        Assert(Encoding.UTF8.GetString(opened.GetProperty("contentBase64").GetBytesFromBase64()) == "class Synthetic { }\n", "content");
+        var history = c.Ok("ListHistory", ("projectId", id), ("fileId", main.GetProperty("fileId").GetString()!), ("page", 0));
+        Assert(history.GetProperty("revisions")[0].GetProperty("action").GetString() == "imported", "history says imported");
+    }
+});
+
+Test("package import refusals: unregistered sender, altered, another recipient, taken name, path clash; nothing is left behind", () =>
+{
+    var (server, pipe, packages) = StartPackageServer();
+    var (otherServer, otherPipe, otherPackages) = StartPackageServer(registerSender: false, import: otherImportRsa);
+    using (server) using (otherServer)
+    using (var c = new Client(pipe, me))
+    using (var o = new Client(otherPipe, me))
+    {
+        c.Begin(); o.Begin();
+        Assert(Upload(o, MakePackage(otherPackages, PackageFiles()), "Stranger") == "UnknownSender", "unregistered sender");
+        var altered = MakePackage(packages, PackageFiles()); altered[Package.HeaderBytes + 3] ^= 1;
+        Assert(Upload(c, altered, "Altered") == "PackageRejected", "altered");
+        Assert(Upload(c, MakePackage(otherPackages, PackageFiles()), "Elsewhere") == "PackageRejected", "made for another recipient");
+        Assert(Upload(c, MakePackage(packages, [("a", Encoding.UTF8.GetBytes("x")), ("a/b", Encoding.UTF8.GetBytes("y"))]), "Clash") == "PackageRejected", "file and folder at one path");
+        Assert(Upload(c, MakePackage(packages, PackageFiles()), " bad name") == "InvalidRequest", "project name");
+        Assert(c.Ok("ListProjects").GetProperty("projects").GetArrayLength() == 0 && o.Ok("ListProjects").GetProperty("projects").GetArrayLength() == 0, "no project left behind by any refusal");
+        Assert(Upload(c, MakePackage(packages, PackageFiles()), "Taken") == "Ok", "first import");
+        Assert(Upload(c, MakePackage(packages, PackageFiles()), "Taken") == "AlreadyExists", "taken name");
+    }
+});
+
+Test("package import uploads: parts in order only, one upload at a time, freed when a connection closes; Unavailable without an import key", () =>
+{
+    var (server, pipe, packages) = StartPackageServer();
+    using (server)
+    {
+        var package = MakePackage(packages, PackageFiles());
+        using (var c = new Client(pipe, me))
+        {
+            c.Begin();
+            Assert(c.Code("PackageImportPart", ("offset", 0), ("dataBase64", "AAAA")) == "InvalidRequest", "part before begin");
+            Assert(c.Code("FinishPackageImport", ("projectName", "X")) == "InvalidRequest", "finish before begin");
+            Assert(c.Code("BeginPackageImport", ("length", Package.MaxPackageBytes + 1)) == "LimitExceeded", "too large");
+            Assert(c.Code("BeginPackageImport", ("length", package.Length)) == "Ok", "begin");
+            Assert(c.Code("BeginPackageImport", ("length", package.Length)) == "InvalidRequest", "one upload per connection");
+            using (var d = new Client(pipe, me))
+            {
+                d.Begin();
+                Assert(d.Code("BeginPackageImport", ("length", package.Length)) == "Unavailable", "one upload at a time across connections");
+            }
+            Assert(c.Code("PackageImportPart", ("offset", 10), ("dataBase64", "AAAA")) == "InvalidRequest", "gap");
+            Assert(c.Code("PackageImportPart", ("offset", 0), ("dataBase64", Convert.ToBase64String(new byte[package.Length + 1]))) == "LimitExceeded", "past the end");
+            Assert(c.Code("PackageImportPart", ("offset", 0), ("dataBase64", Convert.ToBase64String(package, 0, 100))) == "Ok", "a first part");
+            Assert(c.Code("FinishPackageImport", ("projectName", "X")) == "InvalidRequest", "finish before all bytes");
+            Assert(c.Code("PackageImportPart", ("offset", 100), ("dataBase64", "AAAA")) == "InvalidRequest", "a refused finish ends the upload");
+            Assert(c.Code("BeginPackageImport", ("length", package.Length)) == "Ok", "a new upload can start after it ended");
+            c.Code("EndSession"); // closes with an unfinished upload: the slot must be freed
+        }
+        Thread.Sleep(200); // the server closes the connection and frees the slot
+        using (var e = new Client(pipe, me)) { e.Begin(); Assert(Upload(e, package, "After close") == "Ok", "slot freed by the closed connection"); }
+    }
+    var (plain, plainPipe) = StartServer();
+    using (plain)
+    using (var c = new Client(plainPipe, me))
+    {
+        c.Begin();
+        Assert(c.Code("GetImportRecipient") == "Unavailable" && c.Code("BeginPackageImport", ("length", 1000)) == "Unavailable", "no import key");
+    }
+});
+
+Test("importer --export-recipient and --package end to end; it prints names and fingerprints only", () =>
+{
+    var (server, pipe, packages) = StartPackageServer();
+    using (server)
+    {
+        SourceVault.Client.VaultClient Connect() => new(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
+        var recipientPath = Path.Combine(workspace, "recipient-" + Guid.NewGuid().ToString("N") + ".json");
+        var exported = new StringWriter();
+        Assert(SourceVault.Import.PackageImport.ExportRecipient(recipientPath, Connect, exported) == 0, "export: " + exported);
+        var recipient = SourceVault.Packaging.PublicKeyFile.Parse(File.ReadAllBytes(recipientPath), SourceVault.Packaging.PublicKeyFile.RecipientFormat);
+        Assert(recipient.Fingerprint.AsSpan().SequenceEqual(packages.Recipient.Fingerprint) && exported.ToString().Contains(recipient.FingerprintText), "the file and the printed fingerprint match the service");
+        try { SourceVault.Import.PackageImport.ExportRecipient(recipientPath, Connect, new StringWriter()); throw new Exception("overwrote"); } catch (SourceVault.Import.ImportException) { }
+        var packagePath = Path.Combine(workspace, "package-" + Guid.NewGuid().ToString("N") + ".svpkg");
+        using (var output = File.Create(packagePath)) Package.Write(output, "Fictional", PackageFiles(), recipient, senderFile, SenderSign);
+        var imported = new StringWriter();
+        Assert(SourceVault.Import.PackageImport.Run(packagePath, "Via importer", Connect, imported) == 0, "import: " + imported);
+        Assert(imported.ToString().Contains("Imported 2 file(s)") && imported.ToString().Contains("\"DEV-PC\""), "report");
+        var again = new StringWriter();
+        Assert(SourceVault.Import.PackageImport.Run(packagePath, "Via importer", Connect, again) == 1 && again.ToString().Contains("already exists"), "taken name explained");
+        foreach (var text in new[] { exported.ToString(), imported.ToString(), again.ToString() })
+            Assert(!text.Contains("Fictional package") && !text.Contains("class Synthetic"), "no content printed");
+    }
+});
+
+Test("SourceVault Pack: scan, recipient check and confirmation, then a package the service imports; dry run writes nothing", () =>
+{
+    var (server, pipe, packages) = StartPackageServer();
+    using (server)
+    {
+        var source = Path.Combine(workspace, "pack-source-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(source, "src"));
+        Directory.CreateDirectory(Path.Combine(source, ".git"));
+        File.WriteAllText(Path.Combine(source, "README.md"), "# Fictional pack source\n");
+        File.WriteAllText(Path.Combine(source, "src", "app.cs"), "class FictionalPack { }\n");
+        File.WriteAllBytes(Path.Combine(source, "logo.png"), [0x89, 0x50, 0x4E, 0x47, 0x00]);
+        File.WriteAllText(Path.Combine(source, ".git", "config"), "[core]\n");
+        var recipientPath = Path.Combine(workspace, "pack-recipient-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllBytes(recipientPath, packages.Recipient.ToJson());
+        var outPath = Path.Combine(workspace, "pack-" + Guid.NewGuid().ToString("N") + ".svpkg");
+        pack::SourceVault.Pack.IPackageSigner Signer() => new SoftwareSigner(senderRsa);
+
+        var dry = new StringWriter();
+        Assert(pack::SourceVault.Pack.Commands.Pack([source, "--to", recipientPath, "--dry-run"], dry, () => throw new Exception("no prompt in a dry run"), Signer) == 0, "dry run: " + dry);
+        Assert(dry.ToString().Contains("2 file(s) to pack") && dry.ToString().Contains("logo.png") && dry.ToString().Contains(".git/") && dry.ToString().Contains(packages.Recipient.FingerprintText), "plan and fingerprint shown");
+        Assert(!File.Exists(outPath), "dry run wrote nothing");
+
+        var declined = new StringWriter();
+        Assert(pack::SourceVault.Pack.Commands.Pack([source, "--to", recipientPath, "--out", outPath], declined, () => "no", Signer) == 1 && !File.Exists(outPath), "anything but YES writes nothing");
+
+        var packed = new StringWriter();
+        Assert(pack::SourceVault.Pack.Commands.Pack([source, "--to", recipientPath, "--out", outPath, "--name", "Fictional"], packed, () => "YES", Signer) == 0, "pack: " + packed);
+        try { pack::SourceVault.Pack.Commands.Pack([source, "--to", recipientPath, "--out", outPath, "--yes"], new StringWriter(), () => null, Signer); throw new Exception("overwrote"); }
+        catch (pack::SourceVault.Pack.PackException) { }
+        foreach (var text in new[] { dry.ToString(), packed.ToString() })
+            Assert(!text.Contains("Fictional pack source") && !text.Contains("class FictionalPack"), "Pack prints no content");
+
+        SourceVault.Client.VaultClient Connect() => new(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
+        var imported = new StringWriter();
+        Assert(SourceVault.Import.PackageImport.Run(outPath, "Packed elsewhere", Connect, imported) == 0 && imported.ToString().Contains("Imported 2 file(s)"), "service imports what Pack wrote: " + imported);
+        using var c = new Client(pipe, me);
+        c.Begin();
+        var id = c.Ok("ListProjects").GetProperty("projects").EnumerateArray().Single(p => p.GetProperty("name").GetString() == "Packed elsewhere").GetProperty("projectId").GetString()!;
+        var names = c.Ok("ListFiles", ("projectId", id)).GetProperty("files").EnumerateArray().Select(f => f.GetProperty("name").GetString()).Order().ToArray();
+        Assert(names.SequenceEqual(["README.md", "src/app.cs"]), "exactly the text files, without .git or the binary");
+    }
+});
+
+Test("SearchProject: plain-text matches with line, column and preview; case, whole word, the 500 limit and bad queries", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var created = c.Ok("CreateProject", ("name", "Search"));
+        var project = created.GetProperty("projectId").GetString()!;
+        var snap = created.GetProperty("snapshotId").GetString()!;
+        string Create(string name, string text) { var r = c.Ok("CreateFile", ("projectId", project), ("name", name), ("expectedSnapshotId", snap), ("contentBase64", B64(text))); snap = r.GetProperty("snapshotId").GetString()!; return r.GetProperty("fileId").GetString()!; }
+        Create("src/b.cs", "class Widget {}\r\n    var widgetCount = 1; // Widget\r\n");
+        Create("a.ts", "export const widget = 2;\n");
+        Create("many.txt", string.Concat(Enumerable.Repeat("x x x x x x x x x x\n", 60))); // 600 matches of "x"
+        Create("long.txt", new string('a', 300) + "needle\n");
+        JsonElement Search(string query, bool matchCase = false, bool wholeWord = false) =>
+            c.Ok("SearchProject", ("projectId", project), ("query", query), ("matchCase", matchCase), ("wholeWord", wholeWord));
+
+        var all = Search("widget");
+        var hits = all.GetProperty("matches").EnumerateArray().Select(m => $"{m.GetProperty("name").GetString()}:{m.GetProperty("line").GetInt32()}:{m.GetProperty("column").GetInt32()}").ToArray();
+        Assert(hits.SequenceEqual(["a.ts:1:14", "src/b.cs:1:7", "src/b.cs:2:9", "src/b.cs:2:29"]), "case-insensitive, sorted by file then line: " + string.Join(", ", hits));
+        Assert(all.GetProperty("matches")[2].GetProperty("preview").GetString() == "var widgetCount = 1; // Widget", "preview trims leading space and the CR");
+        Assert(all.GetProperty("matches")[2].GetProperty("previewOffset").GetInt32() == 4 && all.GetProperty("matches")[3].GetProperty("previewOffset").GetInt32() == 24, "preview offsets point at each match");
+        Assert(!all.GetProperty("truncated").GetBoolean() && all.GetProperty("filesSearched").GetInt32() == 4, "searched every file");
+        var far = Search("needle").GetProperty("matches")[0];
+        var farPreview = far.GetProperty("preview").GetString()!;
+        Assert(farPreview.Length == 241 && farPreview[0] == '…' && farPreview.Substring(far.GetProperty("previewOffset").GetInt32(), 6) == "needle", "a long line is cut around the match: " + farPreview.Length);
+        Assert(Search("Widget", matchCase: true).GetProperty("matches").GetArrayLength() == 2, "match case");
+        Assert(Search("widget", wholeWord: true).GetProperty("matches").GetArrayLength() == 3, "whole word excludes widgetCount");
+        Assert(Search("nothing-here").GetProperty("matches").GetArrayLength() == 0, "no match");
+        var many = Search("x");
+        Assert(many.GetProperty("matches").GetArrayLength() == 500 && many.GetProperty("truncated").GetBoolean(), "at most 500 matches, reported as truncated");
+        foreach (var bad in new object[] { "", new string('q', 201), "two\nlines" })
+            Assert(c.Code("SearchProject", ("projectId", project), ("query", bad), ("matchCase", false), ("wholeWord", false)) == "InvalidRequest", "bad query refused");
+        Assert(c.Code("SearchProject", ("projectId", project), ("query", "x"), ("matchCase", "yes"), ("wholeWord", false)) == "InvalidRequest", "flags must be booleans");
+        Assert(c.Code("SearchProject", ("projectId", Guid.NewGuid().ToString("D")), ("query", "x"), ("matchCase", false), ("wholeWord", false)) == "NotFound", "unknown project");
+    }
+});
+
 Console.WriteLine($"Endpoint tests: {passed} passed; synthetic workspace retained at {workspace}");
 return 0;
 
@@ -957,6 +1190,21 @@ sealed class Client : IDisposable
         return Encoding.UTF8.GetString(FrameCodec.ReadAsync(pipe).GetAwaiter().GetResult());
     }
     public void Dispose() => pipe.Dispose();
+}
+
+// Test-only: a software RSA key standing in for the source computer's TPM sender key in SourceVault Pack.
+sealed class SoftwareSigner(RSA rsa) : pack::SourceVault.Pack.IPackageSigner
+{
+    public byte[] SubjectPublicKeyInfo() => rsa.ExportSubjectPublicKeyInfo();
+    public byte[] SignHash(byte[] hash) => rsa.SignHash(hash, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+    public void Dispose() { }
+}
+
+// Test-only: an RSA key standing in for the TPM import key.
+sealed class RsaTestKey(RSA rsa) : IKeyProtector
+{
+    public byte[] WrapKey(ReadOnlySpan<byte> k) => rsa.Encrypt(k.ToArray(), RSAEncryptionPadding.OaepSHA256);
+    public byte[] UnwrapKey(ReadOnlySpan<byte> k) => rsa.Decrypt(k.ToArray(), RSAEncryptionPadding.OaepSHA256);
 }
 
 sealed class ManualClock : TimeProvider

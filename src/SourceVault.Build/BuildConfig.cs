@@ -37,7 +37,8 @@ public sealed record BuildConfig(string ArtifactRoot, IReadOnlyList<BuildTarget>
     private static readonly Regex WindowsPath = new(@"^[A-Za-z]:(\\[A-Za-z0-9._ -]+){2,16}$", RegexOptions.CultureInvariant);
     private static readonly Regex Thumbprint = new("^[0-9A-Fa-f]{40}$", RegexOptions.CultureInvariant);
 
-    public static BuildConfig Load(string path)
+    /// <param name="vaultFolder">The folder holding the configured vault; <c>artifactRoot</c> may not be inside it or contain it.</param>
+    public static BuildConfig Load(string path, string? vaultFolder = null)
     {
         byte[] bytes;
         try
@@ -48,10 +49,10 @@ public sealed record BuildConfig(string ArtifactRoot, IReadOnlyList<BuildTarget>
             stream.ReadExactly(bytes);
         }
         catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { throw new BuildConfigException("build.json does not exist."); }
-        return Parse(bytes);
+        return Parse(bytes, vaultFolder);
     }
 
-    public static BuildConfig Parse(ReadOnlySpan<byte> json)
+    public static BuildConfig Parse(ReadOnlySpan<byte> json, string? vaultFolder = null)
     {
         JsonDocument document;
         try
@@ -78,6 +79,12 @@ public sealed record BuildConfig(string ArtifactRoot, IReadOnlyList<BuildTarget>
             foreach (var p in protectedRoots)
                 if (p.Length > 0 && (artifactRoot.Equals(p, StringComparison.OrdinalIgnoreCase) || artifactRoot.StartsWith(p + "\\", StringComparison.OrdinalIgnoreCase)))
                     throw new BuildConfigException("artifactRoot must not be inside the SourceVault install, data or Windows folders.");
+            if (vaultFolder is { Length: > 0 })
+            {
+                var (a, v) = (artifactRoot.TrimEnd('\\'), vaultFolder.TrimEnd('\\'));
+                if (a.Equals(v, StringComparison.OrdinalIgnoreCase) || a.StartsWith(v + "\\", StringComparison.OrdinalIgnoreCase) || v.StartsWith(a + "\\", StringComparison.OrdinalIgnoreCase))
+                    throw new BuildConfigException("artifactRoot must not be inside, or contain, the SourceVault vault folder.");
+            }
             var list = root.GetProperty("targets");
             if (list.ValueKind != JsonValueKind.Array || list.GetArrayLength() is 0 or > 16) throw new BuildConfigException("targets must list 1 to 16 targets.");
             var targets = new List<BuildTarget>();

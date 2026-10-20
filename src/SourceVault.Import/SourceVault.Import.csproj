@@ -9,6 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../SourceVault.Client/SourceVault.Client.csproj" />
+    <ProjectReference Include="../SourceVault.Packaging/SourceVault.Packaging.csproj" />
   </ItemGroup>
   <ItemGroup><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
 </Project>

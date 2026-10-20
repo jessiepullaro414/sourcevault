@@ -5,6 +5,8 @@
 // just as the real host ignores them. Vault semantics mirror EditorVaultController: per-file conflicts, Locked while
 // locked, unlock re-check of opened files. All content is fictional.
 
+import { searchText, MAX_SEARCH_MATCHES, DEFAULT_SETTINGS, validSettings } from '../workbench.mjs';
+
 const REQUEST_TYPE = 'sourcevault.vault.request';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ARGS = {
@@ -14,8 +16,10 @@ const ARGS = {
   restoreFile: ['projectId', 'fileId', 'newName'], mergeSources: ['projectId', 'fileId'], saveMerged: ['projectId', 'fileId', 'text', 'revisionId'],
   listBuildTargets: [], requestBuild: ['projectId', 'name'], listBuilds: ['projectId'], buildStatus: ['projectId', 'buildNumber'], openBuildLog: ['projectId', 'buildNumber'], listFiles: ['projectId'], openDocument: ['projectId', 'fileId'],
   closeDocument: ['projectId', 'fileId'], saveDocument: ['projectId', 'fileId', 'text'], createFile: ['projectId', 'name', 'text'],
+  searchProject: ['projectId', 'query', 'matchCase', 'wholeWord'], getSettings: [], saveSettings: ['settings'],
   lock: [], unlock: [],
 };
+const isQuery = q => typeof q === 'string' && q.length > 0 && q.length <= 200 && ![...q].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
 const MAX_TEXT_BYTES = 256 * 1024;
 const encoder = new TextEncoder();
 const bytes = text => encoder.encode(text).length;
@@ -31,6 +35,12 @@ const SEED = [
     ['README.md', '# Synthetic demo project\n\nFictional content created by the SourceVault lab service. Not real source.\n'],
     ['main.ts', "import { greet } from './util';\n\nexport function main(): string {\n  return greet('synthetic');\n}\n"],
     ['util.ts', 'export function greet(name: string): string {\n  return `hello, ${name}`;\n}\n'],
+  ] },
+  { name: 'Synthetic C++ demo', files: [
+    ['include/gadget.h', '#pragma once\n#include <string>\n\nnamespace demo {\n\n/// A fictional gadget.\nclass Gadget {\npublic:\n    explicit Gadget(int size);\n    int size() const;\n    std::string label() const;\n\nprivate:\n    int size_ = 0;\n};\n\n}  // namespace demo\n'],
+    ['src/gadget.cpp', '#include "gadget.h"\n\nnamespace demo {\n\nGadget::Gadget(int size) : size_(size) {}\n\nint Gadget::size() const {\n    return size_;\n}\n\nstd::string Gadget::label() const {\n    return "gadget-" + std::to_string(size_);\n}\n\n}  // namespace demo\n'],
+    ['src/main.cpp', '#include <iostream>\n#include "gadget.h"\n\nint main() {\n    demo::Gadget gadget(3);\n    std::cout << gadget.label() << "\\n";\n    return 0;\n}\n'],
+    ['CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)\nproject(synthetic_gadget CXX)\nadd_executable(gadget src/main.cpp src/gadget.cpp)\ntarget_include_directories(gadget PRIVATE include)\n'],
   ] },
   { name: 'Lab client check', files: [['check.txt', 'SourceVault lab client check\nnonce: fictional\n']] },
 ];
@@ -49,6 +59,7 @@ export class FakeVaultHost {
   buildMs = 1500;          // how long a fake build runs
   buildFails = false;
   #builds = new Map();     // projectId -> [build], newest last
+  settings = { ...DEFAULT_SETTINGS }; // the host's editor-settings.json
 
   constructor({ latencyMs = 0, seed = SEED } = {}) {
     this.latencyMs = latencyMs;
@@ -97,6 +108,11 @@ export class FakeVaultHost {
     if (('name' in args && !isName(args.name)) || ('text' in args && !isText(args.text))) return;
     this.requests.push(operation);
     const reply = (code, result = null) => this.#emit({ type: 'sourcevault.vault.response', requestId, code, result });
+    if (operation === 'searchProject' && (!isQuery(args.query) || typeof args.matchCase !== 'boolean' || typeof args.wholeWord !== 'boolean')) return;
+    if (operation === 'saveSettings' && !validSettings(args.settings)) return;
+    // Display preferences need no vault session.
+    if (operation === 'getSettings') return reply('Ok', { settings: { ...this.settings } });
+    if (operation === 'saveSettings') { this.settings = { ...args.settings }; return reply('Ok', {}); }
     if (operation === 'unlock') return reply(...this.#unlock());
     if (operation === 'lock') { const was = this.locked; this.locked = true; reply('Ok', {}); if (!was) this.#emit({ type: 'sourcevault.vault.locked', reason: 'user' }); return; }
     if (this.locked) return reply('Locked');
@@ -221,6 +237,19 @@ export class FakeVaultHost {
         if (!build) return reply('NotFound');
         if (operation === 'buildStatus') { const { log, ...b } = build; return reply('Ok', b); }
         return build.logAvailable ? reply('Ok', { text: build.log }) : reply('NotFound');
+      }
+      case 'searchProject': {
+        // Like the service: saved text only, the first 500 matches, then sorted by name, line and column.
+        const matches = [];
+        let truncated = false;
+        for (const [fileId, f] of project.files) {
+          const found = searchText(f.text, args.query, args, MAX_SEARCH_MATCHES - matches.length + 1);
+          if (matches.length + found.length > MAX_SEARCH_MATCHES) { truncated = true; found.length = MAX_SEARCH_MATCHES - matches.length; }
+          matches.push(...found.map(m => ({ fileId, name: f.name, ...m })));
+          if (truncated) break;
+        }
+        matches.sort((a, b) => (a.name.toUpperCase() < b.name.toUpperCase() ? -1 : a.name.toUpperCase() > b.name.toUpperCase() ? 1 : 0) || a.line - b.line || a.column - b.column);
+        return reply('Ok', { matches, truncated, filesSearched: project.files.size });
       }
       case 'listFiles':
         return reply('Ok', { files: [...project.files].map(([fileId, f]) => ({ fileId, name: f.name, byteLength: bytes(f.text) })) });

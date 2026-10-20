@@ -140,3 +140,39 @@ See `docs/files-history-builds-design.md`, section 4. Every operation also takes
 
   The reply is `{ok, …}`; the build reply carries `state`, `reason`, `exitCode`, `logBase64` (≤ 512 KiB), `logTruncated`, `artifactFolder`, `artifactFiles`, `artifactBytes` and `artifactsDropped`.
 - **The build service** never receives project names and never opens the vault or the TPM key.
+
+## Addition: encrypted package import (owner-approved, 2026-10-19)
+
+See `docs/package-import-design.md`. Every operation also takes `capability`. Without a provisioned import key every one of these returns `Unavailable`.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| GetImportRecipient | — | `computer`, `publicKey` (base64 SubjectPublicKeyInfo), `fingerprint` (hex SHA-256) |
+| BeginPackageImport | `length` | `{}` |
+| PackageImportPart | `offset`, `dataBase64` | `received` |
+| FinishPackageImport | `projectName` | `projectId`, `snapshotId`, `imported`, `packageId`, `sender` |
+
+- **Upload rules:**
+  - one upload per connection, and one across the whole service; a second gets `Unavailable`;
+  - `length` must be at least 624 bytes and at most `Package.MaxPackageBytes` (about 270 MB), otherwise `LimitExceeded`;
+  - parts must start exactly where the last one ended; a part is at most 512 KiB, and must not go past `length`.
+- **Finishing:**
+  - `FinishPackageImport` ends the upload whatever its result. So does closing the connection.
+  - It creates a **new** project only. A taken name is `AlreadyExists`, and nothing is written.
+- **New error codes:**
+  - `PackageRejected`: the package is malformed, altered, made for another recipient, or contains files the vault does not accept. Nothing is created.
+  - `UnknownSender`: the signature is valid, but its computer is not registered in `C:\ProgramData\SourceVault\senders`.
+
+## Addition: search all files (owner request, 2026-10-19)
+
+The editor's **Search all files**. Plain text only: no regular expressions, so a query can never be expensive.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| SearchProject | `capability`, `projectId`, `query`, `matchCase`, `wholeWord` | `matches[]`, `truncated`, `filesSearched` |
+
+- **Query:** 1 to 200 characters on one line; otherwise `InvalidRequest`. `matchCase` and `wholeWord` must be JSON booleans. Whole word means the characters on both sides are not letters, digits or `_`.
+- **What is searched:** the text of every file in the project's current snapshot, line by line (a trailing CR is ignored). Unsaved edits are not in the vault; the editor searches those itself, in its drafts.
+- **Each match:** `fileId`, `name`, `line` and `column` (1-based, UTF-16 units), `length`, `preview` (the line around the match, at most 240 characters plus a leading `…` when cut, leading spaces removed) and `previewOffset` (where the match starts in `preview`).
+- **Limits:** at most 500 matches; `truncated` is `true` when there were more. Matches are sorted by name (ignoring case), line and column.
+- **Cost:** a search decrypts every file of the project inside the service, like a build. Only matching lines leave it.

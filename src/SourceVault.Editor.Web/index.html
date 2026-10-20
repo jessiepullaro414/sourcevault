@@ -21,6 +21,8 @@
       <button id="explorer-toggle" class="rail-button selected" title="Toggle explorer" aria-label="Toggle explorer" aria-pressed="true">▤</button>
       <button id="find" class="rail-button" title="Find in active file (Ctrl+F)" aria-label="Find in active file">⌕</button>
       <div class="rail-spacer"></div>
+      <button id="shortcuts-button" class="rail-button rail-small" title="Keyboard shortcuts (Ctrl+K Ctrl+S)" aria-label="Keyboard shortcuts" hidden>⌨</button>
+      <button id="settings-button" class="rail-button rail-small" title="Editor settings (Ctrl+,)" aria-label="Editor settings" hidden>⚙</button>
       <button id="inspector-toggle" class="rail-button" title="Toggle session details" aria-label="Toggle session details" aria-pressed="true">ⓘ</button>
     </nav>
     <aside class="explorer" id="explorer">
@@ -33,12 +35,20 @@
       <div id="root-files" class="file-list root-files"></div>
       <div class="explorer-note"><span id="explorer-note-label" class="tiny-label">PREVIEW WORKSPACE</span><p id="explorer-note-text">Bundled sample files.<br>Mock service, memory only.</p></div>
     </aside>
+    <aside class="explorer search-panel" id="search-panel" aria-label="Search all files" hidden>
+      <div class="panel-heading">SEARCH</div>
+      <form id="search-form" class="search-form"><input id="search-input" maxlength="200" placeholder="Search all files" aria-label="Search all files" autocomplete="off" spellcheck="false"><button type="button" id="search-case" class="search-toggle" title="Match case" aria-label="Match case" aria-pressed="false">Aa</button><button type="button" id="search-word" class="search-toggle" title="Whole word" aria-label="Whole word" aria-pressed="false">ab</button></form>
+      <p id="search-summary" class="search-summary" role="status"></p>
+      <div id="search-results" class="search-results"></div>
+    </aside>
     <main class="workspace" aria-label="Source editor">
-      <div class="tab-bar"><div id="tabs" role="tablist" aria-label="Open files"></div><button id="save" class="save-button" title="Save in-memory revision (Ctrl+S)"><span id="save-label">Save revision</span> <kbd>Ctrl S</kbd></button></div>
-      <div class="breadcrumb"><span id="breadcrumb-root">synthetic-workspace</span><span aria-hidden="true">›</span><span id="breadcrumb-file">src › pipeline.ts</span><span class="breadcrumb-right" id="document-state">Session copy</span></div>
+      <div class="tab-bar"><div id="tabs" role="tablist" aria-label="Open files"></div><button id="save" class="save-button" title="Save in-memory revision (Ctrl+S)"><span id="save-label">Save revision</span> <kbd>Ctrl S</kbd></button><button id="save-all" class="save-button save-all" title="Save every file with unsaved edits (Ctrl+Alt+S)" hidden>Save all <kbd>Ctrl Alt S</kbd></button></div>
+      <div class="breadcrumb"><span id="breadcrumb-root">synthetic-workspace</span><span aria-hidden="true">›</span><span id="breadcrumb-file">src › pipeline.ts</span><span class="breadcrumb-right"><button id="compare-saved" class="crumb-button" title="Compare with the saved version (Ctrl+K D)" hidden>Compare with saved</button><span id="document-state">Session copy</span></span></div>
       <div id="conflict-banner" class="conflict-banner" role="alert" hidden><span>Someone else changed this file since you opened it. Saving will not overwrite their version.</span><button id="conflict-merge">Merge</button><button id="conflict-reload">Reload their version</button><button id="conflict-keep">Keep editing</button></div>
-      <div class="editor-shell">
-        <div id="editor" aria-label="Code editor"></div>
+      <div class="editor-shell" id="editor-shell">
+        <div id="editor" class="editor-pane" aria-label="Code editor"></div>
+        <div id="editor-2" class="editor-pane" aria-label="Code editor, right side" hidden></div>
+        <div id="compare-view" class="history-view" hidden><div class="history-head"><div><span class="eyebrow">UNSAVED EDITS</span><h2 id="compare-title">Compare</h2><p class="history-caption">Red: the version saved in the vault. Green: your unsaved edits. Read-only here.</p></div><div class="history-actions"><button id="compare-revert">Revert to saved</button><button id="compare-close" class="history-primary">Back to editing</button></div></div><div id="compare-diff" class="compare-diff" aria-label="Saved version compared with your unsaved edits"></div></div>
         <div id="loading" class="empty-state"><span class="brand-mark">S</span><h1>Opening your workspace</h1><p>Loading the bundled offline editor…</p></div>
         <div id="locked-view" class="empty-state" hidden><span class="lock-symbol" aria-hidden="true">▣</span><span id="locked-eyebrow" class="eyebrow">SESSION PAUSED</span><h1 id="locked-title">Your workspace is locked</h1><p id="locked-detail">The editor view is hidden. This preview retains its session<br>in memory; locking does not guarantee memory erasure.</p><button id="unlock" class="primary-button"><span id="unlock-label">Unlock synthetic session</span> <span aria-hidden="true">→</span></button></div>
         <div id="project-picker" class="empty-state" hidden><span class="eyebrow">VAULT PROJECTS</span><h1>Choose a project</h1><div id="project-list" class="project-list"></div><form id="new-project-form" class="inline-form wide"><input id="new-project-name" maxlength="64" placeholder="New project name" aria-label="New project name" autocomplete="off" spellcheck="false"><button type="submit">Create project</button></form></div>
@@ -59,7 +69,35 @@
       <button id="reset" class="reset-button">↺ Reset sample workspace</button>
     </aside>
   </div>
-  <footer class="statusbar"><div><span class="footer-mark">◈</span><span id="footer-status" role="status" aria-live="polite">Loading offline Monaco…</span></div><div><span id="cursor-position">Ln 1, Col 1</span><span>Spaces: 2</span><span>UTF-8</span><span id="language-status">TypeScript</span><span class="offline-label">● Offline assets</span></div></footer>
+  <footer class="statusbar"><div><span class="footer-mark">◈</span><span id="footer-status" role="status" aria-live="polite">Loading offline Monaco…</span></div><div><button id="unsaved-status" class="status-button" title="Save all (Ctrl+Alt+S)" hidden></button><span id="cursor-position">Ln 1, Col 1</span><span id="indent-status">Spaces: 2</span><span id="eol-status">LF</span><span>UTF-8</span><span id="size-status" title="Files can be up to 256 KiB"></span><span id="language-status">TypeScript</span><span class="offline-label">● Offline assets</span></div></footer>
 </div>
+<div id="palette" class="palette" role="dialog" aria-modal="true" aria-labelledby="palette-title" hidden>
+  <span id="palette-title" class="tiny-label">GO TO FILE</span>
+  <input id="palette-input" maxlength="200" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-labelledby="palette-title">
+  <ul id="palette-list" class="palette-list" role="listbox" aria-label="Files"></ul>
+  <p id="palette-hint" class="palette-hint"></p>
+</div>
+<div id="dialog-backdrop" class="dialog-backdrop" hidden></div>
+<section id="settings-dialog" class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+  <h2 id="settings-title">Editor settings</h2>
+  <p class="dialog-note">Saved for your Windows account on this computer. Only these display choices are stored, never file names or text.</p>
+  <form id="settings-form" class="settings-form">
+    <label>Theme <select id="set-theme"><option value="dark">Dark</option><option value="light">Light</option><option value="highContrast">High contrast</option></select></label>
+    <label>Font size <input id="set-font" type="number" min="10" max="28" step="1"></label>
+    <label>Tab size <select id="set-tab"><option value="2">2</option><option value="4">4</option><option value="8">8</option></select></label>
+    <label class="check"><input id="set-spaces" type="checkbox"> Insert spaces when pressing Tab</label>
+    <label class="check"><input id="set-wrap" type="checkbox"> Word wrap</label>
+    <label class="check"><input id="set-minimap" type="checkbox"> Minimap</label>
+    <label class="check"><input id="set-whitespace" type="checkbox"> Show spaces and tabs</label>
+    <label class="check"><input id="set-lines" type="checkbox"> Line numbers</label>
+    <p class="dialog-note">Files keep their own indentation: tab size and spaces apply to new files and when you change them here.</p>
+    <div class="dialog-actions"><button type="submit" class="history-primary">Save</button><button type="button" id="settings-defaults">Defaults</button><button type="button" id="settings-cancel">Cancel</button></div>
+  </form>
+</section>
+<section id="shortcuts-dialog" class="dialog dialog-wide" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title" hidden>
+  <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+  <div id="shortcuts-list" class="shortcuts-list"></div>
+  <div class="dialog-actions"><button type="button" id="shortcuts-close" class="history-primary">Close</button></div>
+</section>
 </body>
 </html>

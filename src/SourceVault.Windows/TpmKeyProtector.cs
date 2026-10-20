@@ -75,6 +75,15 @@ public sealed class TpmKeyProtector : IKeyProtector, IDisposable
             throw new CryptographicException();
         }
     }
+    /// <summary>The key's public half (SubjectPublicKeyInfo); the private key never leaves the TPM.</summary>
+    public byte[] ExportSubjectPublicKeyInfo()
+    {
+        lock (sync)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            return rsa.ExportSubjectPublicKeyInfo();
+        }
+    }
     // Provider metadata only: neither opens a persisted key nor creates one.
     public static void ProbeHardwareProvider()
     {

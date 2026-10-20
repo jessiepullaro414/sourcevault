@@ -6,6 +6,9 @@
 #   Setup-SourceVault.ps1 -Update                     replace program files, keep key, vault and settings
 #   Setup-SourceVault.ps1 -Status                     health check of an installed vault
 #   Setup-SourceVault.ps1 -Update -WithBuilds         also install/refresh the build service (Docker builds; see README)
+#   Setup-SourceVault.ps1 -RegisterSender <file>      allow encrypted packages signed by another computer (SourceVault Pack)
+#   Setup-SourceVault.ps1 -VaultRoot K:\SourceVault\vault   new install with the vault on another local drive
+#                                                     (chosen at install only; -Update keeps the configured location)
 #
 # DEVELOPMENT BUILD: use synthetic data only until an independent security review says otherwise.
 param(
@@ -15,7 +18,9 @@ param(
     [switch]$Status,
     [switch]$WithSyntheticDemo,
     [switch]$ManualStart,
-    [switch]$WithBuilds
+    [switch]$WithBuilds,
+    [string]$RegisterSender,
+    [string]$VaultRoot
 )
 $ErrorActionPreference = 'Stop'
 $package = $PSScriptRoot
@@ -25,12 +30,15 @@ $serviceName = 'SourceVault'
 $serviceAccount = 'NT SERVICE\SourceVault'
 $groupName = 'SourceVault Operators'
 $keyName = 'SourceVault.Lab.Service01'
-$vaultParent = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault'
-$vaultRoot = Join-Path $vaultParent 'vault'
+$dataDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault'
+$defaultVaultRoot = Join-Path $dataDir 'vault'
+# $VaultRoot (the parameter) is resolved in "vault location" below; $vaultParent follows it.
 $shortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'SourceVault Editor.lnk'
 $buildServiceName = 'SourceVaultBuild'
 $buildAccount = 'NT SERVICE\SourceVaultBuild'
-$configDir = Join-Path $vaultParent 'config'
+$configDir = Join-Path $dataDir 'config'
+# Registered SourceVault Pack senders (docs/package-import-design.md): administrators change it, the service reads it.
+$sendersDir = Join-Path $dataDir 'senders'
 $buildConfig = Join-Path $configDir 'build.json'
 $exitReasons = @{
     10 = 'vault folder missing or its permissions are not locked down'
@@ -40,6 +48,7 @@ $exitReasons = @{
     14 = 'the service pipe could not be created (name already taken?)'
     15 = 'the vault service account NT SERVICE\SourceVault does not exist (install the vault first)'
     16 = 'the build service is not running as NT SERVICE\SourceVaultBuild'
+    17 = 'the vault drive is not available (missing, offline or BitLocker-locked); unlock or attach it, then start the service'
 }
 
 $script:reported = $false
@@ -91,6 +100,29 @@ function Test-Machine {
 }
 
 function Test-Admin { ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+
+# ---- vault location ---------------------------------------------------------------------------------------------
+# A friendly early check only. The service applies the full rules (path, drive, local disk, permissions) itself.
+function Test-VaultLocation([string]$path) {
+    if ($path.Length -gt 120 -or $path -notmatch '^[A-Za-z]:\\[^\\]+(\\[^\\]+)+$' -or [IO.Path]::GetFullPath($path) -cne $path) {
+        Fail "-VaultRoot must be a full path at least two folders below a drive root, such as K:\SourceVault\vault (at most 120 characters, no trailing \, no . or .. parts)."
+    }
+    foreach ($reserved in $installRoot, $configDir, [Environment]::GetFolderPath('Windows')) {
+        if ($path -eq $reserved -or $path.StartsWith("$reserved\", 'OrdinalIgnoreCase') -or $reserved.StartsWith("$path\", 'OrdinalIgnoreCase')) { Fail "-VaultRoot must not be inside, or contain, $reserved." }
+    }
+    $drive = New-Object IO.DriveInfo ($path.Substring(0, 3))
+    if ($drive.DriveType -eq 'NoRootDirectory' -or !$drive.IsReady) { Fail "Drive $($path.Substring(0, 2)) is not available (missing, offline or BitLocker-locked). Unlock or attach it, then run setup again." }
+    if ($drive.DriveType -ne 'Fixed' -or @('NTFS', 'ReFS') -notcontains $drive.DriveFormat) { Fail "Drive $($path.Substring(0, 2)) is $($drive.DriveType)/$($drive.DriveFormat); the vault needs a fixed local NTFS or ReFS drive." }
+    $disk = Get-Partition -DriveLetter $path[0] -ErrorAction SilentlyContinue | Get-Disk -ErrorAction SilentlyContinue
+    if ($disk -and @('SATA', 'ATA', 'SAS', 'SCSI', 'NVMe', 'RAID', 'Spaces') -notcontains [string]$disk.BusType) { Fail "Drive $($path.Substring(0, 2)) is on a $($disk.BusType) disk. The vault must be on an internal SATA/ATA/SAS/SCSI/NVMe/RAID or Storage Spaces disk, not USB, SD, iSCSI or a mounted VHD." }
+}
+# The root the installed service uses: schema 2 names it, schema 1 means the default.
+function Get-ConfiguredVaultRoot {
+    $config = Join-Path $installRoot 'service\sourcevault.service.json'
+    if (!(Test-Path -LiteralPath $config)) { return $defaultVaultRoot }
+    $json = Get-Content -LiteralPath $config -Raw | ConvertFrom-Json
+    if ($json.schemaVersion -eq 2) { return [string]$json.vaultRoot } else { return $defaultVaultRoot }
+}
 
 # ---- helpers ----------------------------------------------------------------------------------------------------
 function Wait-Service([string[]]$states, [int]$seconds, [string]$name = $serviceName) {
@@ -150,7 +182,10 @@ function Copy-Payload([bool]$keepConfig) {
     }
     $serviceConfig = Join-Path $installRoot 'service\sourcevault.service.json'
     if (!(Test-Path -LiteralPath $serviceConfig)) {
-        [IO.File]::WriteAllText($serviceConfig, '{"schemaVersion":1,"mode":"MetadataOnly","keyName":"' + $keyName + '"}', (New-Object Text.UTF8Encoding $false))
+        # Schema 1 = the default vault root; schema 2 names an administrator-chosen one.
+        $json = if ($VaultRoot -eq $defaultVaultRoot) { '{"schemaVersion":1,"mode":"MetadataOnly","keyName":"' + $keyName + '"}' }
+                else { '{"schemaVersion":2,"mode":"MetadataOnly","keyName":"' + $keyName + '","vaultRoot":' + ($VaultRoot | ConvertTo-Json) + '}' }
+        [IO.File]::WriteAllText($serviceConfig, $json, (New-Object Text.UTF8Encoding $false))
     }
     Assert-NoUserWrite (@($installRoot) + @(Get-ChildItem -LiteralPath $installRoot -Recurse | ForEach-Object FullName))
 }
@@ -171,8 +206,9 @@ function Set-ExactSecurity([string]$path, [string]$sddl) {
     $applied = (Get-Item -LiteralPath $path).GetAccessControl($sections).GetSecurityDescriptorSddlForm($sections)
     if ((Get-SddlShape $applied) -ne (Get-SddlShape $sddl)) { Fail "Permissions on $path did not apply exactly." }
 }
-function Invoke-ServiceTool([string]$command) {
-    $output = & (Join-Path $installRoot 'runtime\dotnet.exe') (Join-Path $installRoot 'service\SourceVault.Service.dll') $command
+function Invoke-ServiceTool([string]$command, [string]$argument) {
+    $toolArgs = @($command) + $(if ($argument) { @($argument) } else { @() })
+    $output = & (Join-Path $installRoot 'runtime\dotnet.exe') (Join-Path $installRoot 'service\SourceVault.Service.dll') @toolArgs
     return @{ Output = ($output | Out-String).Trim(); Exit = $LASTEXITCODE }
 }
 
@@ -190,7 +226,19 @@ function Show-Status {
         Ok "operators: $(if ($members) { $members -join ', ' } else { '(none)' })"
     } else { Warn "local group '$groupName' is missing" }
     $check = Invoke-ServiceTool 'vault-root-check'
-    if ($check.Exit -eq 0) { Ok 'vault folder permissions trusted' } else { Warn "vault folder check failed:`n$($check.Output)" }
+    $where = [string](($check.Output -split "`r?`n" | Where-Object { $_ -like 'vaultRoot=*' }) -replace '^vaultRoot=(.*); trusted=.*$', '$1')
+    if ($check.Exit -eq 0) { Ok "vault folder $where; permissions trusted" }
+    elseif ($check.Output -match 'volume_unavailable') { Warn "vault drive for $where is not available (missing, offline or BitLocker-locked)" }
+    else { Warn "vault folder check failed:`n$($check.Output)" }
+    if ($where -match '^[A-Za-z]:\\' -and (New-Object IO.DriveInfo ($where.Substring(0, 3))).IsReady) {
+        $volume = Get-Volume -DriveLetter $where[0] -ErrorAction SilentlyContinue
+        $disk = Get-Partition -DriveLetter $where[0] -ErrorAction SilentlyContinue | Get-Disk -ErrorAction SilentlyContinue
+        Ok "vault drive $($where.Substring(0, 2)): $($volume.DriveType), $($volume.FileSystem), $($disk.BusType) disk"
+    }
+    if (Test-Path -LiteralPath $sendersDir) {
+        $registered = @(Get-ChildItem -LiteralPath $sendersDir -Filter '*.json' -File | ForEach-Object { try { (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).computer } catch { "$($_.Name) (unreadable)" } })
+        Ok "package senders registered: $(if ($registered) { $registered -join ', ' } else { '(none)' })"
+    } else { Warn 'no package senders folder (run setup -Update)' }
     if ($service.Status -eq 'Running') {
         $pipe = [bool]([IO.Directory]::GetFiles('\\.\pipe\') | Where-Object { $_ -like '*\SourceVault.v1' })
         if ($pipe) { Ok 'service RUNNING and listening' } else { Warn 'service running but its pipe was not found' }
@@ -221,6 +269,25 @@ if ($Status) {
 Step 'Pre-flight checks'
 Test-Package
 Test-Machine
+if ($RegisterSender) {
+    if (!(Test-Admin)) { Fail 'Run -RegisterSender from an elevated PowerShell (Run as administrator).' }
+    Step 'Register a SourceVault Pack sender'
+    if (!(Test-Path -LiteralPath $sendersDir)) { Fail "$sendersDir is missing. Run Setup-SourceVault.ps1 -Update first." }
+    $file = (Resolve-Path -LiteralPath $RegisterSender).Path
+    $check = Invoke-ServiceTool 'sender-check' $file
+    if ($check.Exit -ne 0) { Fail "That is not a valid SourceVault sender file: $($check.Output)" }
+    $fields = @{}; foreach ($line in $check.Output -split "`r?`n") { if ($line -match '^(\w+)=(.*)$') { $fields[$Matches[1]] = $Matches[2] } }
+    if ($fields.fingerprint -notmatch '^[0-9a-f]{64}$') { Fail 'The service tool did not report a fingerprint.' }
+    Write-Host "   computer:    $($fields.computer)"
+    Write-Host "   fingerprint: $($fields.display)"
+    Write-Host '   Compare the fingerprint with what "SourceVault.Pack.exe init" printed on that computer.'
+    if ((Read-Host '   Type YES to allow packages signed by this computer') -ne 'YES') { Write-Host 'Nothing was registered.'; return }
+    $target = Join-Path $sendersDir "$($fields.fingerprint).json"
+    Copy-Item -LiteralPath $file -Destination $target -Force
+    Ok "registered $($fields.computer); remove it later by deleting $target"
+    return
+}
+if ($VaultRoot) { Test-VaultLocation $VaultRoot; Ok "vault location $VaultRoot is on a fixed local drive" }
 if ($CheckOnly) { Write-Host "`nPre-flight passed. Nothing was changed." -ForegroundColor Green; return }
 if (!(Test-Admin)) { Fail 'Run setup from an elevated PowerShell (right-click > Run as administrator).' }
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -228,6 +295,13 @@ if ($existing -and !$Update) { Fail 'SourceVault is already installed. Use -Upda
 if (!$existing -and $Update) { Fail 'SourceVault is not installed yet; run setup without -Update.' }
 $running = Get-Process -Name 'SourceVault.Editor', 'SourceVault.LabClient' -ErrorAction SilentlyContinue
 if ($running) { Fail 'Close all SourceVault editor and lab client windows first.' }
+# The location is chosen at install only. -Update keeps the configured root; moving a vault is not supported.
+if ($Update) {
+    $configured = Get-ConfiguredVaultRoot
+    if ($VaultRoot -and $VaultRoot -ne $configured) { Fail "-Update can't move the vault (it is in $configured). To start over elsewhere: uninstall (the vault is kept), then install with -VaultRoot." }
+    $VaultRoot = $configured
+} elseif (!$VaultRoot) { $VaultRoot = $defaultVaultRoot }
+$vaultParent = Split-Path -Parent $VaultRoot
 
 Step "Operators group '$groupName'"
 if (!(Get-LocalGroup -Name $groupName -ErrorAction SilentlyContinue)) {
@@ -269,23 +343,54 @@ else {
     Fail "Key provisioning failed (Win32 $($result.Win32), code $($result.Specific): $what)."
 }
 
-Step "Vault folder ($vaultRoot)"
+Step 'TPM key for package import'
+# A separate decrypt-only key for encrypted packages from other computers (docs/package-import-design.md, D1).
+# Optional: without it, package import is unavailable and everything else works.
+$result = Invoke-ServiceOnce 'provision-import-key'
+if ($result.Win32 -eq 0) { Ok "created decrypt-only import key $keyName.Import under $serviceAccount (export refused, test round trip passed)" }
+elseif ($result.Win32 -eq 1066 -and $result.Specific -eq 1) { Ok 'import key already exists (kept)' }
+else { Warn "the package import key could not be created (Win32 $($result.Win32), code $($result.Specific)); package import stays unavailable" }
+
+Step "Vault folder ($VaultRoot)"
 $serviceSid = ([Security.Principal.NTAccount]$serviceAccount).Translate([Security.Principal.SecurityIdentifier]).Value
-if (Test-Path -LiteralPath $vaultParent) {
-    $check = Invoke-ServiceTool 'vault-root-check'
-    if ($check.Exit -ne 0) { Write-Host $check.Output; Fail "The existing vault folder is not trusted. Setup does not change an existing vault; review $vaultParent." }
-    Ok 'existing vault folder kept; permissions trusted'
+# The service judges the configured root. Setup only creates the vault folder and its parent when they are missing,
+# never changes an existing folder, and never touches the drive root or anything above the parent.
+$check = Invoke-ServiceTool 'vault-root-check'
+$findings = @($check.Output -split "`r?`n" | Where-Object { $_ -match '^(error|warning) ' })
+if ($check.Exit -eq 0) { Ok 'existing vault folder kept; permissions trusted' }
+elseif ($check.Output -match 'volume_unavailable') { Fail "Drive $($VaultRoot.Substring(0, 2)) is not available (missing, offline or BitLocker-locked). Unlock or attach it, then run setup -Update." }
+elseif (@($findings | Where-Object { $_ -notmatch '^error missing at (root|ancestor:1)$' }).Count -gt 0) {
+    Write-Host $check.Output
+    if (Test-Path -LiteralPath $VaultRoot) { Fail "The existing vault folder is not trusted. Setup does not change an existing vault; review $VaultRoot." }
+    Fail "The drive or the folders above $vaultParent are not locked down enough for a vault (findings above). Setup never changes them; see 'Vault on another drive' in the user guide. Nothing was created."
+} elseif ($Update -and (Test-Path -LiteralPath $vaultParent)) {
+    # A vault that existed and is now gone must not be silently replaced by an empty one.
+    Fail "The vault folder $VaultRoot is missing. -Update never creates a new, empty vault in place of a missing one; find out what happened to it first."
 } else {
     $rootSddl = (Invoke-ServiceTool 'vault-root-sddl').Output
     if ($rootSddl -notmatch '^D:P(\(A;OICI;FA;;;S-1-5-[0-9-]+\))+$' -or $rootSddl -notmatch [regex]::Escape($serviceSid)) { Fail 'The service did not report the expected vault permissions.' }
-    New-Item -ItemType Directory -Path $vaultParent | Out-Null
-    Set-ExactSecurity $vaultParent "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;$serviceSid)"
-    New-Item -ItemType Directory -Path $vaultRoot | Out-Null
-    Set-ExactSecurity $vaultRoot ('O:BA' + $rootSddl)
+    if (!(Test-Path -LiteralPath $vaultParent)) {
+        New-Item -ItemType Directory -Path $vaultParent | Out-Null
+        Set-ExactSecurity $vaultParent "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;$serviceSid)"
+    }
+    New-Item -ItemType Directory -Path $VaultRoot | Out-Null
+    Set-ExactSecurity $VaultRoot ('O:BA' + $rootSddl)
     $check = Invoke-ServiceTool 'vault-root-check'
     if ($check.Exit -ne 0) { Write-Host $check.Output; Fail 'The new vault folder did not pass the service check.' }
     Ok 'created; only the service, SYSTEM and Administrators can access it'
 }
+
+Step "Package senders folder ($sendersDir)"
+if (!(Test-Path -LiteralPath $sendersDir)) {
+    if (!(Test-Path -LiteralPath $dataDir)) {
+        # Only when the vault is on another drive: the protected parent the default vault would have had.
+        New-Item -ItemType Directory -Path $dataDir | Out-Null
+        Set-ExactSecurity $dataDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+    }
+    New-Item -ItemType Directory -Path $sendersDir | Out-Null
+    Set-ExactSecurity $sendersDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSid)"
+    Ok 'created; administrators register senders here, the service can only read it'
+} else { Ok 'kept' }
 
 if ($WithSyntheticDemo) {
     Step 'Synthetic demo project'
@@ -325,6 +430,11 @@ if ($WithBuilds -or $buildExisting) {
 
     # Admin-only configuration: Administrators and SYSTEM change it; the build service only reads it; operators can't see it.
     if (!(Test-Path -LiteralPath $configDir)) {
+        if (!(Test-Path -LiteralPath $dataDir)) {
+            # Only when the vault is on another drive: the protected parent the default vault would have had.
+            New-Item -ItemType Directory -Path $dataDir | Out-Null
+            Set-ExactSecurity $dataDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        }
         New-Item -ItemType Directory -Path $configDir | Out-Null
         Set-ExactSecurity $configDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$buildSid)"
         Ok "created $configDir (administrators only; the build service can read it)"

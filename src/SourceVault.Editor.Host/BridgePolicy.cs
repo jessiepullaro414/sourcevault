@@ -4,10 +4,11 @@ using System.Text.Json;
 
 namespace SourceVault.Editor.Host;
 
-internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock }
+internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock, SearchProject, GetSettings, SaveSettings }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
-internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0);
+internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0,
+    string? Query = null, bool MatchCase = false, bool WholeWord = false, EditorSettings? Settings = null);
 
 /// <summary>
 /// Bridge v2 (docs/editor-vault-design.md): pure, UI-free validation of renderer-to-host vault requests and
@@ -24,6 +25,7 @@ internal static class BridgePolicy
     internal const int MaxMessageChars = 2 * 1024 * 1024; // checked before parsing; escaped 256 KiB text fits
     internal const int MaxTextBytes = 256 * 1024;
     internal const int MaxNameChars = 260; // vault paths: up to 260 characters ("src/app/main.ts")
+    internal const int MaxQueryChars = 200; // "Search all files": one line of plain text
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
     private static readonly Dictionary<string, (VaultOperation Op, string[] Args)> Operations = new(StringComparer.Ordinal)
@@ -53,6 +55,9 @@ internal static class BridgePolicy
         ["createFile"] = (VaultOperation.CreateFile, ["projectId", "name", "text"]),
         ["lock"] = (VaultOperation.Lock, []),
         ["unlock"] = (VaultOperation.Unlock, []),
+        ["searchProject"] = (VaultOperation.SearchProject, ["projectId", "query", "matchCase", "wholeWord"]),
+        ["getSettings"] = (VaultOperation.GetSettings, []),
+        ["saveSettings"] = (VaultOperation.SaveSettings, ["settings"]), // display preferences only (EditorSettings)
     };
 
     /// <summary>Exactly {type, requestId, operation, args} with the operation's exact argument set. Never throws.</summary>
@@ -73,7 +78,9 @@ internal static class BridgePolicy
             if (!ExactFields(args, op.Args)) return false;
             Guid projectId = Guid.Empty, fileId = Guid.Empty, revisionId = Guid.Empty;
             int page = 0, buildNumber = 0;
-            string? name = null, text = null, newName = null;
+            string? name = null, text = null, newName = null, query = null;
+            bool matchCase = false, wholeWord = false;
+            EditorSettings? settings = null;
             if (op.Args.Contains("projectId") && !TryId(args.GetProperty("projectId"), out projectId)) return false;
             if (op.Args.Contains("fileId") && !TryId(args.GetProperty("fileId"), out fileId)) return false;
             if (op.Args.Contains("name") && !TryName(args.GetProperty("name"), out name)) return false;
@@ -82,7 +89,11 @@ internal static class BridgePolicy
             if (op.Args.Contains("revisionId") && !TryId(args.GetProperty("revisionId"), out revisionId)) return false;
             if (op.Args.Contains("page") && !TryPage(args.GetProperty("page"), out page)) return false;
             if (op.Args.Contains("buildNumber") && !TryBuildNumber(args.GetProperty("buildNumber"), out buildNumber)) return false;
-            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber);
+            if (op.Args.Contains("query") && !TryQuery(args.GetProperty("query"), out query)) return false;
+            if (op.Args.Contains("matchCase") && !TryBool(args.GetProperty("matchCase"), out matchCase)) return false;
+            if (op.Args.Contains("wholeWord") && !TryBool(args.GetProperty("wholeWord"), out wholeWord)) return false;
+            if (op.Args.Contains("settings")) { if (!EditorSettings.TryParse(args.GetProperty("settings"), out var parsed)) return false; settings = parsed; }
+            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber, query, matchCase, wholeWord, settings);
             return true;
         }
         catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException)
@@ -141,6 +152,19 @@ internal static class BridgePolicy
     {
         name = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         return name is { Length: > 0 and <= MaxNameChars } && !name.Any(char.IsControl) && IsStrictUtf8(name, out _);
+    }
+
+    // One line of plain text, 1-200 characters, no control characters.
+    private static bool TryQuery(JsonElement value, out string? query)
+    {
+        query = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        return query is { Length: > 0 and <= MaxQueryChars } && !query.Any(char.IsControl);
+    }
+
+    private static bool TryBool(JsonElement value, out bool flag)
+    {
+        flag = value.ValueKind == JsonValueKind.True;
+        return value.ValueKind is JsonValueKind.True or JsonValueKind.False;
     }
 
     private static bool TryPage(JsonElement value, out int page)

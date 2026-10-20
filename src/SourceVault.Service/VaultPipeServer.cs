@@ -104,6 +104,8 @@ internal sealed class VaultPipeServer : IDisposable
         if (state.Capability is not null) CryptographicOperations.ZeroMemory(state.Capability);
         state.Capability = null;
         state.Closed = true;
+        state.OnClose?.Invoke(); // ends an unfinished package upload and frees its slot
+        state.OnClose = null;
         try { pipe.Dispose(); } catch { /* already closed */ }
     }
 

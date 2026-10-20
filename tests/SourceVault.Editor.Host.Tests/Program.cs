@@ -112,7 +112,7 @@ Check("malformed blob URIs from the app origin are rejected", () => Rejects(Prev
 Check("navigation never allows blob URIs, resources allow only app URIs and app blobs", () =>
 {
     Rejects(PreviewPolicy.IsNavigationAllowed, "blob:" + App + "/" + Guid1, "https://evil.example/", "http://sourcevault.local/");
-    Accepts(PreviewPolicy.IsNavigationAllowed, App + "/index.html");
+    Accepts(PreviewPolicy.IsNavigationAllowed, App + "/index.html", PreviewPolicy.EntryUri);
     Accepts(PreviewPolicy.IsResourceAllowed, App + "/vs/loader.js", "blob:" + App + "/" + Guid1);
     Rejects(PreviewPolicy.IsResourceAllowed, "https://cdn.jsdelivr.net/npm/monaco-editor/min/vs/loader.js", "https://sourcevault.local.evil/vs/loader.js",
         "http://127.0.0.1:8080/index.html", "data:text/javascript,1", "blob:https://evil.example/" + Guid1, "ws://sourcevault.local/", "file:///C:/secret.txt");
@@ -431,6 +431,317 @@ Check("every shipped web asset, including all of vendor/monaco, is allowed at it
         var url = App + "/" + string.Join('/', relative.Split('/').Select(Uri.EscapeDataString));
         Assert(PreviewPolicy.IsResourceAllowed(url), "asset refused: " + relative);
     }
+});
+
+// ---- Only the bundled app can be navigated to ----
+Check("top-level navigation allows only the exact entry document", () =>
+{
+    Accepts(PreviewPolicy.IsNavigationAllowed, App + "/index.html", "HTTPS://SOURCEVAULT.LOCAL/index.html", App + ":443/index.html");
+    Rejects(PreviewPolicy.IsNavigationAllowed,
+        App, App + "/", App + "/index.html?fake-vault", App + "/index.html?", App + "/index.html#", App + "/index.html#top",
+        App + "/INDEX.HTML", App + "/Index.html", App + "/index.htm", App + "/index.html/", App + "/index.html/x", App + "//index.html",
+        App + "/index%2ehtml", App + "/./index.html", App + "/vendor/../index.html", App + "/vendor/monaco/vs/loader.js",
+        App + "/vendor/monaco/LICENSE", App + "/README.md", App + "/app.mjs", App + "/dev/fake-host.mjs", App + "/vendor/monaco/vs/editor/editor.main.js");
+});
+
+Check("external URI schemes and browser-internal pages are never navigable", () => Rejects(PreviewPolicy.IsNavigationAllowed,
+    "mailto:someone@example.com", "mailto:?body=secret", "tel:+15550100", "sms:+15550100", "ms-settings:", "ms-settings:privacy-webcam",
+    "ms-windows-store://home", "ms-word:ofe|u|https://evil.example/a.docx", "search-ms:query=secret", "ms-msdt:/id", "microsoft-edge:https://evil.example/",
+    "microsoft-edge://settings", "edge://settings", "edge://inspect", "chrome://settings", "chrome-extension://abc/x.html", "devtools://devtools/bundled/inspector.html",
+    "view-source:" + App + "/index.html", "about:blank", "about:srcdoc", "about:config", "data:text/html,<script>alert(1)</script>",
+    "data:text/html;base64,PHNjcmlwdD4=", "javascript:alert(1)", "vbscript:msgbox(1)", "file:///C:/Windows/win.ini", "file://evil.example/share/x",
+    "\\\\evil.example\\share\\x", "//evil.example/", "intent://x#Intent;scheme=https;end", "ftp://example.com/", "ws://sourcevault.local/", "wss://sourcevault.local/",
+    "blob:" + App + "/" + Guid1, "filesystem:" + App + "/temporary/x", "sourcevault.local:443/index.html", "web+sourcevault:x", "callto:x", "shell:startup"));
+
+Check("network addresses in every spelling are refused for navigation and resources", () =>
+{
+    string[] addresses =
+    [
+        "https://example.com/", "http://example.com/", "https://127.0.0.1/", "http://127.0.0.1:4293/index.html", "https://localhost/", "http://localhost:1/",
+        "https://[::1]/", "https://[::ffff:127.0.0.1]/", "https://0.0.0.0/", "https://2130706433/", "https://0x7f000001/", "https://0177.0.0.1/",
+        "https://127.1/", "https://10.0.0.1/", "https://192.168.1.1/", "https://169.254.169.254/latest/meta-data", "https://[fe80::1%25eth0]/",
+        "https://sourcevault.local.example.com/", "https://sourcevault.localhost/", "https://sourcevault/", "http://sourcevault.local/index.html",
+        "https://sourcevault.local:1/", "https://sourcevault.local:9222/json", "https://cdn.jsdelivr.net/npm/monaco-editor@0.57.0/min/vs/loader.js",
+        "https://unpkg.com/monaco-editor/min/vs/loader.js", "ws://127.0.0.1:9222/devtools/browser", "wss://example.com/socket", "stun:stun.example.com:3478",
+        "turn:turn.example.com", "https://login.microsoftonline.com/", "https://smartscreen.microsoft.com/",
+    ];
+    Rejects(PreviewPolicy.IsNavigationAllowed, addresses);
+    Rejects(PreviewPolicy.IsResourceAllowed, addresses);
+    Rejects(PreviewPolicy.IsAppUri, addresses);
+});
+
+// ---- Browser launch arguments (no network underneath the request filters) ----
+// Windows command-line splitting as CommandLineToArgvW does it for these simple cases: spaces separate, quotes group.
+List<string> SplitArgs(string line)
+{
+    var args = new List<string>();
+    var current = new StringBuilder();
+    bool quoted = false, any = false;
+    foreach (char c in line)
+    {
+        if (c == '"') { quoted = !quoted; any = true; }
+        else if (c == ' ' && !quoted) { if (any) args.Add(current.ToString()); current.Clear(); any = false; }
+        else { current.Append(c); any = true; }
+    }
+    Assert(!quoted, "unbalanced quote in browser arguments");
+    if (any) args.Add(current.ToString());
+    return args;
+}
+Dictionary<string, string?> Switches(string line)
+{
+    var map = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+    foreach (string arg in SplitArgs(line))
+    {
+        Assert(arg.StartsWith("--", StringComparison.Ordinal), "not a switch: " + arg);
+        int eq = arg.IndexOf('=');
+        string name = eq < 0 ? arg[2..] : arg[2..eq];
+        Assert(map.TryAdd(name, eq < 0 ? null : arg[(eq + 1)..]), "switch given twice (the last copy would win): " + name);
+    }
+    return map;
+}
+
+Check("browser arguments parse cleanly: only switches, each once, no control characters", () =>
+{
+    string line = NetworkPolicy.AdditionalBrowserArguments;
+    Assert(line.All(c => c >= 0x20 && c < 0x7F), "printable ASCII only");
+    Assert(SplitArgs(line).Count == NetworkPolicy.BrowserSwitches.Count, "each list entry is exactly one argument after Windows quoting");
+    Switches(line);
+});
+
+Check("every connection goes to a dead loopback proxy with no bypass and no direct fallback", () =>
+{
+    var s = Switches(NetworkPolicy.AdditionalBrowserArguments);
+    Assert(s.TryGetValue("proxy-server", out var proxy) && proxy is not null, "proxy-server present");
+    Assert(!proxy!.Contains(';') && !proxy.Contains('=') && !proxy.Contains(',') && !proxy.Contains("direct", StringComparison.OrdinalIgnoreCase),
+        "a single proxy for every scheme, no per-scheme list, no DIRECT fallback");
+    Assert(Uri.TryCreate(proxy, UriKind.Absolute, out var uri) && uri.Scheme == "http" && uri.AbsolutePath == "/" && uri.UserInfo.Length == 0, "plain http proxy URI");
+    Assert(System.Net.IPAddress.TryParse(uri!.Host, out var ip) && System.Net.IPAddress.IsLoopback(ip), "proxy is a loopback IP literal, so reaching it needs no DNS");
+    Assert(!uri.IsDefaultPort && uri.Port is > 0 and < 1024, "explicit nonzero privileged port");
+    Assert(s.TryGetValue("proxy-bypass-list", out var bypass) && bypass == "<-loopback>", "the only bypass entry removes the implicit loopback bypass");
+    foreach (string loosening in new[] { "no-proxy-server", "proxy-auto-detect", "proxy-pac-url", "winhttp-proxy-resolver" })
+        Assert(!s.ContainsKey(loosening), "must not override the fixed proxy: " + loosening);
+});
+
+Check("host names never resolve and WebRTC may not send unproxied UDP", () =>
+{
+    var s = Switches(NetworkPolicy.AdditionalBrowserArguments);
+    Assert(s.TryGetValue("host-resolver-rules", out var rules) && rules == "MAP * ~NOTFOUND", "every host maps to NOTFOUND, with no EXCLUDE");
+    foreach (string spelling in new[] { "webrtc-ip-handling-policy", "force-webrtc-ip-handling-policy" })
+        Assert(s.TryGetValue(spelling, out var webrtc) && webrtc == "disable_non_proxied_udp", "WebRTC limited to the dead proxy: " + spelling);
+    foreach (string background in new[] { "disable-background-networking", "disable-component-update", "disable-domain-reliability", "no-pings" })
+        Assert(s.TryGetValue(background, out var value) && value is null, "background service switch: " + background);
+});
+
+Check("browser arguments contain no debugging, sandbox, security or profile overrides", () =>
+{
+    var s = Switches(NetworkPolicy.AdditionalBrowserArguments);
+    foreach (string name in s.Keys)
+        Assert(!name.Contains("debug", StringComparison.OrdinalIgnoreCase) && !name.Contains("devtools", StringComparison.OrdinalIgnoreCase) &&
+            !name.Contains("sandbox", StringComparison.OrdinalIgnoreCase) && !name.Contains("insecure", StringComparison.OrdinalIgnoreCase) &&
+            !name.Contains("certificate", StringComparison.OrdinalIgnoreCase) && !name.Contains("extension", StringComparison.OrdinalIgnoreCase),
+            "forbidden switch family: " + name);
+    foreach (string forbidden in new[] { "disable-web-security", "user-data-dir", "remote-allow-origins", "disable-site-isolation-trials", "enable-features",
+        "allow-file-access-from-files", "unsafely-treat-insecure-origin-as-secure", "edge-webview-switches", "single-process", "in-process-gpu" })
+        Assert(!s.ContainsKey(forbidden), "forbidden switch: " + forbidden);
+});
+
+Check("the document-created script removes every WebRTC constructor with the renderer guard's exact descriptor", () =>
+{
+    string script = NetworkPolicy.DocumentCreatedScript;
+    foreach (string name in new[] { "RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel" })
+        Assert(NetworkPolicy.WebRtcGlobals.Contains(name), "covered: " + name);
+    Assert(script.Contains("{ value: undefined, writable: false, configurable: false }", StringComparison.Ordinal), "non-configurable, non-writable, undefined");
+    Assert(NetworkPolicy.WebRtcGlobals.All(n => n.All(char.IsAsciiLetter)), "names are plain identifiers, nothing to escape");
+    Assert(!script.Contains('\n') && !script.Contains("eval", StringComparison.Ordinal) && !script.Contains("postMessage", StringComparison.Ordinal), "a fixed, single-statement script");
+    // shell.mjs redefines the same globals later; that only succeeds if it uses the identical descriptor and covers them all.
+    string shell = File.ReadAllText(Path.Combine(RepoRoot(), "src", "SourceVault.Editor.Web", "shell.mjs"));
+    var list = System.Text.RegularExpressions.Regex.Match(shell, @"blockedNetworkGlobals = \[([^\]]*)\]");
+    Assert(list.Success, "blockedNetworkGlobals found in shell.mjs");
+    foreach (string name in NetworkPolicy.WebRtcGlobals) Assert(list.Groups[1].Value.Contains("'" + name + "'", StringComparison.Ordinal), "renderer guard also lists " + name);
+    Assert(shell.Contains("{ value, writable: false, configurable: false }", StringComparison.Ordinal), "renderer guard uses the same descriptor attributes");
+});
+
+// ---- Registry policy overrides ----
+string? Reg(string exe, params (string Setting, string ValueName)[] values) => NetworkPolicy.FindRegistryOverride(values, exe);
+const string Exe = "SourceVault.Editor.exe";
+
+Check("no WebView2 policy values means no override", () =>
+{
+    Assert(Reg(Exe) is null, "empty");
+    Assert(Reg(Exe, ("AdditionalBrowserArguments", "other.exe"), ("BrowserExecutableFolder", "msedge.exe"), ("UserDataFolder", "OTHER.EXE"),
+        ("ReleaseChannelPreference", "Teams.exe")) is null, "values for other executables never apply to this process");
+});
+
+Check("values that the loader would apply to this editor are refused", () =>
+{
+    foreach (string setting in new[] { "AdditionalBrowserArguments", "BrowserExecutableFolder", "UserDataFolder", "ReleaseChannelPreference", "ChannelSearchKind", "SomeFutureSetting" })
+        foreach (string name in new[] { Exe, "sourcevault.editor.exe", "SOURCEVAULT.EDITOR.EXE", "*" })
+        {
+            string? found = Reg(Exe, ("AdditionalBrowserArguments", "other.exe"), (setting, name));
+            Assert(found is not null && found.StartsWith(setting + "\\", StringComparison.Ordinal), $"refused: {setting}\\{name}");
+        }
+});
+
+Check("value names that might be an AppUserModelID, or are near misses, fail closed", () =>
+{
+    foreach (string name in new[] { "SourceVault.Editor", "Contoso.SourceVault_8wekyb3d8bbwe!App", "SourceVault.Editor.exe ", "SourceVault.Editor.exe.bak",
+        "SourceVault.Editor.ex", " *", "**", "", "SourceVault.Editor.exe\0" })
+        Assert(Reg(Exe, ("AdditionalBrowserArguments", name)) is not null, "refused: [" + name + "]");
+    Assert(Reg(Exe, ("AdditionalBrowserArguments", "")) == "AdditionalBrowserArguments\\(Default)", "default value is named readably");
+});
+
+Check("missing executable name or unreadable entries fail closed", () =>
+{
+    Assert(Reg("", ("AdditionalBrowserArguments", "other.exe")) is not null, "no executable name: nothing can be ruled out");
+    Assert(NetworkPolicy.FindRegistryOverride([(null!, "x")], Exe) is not null, "null setting");
+    Assert(NetworkPolicy.FindRegistryOverride([("AdditionalBrowserArguments", null!)], Exe) is not null, "null value name");
+});
+
+// ---- Shipped renderer: CSP and first-party code cannot reach the network ----
+string RepoRoot()
+{
+    var dir = new DirectoryInfo(AppContext.BaseDirectory);
+    while (dir is not null && !File.Exists(Path.Combine(dir.FullName, "SourceVault.sln"))) dir = dir.Parent;
+    Assert(dir is not null, "repository root not found above the test binary");
+    return dir!.FullName;
+}
+string WebRoot() => Path.Combine(RepoRoot(), "src", "SourceVault.Editor.Web");
+List<string> Shipped() => Directory.EnumerateFiles(WebRoot(), "*", SearchOption.AllDirectories)
+    .Select(f => Path.GetRelativePath(WebRoot(), f).Replace('\\', '/'))
+    .Where(r => !r.StartsWith("dev/", StringComparison.Ordinal)).ToList();
+
+Check("index.html is the only shipped HTML document", () =>
+{
+    var html = Shipped().Where(r => r.EndsWith(".html", StringComparison.OrdinalIgnoreCase) || r.EndsWith(".htm", StringComparison.OrdinalIgnoreCase) ||
+        r.EndsWith(".xhtml", StringComparison.OrdinalIgnoreCase) || r.EndsWith(".svg", StringComparison.OrdinalIgnoreCase)).ToList();
+    Assert(html.SequenceEqual(["index.html"]), "shipped documents: " + string.Join(", ", html));
+});
+
+Check("index.html CSP allows only the app origin, before any resource loads", () =>
+{
+    string page = File.ReadAllText(Path.Combine(WebRoot(), "index.html"));
+    var metas = System.Text.RegularExpressions.Regex.Matches(page, "<meta[^>]*http-equiv=\"Content-Security-Policy\"[^>]*content=\"([^\"]*)\"[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    Assert(metas.Count == 1, "exactly one CSP meta element");
+    int firstResource = new[] { page.IndexOf("<link", StringComparison.OrdinalIgnoreCase), page.IndexOf("<script", StringComparison.OrdinalIgnoreCase) }.Where(i => i >= 0).Min();
+    Assert(metas[0].Index < firstResource, "CSP meta precedes every link and script (a meta CSP only governs what follows it)");
+    var policy = new Dictionary<string, string[]>(StringComparer.Ordinal);
+    foreach (string directive in metas[0].Groups[1].Value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        string[] parts = directive.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        Assert(policy.TryAdd(parts[0], parts[1..]), "duplicate directive: " + parts[0]);
+    }
+    // Every directive and source is allowlisted; hosts, schemes, wildcards and eval fail this test by design.
+    var allowed = new Dictionary<string, string[]>
+    {
+        ["default-src"] = ["'none'"], ["script-src"] = ["'self'"], ["style-src"] = ["'self'", "'unsafe-inline'"], ["font-src"] = ["'self'", "data:"],
+        ["img-src"] = ["'self'", "data:"], ["worker-src"] = ["'self'", "blob:"], ["connect-src"] = ["'self'"], ["base-uri"] = ["'none'"],
+        ["form-action"] = ["'none'"], ["object-src"] = ["'none'"],
+    };
+    foreach (var (name, sources) in policy)
+    {
+        Assert(allowed.TryGetValue(name, out var permitted), "unexpected directive: " + name);
+        foreach (string source in sources) Assert(permitted!.Contains(source), $"{name} source not allowed: {source}");
+    }
+    foreach (string required in new[] { "default-src", "connect-src", "form-action", "base-uri", "object-src" })
+        Assert(policy.ContainsKey(required), "missing directive: " + required);
+    Assert(policy["default-src"].SequenceEqual(["'none'"]) && policy["connect-src"].SequenceEqual(["'self'"]), "default none, connections same-origin only");
+});
+
+Check("index.html has no external links, hints, frames, forms, base or refresh", () =>
+{
+    string page = File.ReadAllText(Path.Combine(WebRoot(), "index.html"));
+    foreach (string pattern in new[] { @"[a-z][a-z0-9+.\-]*://", @"\brel\s*=\s*""?[^"">]*(prefetch|preconnect|dns-prefetch|prerender|preload|modulepreload|manifest|icon)",
+        "<iframe", "<frame", "<object", "<embed", "<base", @"http-equiv\s*=\s*""?refresh", @"\baction\s*=", @"\bping\s*=", @"\bsrcdoc\s*=", @"\bhref\s*=\s*""(?!app\.css"")",
+        @"\bsrc\s*=\s*""(?!vendor/monaco/vs/loader\.js""|app\.mjs"")" })
+        Assert(!System.Text.RegularExpressions.Regex.IsMatch(page, pattern, System.Text.RegularExpressions.RegexOptions.IgnoreCase), "index.html matches " + pattern);
+});
+
+Check("first-party renderer code has no network calls, URL sinks or external URLs", () =>
+{
+    var firstParty = Shipped().Where(r => !r.StartsWith("vendor/", StringComparison.Ordinal) &&
+        (r.EndsWith(".mjs", StringComparison.Ordinal) || r.EndsWith(".js", StringComparison.Ordinal) || r.EndsWith(".css", StringComparison.Ordinal))).ToList();
+    Assert(firstParty.Contains("app.mjs") && firstParty.Contains("shell.mjs") && firstParty.Contains("app.css"), "first-party files found");
+    string[] banned =
+    [
+        @"[a-z][a-z0-9+.\-]*://(?!/)", // a URL with an authority (file:/// model ids have none)
+        @"\bfetch\s*\(", @"XMLHttpRequest", @"new\s+(WebSocket|WebSocketStream|EventSource|WebTransport|RTCPeerConnection|webkitRTCPeerConnection|SharedWorker|Worker)\b",
+        @"sendBeacon\s*\(", @"\b(window|globalThis|self|top|parent|opener)\.open\s*\(", @"navigator\.serviceWorker", @"importScripts", @"\bimport\s*\(\s*(?!'\./)",
+        @"\blocation\s*(\.\s*(href|assign|replace|reload)\b|=[^=])", @"\.(src|href|action|formAction|srcdoc)\s*=[^=]", @"setAttribute\(\s*'(src|href|action|formaction|srcdoc|ping)'",
+        @"innerHTML|outerHTML|insertAdjacentHTML|document\.write|createContextualFragment|DOMParser",
+        @"createElement\(\s*'(script|iframe|frame|a|link|img|image|object|embed|base|meta|audio|video|source|track|portal)'\s*\)",
+        @"\burl\s*\(", @"@import",
+    ];
+    foreach (string relative in firstParty)
+    {
+        string text = File.ReadAllText(Path.Combine(WebRoot(), relative));
+        foreach (string pattern in banned)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(text, pattern);
+            Assert(!match.Success, $"{relative}: matches {pattern} at offset {match.Index}");
+        }
+    }
+});
+
+Check("app.mjs removes network APIs before it does anything else", () =>
+{
+    string app = File.ReadAllText(Path.Combine(WebRoot(), "app.mjs"));
+    int guard = app.IndexOf("\ninstallNetworkBlocks();", StringComparison.Ordinal);
+    Assert(guard > 0, "installNetworkBlocks() is called at top level");
+    foreach (string later in new[] { "\ninstallExportBlocks();", "await detectMode()", "await import(" })
+        Assert(app.IndexOf(later, StringComparison.Ordinal) > guard, "network guard runs before: " + later.Trim());
+});
+
+// ---- Search all files and display settings (editor comfort features, 2026-10-19) ----
+const string GoodSettings = "{\"theme\":\"light\",\"fontSize\":15,\"wordWrap\":true,\"minimap\":false,\"tabSize\":4,\"insertSpaces\":true,\"renderWhitespace\":false,\"lineNumbers\":true}";
+
+Check("bridge: searchProject takes one line of plain text and two flags", () =>
+{
+    var search = Parsed(Req("searchProject", $"{{\"projectId\":\"{P}\",\"query\":\"Widget\",\"matchCase\":true,\"wholeWord\":false}}"));
+    Assert(search.Operation == VaultOperation.SearchProject && search.Query == "Widget" && search.MatchCase && !search.WholeWord, "parsed");
+    foreach (var args in new[]
+    {
+        $"{{\"projectId\":\"{P}\",\"query\":\"\",\"matchCase\":false,\"wholeWord\":false}}",                            // empty
+        $"{{\"projectId\":\"{P}\",\"query\":\"{new string('q', 201)}\",\"matchCase\":false,\"wholeWord\":false}}",      // too long
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\\nb\",\"matchCase\":false,\"wholeWord\":false}}",                      // two lines
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\\u0000\",\"matchCase\":false,\"wholeWord\":false}}",                   // control character
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\",\"matchCase\":\"true\",\"wholeWord\":false}}",                       // flag as text
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\",\"matchCase\":false}}",                                              // missing flag
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\",\"matchCase\":false,\"wholeWord\":false,\"regex\":true}}",           // unknown field
+        $"{{\"projectId\":\"not-an-id\",\"query\":\"a\",\"matchCase\":false,\"wholeWord\":false}}",
+    })
+        Rejects(Vault, Req("searchProject", args));
+});
+
+Check("bridge: settings carry exactly eight bounded display preferences", () =>
+{
+    Assert(Parsed(Req("getSettings", "{}")).Operation == VaultOperation.GetSettings, "getSettings");
+    var saved = Parsed(Req("saveSettings", $"{{\"settings\":{GoodSettings}}}")).Settings!;
+    Assert(saved == new EditorSettings("light", 15, true, false, 4, true, false, true), "parsed");
+    foreach (var (from, to) in new[]
+    {
+        ("\"light\"", "\"neon\""), ("15", "9"), ("15", "29"), ("15", "15.5"), ("\"tabSize\":4", "\"tabSize\":3"), ("true,\"minimap\"", "1,\"minimap\""),
+        ("\"lineNumbers\":true", "\"lineNumbers\":true,\"recentFiles\":[\"src/a.ts\"]"), // nothing that could hold a name
+        (",\"lineNumbers\":true", ""),
+    })
+        Rejects(Vault, Req("saveSettings", $"{{\"settings\":{GoodSettings.Replace(from, to)}}}"));
+    Rejects(Vault, Req("saveSettings", "{\"settings\":\"dark\"}"), Req("getSettings", "{\"x\":1}"));
+});
+
+Check("settings file: round trip; a malformed, oversized or tampered file gives the defaults", () =>
+{
+    var settings = new EditorSettings("highContrast", 20, true, false, 8, false, true, false);
+    Assert(EditorSettings.Parse(settings.ToJson()) == settings, "round trip");
+    Assert(EditorSettings.Parse("not json") == EditorSettings.Default, "malformed");
+    Assert(EditorSettings.Parse(GoodSettings.Replace("15", "99")) == EditorSettings.Default, "out of range");
+    Assert(EditorSettings.Parse(GoodSettings + new string(' ', EditorSettings.MaxFileBytes)) == EditorSettings.Default, "oversized");
+    var path = Path.Combine(Path.GetTempPath(), "sv-settings-" + Guid.NewGuid().ToString("N"), "editor-settings.json");
+    try
+    {
+        Assert(EditorSettings.Load(path) == EditorSettings.Default, "missing file");
+        settings.Save(path);
+        Assert(EditorSettings.Load(path) == settings && !File.Exists(path + ".tmp"), "saved atomically and loaded");
+    }
+    finally { Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
 });
 
 Console.WriteLine($"Editor host policy tests: {passed} passed; {failures.Count} failed.");

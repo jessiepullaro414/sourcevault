@@ -45,4 +45,19 @@ try {
     & $DotnetPath publish $editorProject --no-restore -c Release -o $editorOutput -p:SourceVaultInstalled=true -p:UseSharedCompilation=false -m:1 -nodeReuse:false
     if ($LASTEXITCODE -ne 0) { throw 'Editor publish failed' }
     Write-Output "Published editor to $editorOutput"
+    # SourceVault Pack: runs on the OTHER computer from SourceVault-Pack\pack\, on SourceVault-Pack\runtime.
+    $packProject = Join-Path $repoRoot 'src/SourceVault.Pack/SourceVault.Pack.csproj'
+    $packOutput = Join-Path $repoRoot 'artifacts/pack-publish'
+    if (Test-Path -LiteralPath $packOutput) { Remove-Item -LiteralPath $packOutput -Recurse -Force }
+    & $DotnetPath restore $packProject --configfile (Join-Path $repoRoot 'NuGet.Config') -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Pack restore failed' }
+    & $DotnetPath publish $packProject --no-restore -c Release -o $packOutput -p:UseSharedCompilation=false -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Pack publish failed' }
+    # The window (SourceVaultPack.exe) goes beside the command line, sharing its libraries.
+    $packGuiProject = Join-Path $repoRoot 'src/SourceVault.Pack.Gui/SourceVault.Pack.Gui.csproj'
+    & $DotnetPath restore $packGuiProject --configfile (Join-Path $repoRoot 'NuGet.Config') -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Pack window restore failed' }
+    & $DotnetPath publish $packGuiProject --no-restore -c Release -o $packOutput -p:UseSharedCompilation=false -m:1 -nodeReuse:false
+    if ($LASTEXITCODE -ne 0) { throw 'Pack window publish failed' }
+    Write-Output "Published SourceVault Pack (command line and window) to $packOutput"
 } finally { $env:APPDATA = $oldAppData }

@@ -1,10 +1,12 @@
 #Requires -RunAsAdministrator
-# LAB ONLY. Creates the service's fixed vault root, C:\ProgramData\SourceVault\vault, with the exact ACL the
-# service's validator requires (taken from the installed service itself), then runs the validator.
-#   C:\ProgramData\SourceVault        owner Administrators; protected; SYSTEM + Administrators full control,
-#                                     NT SERVICE\SourceVault read/traverse on this folder only
-#   C:\ProgramData\SourceVault\vault  owner Administrators; protected DACL from `vault-root-sddl`
-# Creates no store and no files. Refuses to run if C:\ProgramData\SourceVault already exists.
+# LAB ONLY. Creates the installed service's configured vault root (default C:\ProgramData\SourceVault\vault, or the
+# -VaultRoot given to Install-ServiceLab.ps1, e.g. K:\SourceVault\vault) with the exact ACL the service's validator
+# requires (taken from the installed service itself), then runs the validator.
+#   <parent>, e.g. C:\ProgramData\SourceVault   owner Administrators; protected; SYSTEM + Administrators full control,
+#                                                NT SERVICE\SourceVault read/traverse on this folder only
+#   <vault root>                                 owner Administrators; protected DACL from `vault-root-sddl`
+# Creates no store and no files. Refuses to run if the parent already exists (unless it is this script's own empty
+# leftover), and never changes the drive root or any folder above the parent: those must already pass the check.
 param([string]$InstallRoot = (Join-Path $env:ProgramFiles 'SourceVault'))
 $ErrorActionPreference = 'Stop'
 $dotnet = Join-Path $InstallRoot 'runtime\dotnet.exe'
@@ -18,13 +20,18 @@ if ($LASTEXITCODE -ne 0 -or $rootSddl -notmatch '^D:P(\(A;OICI;FA;;;S-1-5-[0-9-]
 $serviceSid = ([Security.Principal.NTAccount]'NT SERVICE\SourceVault').Translate([Security.Principal.SecurityIdentifier]).Value
 if ($rootSddl -notmatch [regex]::Escape($serviceSid)) { throw 'Expected ACL does not name the installed service account.' }
 
-$programData = [Environment]::GetFolderPath('CommonApplicationData')
-$parent = Join-Path $programData 'SourceVault'
-$vault = Join-Path $parent 'vault'
+# The root the installed service is configured for, as its own read-only check reports it.
+$check = & $dotnet $dll vault-root-check | Out-String
+if ($check -notmatch 'vaultRoot=(?<root>[A-Za-z]:\\[^;\r\n]+); trusted=') { throw "The installed service did not report its vault root:`n$check" }
+$vault = $Matches.root
+$parent = Split-Path -Parent $vault
+if ($check -match 'volume_unavailable') { throw "Drive $($vault.Substring(0, 2)) is not available (missing, offline or locked); nothing was created." }
+$above = @($check -split "`r?`n" | Where-Object { $_ -match '^error \S+ at (volume|ancestor:([2-9]|[1-9][0-9]+))' })
+if ($above) { Write-Output $check; throw "The drive or folders above $parent do not pass the service's check, and this script never changes them. See 'Vault on another drive' in docs/user-guide.md." }
 # A rerun may continue only over this script's own empty leftovers (an earlier interrupted run); anything else is refused.
 if (Test-Path -LiteralPath $parent) {
     $contents = @(Get-ChildItem -LiteralPath $parent -Recurse -Force)
-    $onlyEmptyVault = $contents.Count -eq 0 -or ($contents.Count -eq 1 -and $contents[0].PSIsContainer -and $contents[0].Name -eq 'vault')
+    $onlyEmptyVault = $contents.Count -eq 0 -or ($contents.Count -eq 1 -and $contents[0].PSIsContainer -and $contents[0].Name -eq (Split-Path -Leaf $vault))
     if (!$onlyEmptyVault) { throw "$parent already exists and is not an empty leftover of this script; not modified." }
     Write-Output "$parent exists from an earlier run and is empty; re-applying the expected ACLs."
 }

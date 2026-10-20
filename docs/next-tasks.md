@@ -15,12 +15,21 @@ Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-de
 - **Monaco assets:** a test checks that every shipped asset passes `PreviewPolicy`.
 - **Build output:** source maps, debug symbols, intermediates and inline source maps are dropped and listed in the log; `keepFileTypes` overrides.
 
+- **Encrypted import from another computer (2026-10-19):** SourceVault Pack, a separate TPM import key, registered senders and `SourceVault.Import.exe --package` ([package-import-design.md](package-import-design.md)). Its lab run is in the checklist.
+
+- **Vault on another drive (2026-10-19):** `Setup-SourceVault.ps1 -VaultRoot` ([vault-location-design.md](vault-location-design.md)).
+- **Editor network lockdown (2026-10-19):** Monaco only, with no route to the network ([editor-host.md](editor-host.md)).
+
+- **Offline deployment drive (2026-10-19):** `Build-DeploymentKit.ps1` and `Deploy-SourceVault.ps1`, with pinned sources and images fetched without Docker ([deployment-kit-design.md](deployment-kit-design.md)). Its lab run is in the checklist.
+
+- **Editor features (2026-10-19):** Go to file, recently opened files, Search all files (protocol v2 `SearchProject`), outlines for C#, C and C++, header/source switching, editor settings, Save all, Compare with saved, format, split editor, status-bar details, the shortcut list and focus mode, plus a warning before closing with unsaved edits ([editor-host.md](editor-host.md)). Reviewed in the browser against the fake host; the real-keyboard and installed-editor checks are in the lab checklist.
+
 Still open:
 
 1. **Editor native validation (T06).** The interactive items are in the lab checklist. Still for development: anything those runs turn up. Pagefile and hibernation persistence remain out of scope and documented.
 2. **Client identity.** An Authenticode signer check waits for the signing decision (below). Genuine separate-account and remote-client denial, and lock/revocation across several editors, are lab items.
 3. **Storage.** The skipped reparse-point cases need an elevated run. Power loss is a lab item. TPM throughput beyond 200 files is unmeasured. A crash between creating a project's folder and recording it in the index leaves an orphan folder, which makes startup refuse (code 11) until an administrator removes it. That is by design ("for review"); decide whether to keep it.
-4. **Builds.** Artifacts go through a `.partial` folder and are published with no approval step; an owner-approval release step is not built. A real initial compiler is still to be chosen.
+4. **Builds.** Artifacts go through a `.partial` folder and are published with no approval step; an owner-approval release step is not built. The compiler is chosen (below). `installer/New-BuildContainer.ps1` (Linux) and `installer/New-WindowsBuildContainer.ps1` (Windows) create the containers; both still need their lab runs. Whether the build service can copy into a running Windows container depends on its isolation mode: the Windows script tests exactly that. Offline builds cannot restore NuGet packages yet: a reviewed local package source is the next step if projects need packages. **C++ (owner, 2026-10-19: the code is also C++):** the editor now handles C and C++ files, but both build containers carry only the .NET SDK. Building C++ needs a pinned toolchain in each container (for example the MSVC Build Tools on Windows Server Core, and GCC or Clang with CMake on Linux), chosen by the owner.
 5. **Release.** Offline installer and update signing, a supported hardware/OS matrix, and an independent security review.
 
 ## Retired or out of scope (owner, 2026-10-18)
@@ -33,7 +42,7 @@ Still open:
 - Confirm operator/administrator threat model and intentional-export policy.
 - ~~Confirm device-only loss policy versus an owner recovery envelope.~~ Decided 2026-10-18: device-only, no recovery. Do not add a recovery envelope, escrow or key export.
 - Approve supported hardware/OS/runtime and offline update strategy.
-- Choose a real initial compiler and artifact policy. Readable JavaScript output does not conceal implementation. (Dropping source maps and debug symbols: decided 2026-10-18.)
+- ~~Choose a real initial compiler.~~ Decided 2026-10-18: C#/.NET with Microsoft's .NET SDK image (`mcr.microsoft.com/dotnet/sdk:10.0.402`, pinned by digest) on Docker in WSL for the Linux part, and the Windows Server Core variant (`10.0.402-windowsservercore-ltsc2025`, pinned by digest) for the Windows part; the owner's project has both. The PC was upgraded to Windows 11 Pro for Windows containers. Engines (owner, 2026-10-18): Microsoft's standalone Docker engine for Windows (a `docker` service on `\\.\pipe\docker_engine`), and Docker Engine inside the WSL distro for Linux. Docker Desktop is not used: a per-user install had its Windows engine disabled, and it held the standard pipe. Artifact policy: dropping source maps and debug symbols decided 2026-10-18; readable output (for example .NET IL) still does not conceal implementation.
 - Signing/release ownership. This also unblocks an Authenticode client check.
 - ~~License.~~ Decided 2026-10-18: MIT, chosen by the owner in the GitHub repository (`LICENSE`).
 - ~~Per-project permissions.~~ Decided 2026-10-18: none. Every member of *SourceVault Operators* can open every project; access is limited by that group alone.

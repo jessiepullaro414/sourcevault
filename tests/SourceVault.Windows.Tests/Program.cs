@@ -42,7 +42,7 @@ DirectoryObservation GoodAncestor(params AceInfo[] extra) => Dir(BA, false, [All
 const string SyntheticRoot = @"C:\SourceVault\Data\store";
 DirectoryObservation[] GoodChain() => [GoodRoot(), GoodAncestor(), GoodAncestor(), GoodAncestor()];
 StorageRootValidationResult Run(DirectoryObservation[] chain, string path = SyntheticRoot, TrustedPrincipals? p = null, VolumeObservation? volume = null)
-    => TrustedStorageRoot.Validate(path, p ?? trusted, new FakeInspector(path, chain, volume ?? new(DriveType.Fixed, "NTFS")));
+    => TrustedStorageRoot.Validate(path, p ?? trusted, new FakeInspector(path, chain, volume ?? new(DriveType.Fixed, "NTFS", LocalDisk: true)));
 void Expect(StorageRootValidationResult r, string code, string location) => Assert(!r.Passed && r.HasCode(code, location), $"expected {code}@{location}, got [{Codes(r)}]");
 
 // ---- path syntax --------------------------------------------------------------------------------------------------
@@ -201,7 +201,50 @@ Test("volume checks: non-fixed and non-NTFS/ReFS volumes rejected", () =>
     Expect(Run(GoodChain(), volume: new(DriveType.Network, "NTFS")), FindingCodes.VolumeNotFixed, "volume");
     Expect(Run(GoodChain(), volume: new(DriveType.Removable, "NTFS")), FindingCodes.VolumeNotFixed, "volume");
     Expect(Run(GoodChain(), volume: new(DriveType.Fixed, "FAT32")), FindingCodes.VolumeFilesystemUnsupported, "volume");
-    Assert(Run(GoodChain(), volume: new(DriveType.Fixed, "ReFS")).Passed);
+    Assert(Run(GoodChain(), volume: new(DriveType.Fixed, "ReFS", LocalDisk: true)).Passed);
+});
+Test("volume checks: a fixed NTFS volume that is not a local disk (USB, VHD, subst) fails", () =>
+{
+    var r = Run(GoodChain(), volume: new(DriveType.Fixed, "NTFS", LocalDisk: false));
+    Expect(r, FindingCodes.VolumeNotLocalDisk, "volume");
+    Assert(r.Findings.Count == 1, Codes(r));
+    // The default for any other inspector is "not a local disk" (fail closed).
+    Assert(!new VolumeObservation(DriveType.Fixed, "NTFS").LocalDisk);
+});
+Test("volume checks: a missing, offline or locked drive reports only volume_unavailable", () =>
+{
+    var r = TrustedStorageRoot.Validate(@"K:\SourceVault\vault", trusted, new ThrowingDirectoryInspector(new(DriveType.Fixed, null, Available: false)));
+    Assert(!r.Passed && r.Findings.Count == 1 && r.HasCode(FindingCodes.VolumeUnavailable, "volume"), Codes(r));
+});
+Test("local disk policy: bus allow-list and volume device targets", () =>
+{
+    foreach (var bus in new uint[] { 1, 3, 8, 10, 11, 16, 17 }) { Assert(StorageRootPolicy.IsLocalDiskBus(bus, false), "bus " + bus); Assert(!StorageRootPolicy.IsLocalDiskBus(bus, true), "removable " + bus); }
+    foreach (var bus in new uint[] { 0, 2, 4, 5, 6, 7, 9, 12, 13, 14, 15, 18, 19, 20, 0x7f, 0xffffffff }) Assert(!StorageRootPolicy.IsLocalDiskBus(bus, false), "bus " + bus);
+    foreach (var target in new[] { @"\Device\HarddiskVolume3", @"\Device\HarddiskVolume12345" }) Assert(StorageRootPolicy.IsVolumeDeviceTarget(target), target);
+    foreach (var target in new[] { null, "", @"\Device\HarddiskVolume", @"\Device\HarddiskVolume3\x", @"\Device\HarddiskVolume123456", @"\??\C:\Synthetic\folder",
+        @"\Device\LanmanRedirector\;K:0\server\share", @"\Device\CdRom0", @"\Device\HarddiskDmVolumes\Dg0\Volume1", @"\device\harddiskvolume3", @"\Device\HarddiskVolume-1" })
+        Assert(!StorageRootPolicy.IsVolumeDeviceTarget(target), target ?? "null");
+});
+Test(@"data drive roots: K:\SourceVault\vault against the two stock forms and the documented fix", () =>
+{
+    // Synthetic strings in the shape of a data drive's root ACL; the real K:\ must be captured in the lab.
+    DirectoryObservation FromSddl(string sddl) { var s = new DirectorySecurity(); s.SetSecurityDescriptorSddlForm(sddl); return new(DirectoryState.Directory, DirectorySecurityInfo.FromSecurity(s)); }
+    var parent = FromSddl($"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;{service.Value})"); // what setup creates
+    const string path = @"K:\SourceVault\vault";
+    // Form 1: Users may create folders on the root itself; file rights only inherit-only. Passes.
+    var createFolders = Run([GoodRoot(), parent, FromSddl("O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICIIO;GA;;;CO)(A;OICI;0x1200a9;;;BU)(A;CI;LC;;;BU)(A;CIIO;DC;;;BU)")], path);
+    Assert(createFolders.Passed && createFolders.Findings.Count == 0, Codes(createFolders));
+    // Form 2: Authenticated Users Modify on the root itself. Modify carries Delete, so the drive root fails.
+    var modify = Run([GoodRoot(), parent, FromSddl("O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)")], path);
+    Expect(modify, FindingCodes.UntrustedWriteAccess, "ancestor:2");
+    Assert(modify.Findings.Count == 1 && modify.Findings[0].Subject == AuthUsers.Value, Codes(modify));
+    // The documented owner-run fix: on the root itself read + create folders only; Modify kept for everything below.
+    var fixedRoot = Run([GoodRoot(), parent, FromSddl("O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;;0x1200ad;;;AU)(A;OICIIO;0x1301bf;;;AU)(A;OICI;0x1200a9;;;BU)")], path);
+    Assert(fixedRoot.Passed && fixedRoot.Findings.Count == 0, Codes(fixedRoot));
+    // A drive formatted elsewhere may be owned by an unrelated account.
+    Expect(Run([GoodRoot(), parent, FromSddl($"O:{SomeUser.Value}G:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)")], path), FindingCodes.OwnerUntrusted, "ancestor:2");
+    // The root directly in the drive root stays refused (create rights on its parent).
+    Expect(Run([GoodRoot(), FromSddl("O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)(A;CI;LC;;;BU)")], @"K:\vault"), FindingCodes.UntrustedWriteAccess, "ancestor:1");
 });
 Test("unexpected failures become an opaque validation_error", () =>
 {
@@ -371,6 +414,19 @@ Test("real filesystem: directory symlink as root fails; as ancestor fails", () =
     }
     finally { try { Directory.Delete(link); } catch (IOException) { } }
 });
+Test("real volume: the test workspace's drive is an available local disk", () =>
+{
+    // Read-only device query (no access rights requested). Also the evidence that a stock system drive passes the new check.
+    var v = new FileSystemStorageRootInspector().ObserveVolume(workspace);
+    Assert(v.Available && v.DriveType == DriveType.Fixed && v.LocalDisk, $"type={v.DriveType} fs={v.FileSystem} local={v.LocalDisk} available={v.Available}");
+});
+Test("real volume: an unused drive letter is reported as unavailable", () =>
+{
+    var letter = "ZYXWVUTSRQPONMLKJIHGFED".FirstOrDefault(c => new DriveInfo(c + ":\\").DriveType == DriveType.NoRootDirectory);
+    if (letter == default) throw new SkipException("no unused drive letter");
+    var r = TrustedStorageRoot.Validate(letter + @":\SourceVault\vault", trusted);
+    Assert(!r.Passed && r.Findings.Count == 1 && r.HasCode(FindingCodes.VolumeUnavailable, "volume"), Codes(r));
+});
 Test("real filesystem: findings do not leak workspace paths", () =>
 {
     var r = TrustedStorageRoot.Validate(Path.Combine(workspace, "no-such-parent", "store"), userTrusted);
@@ -401,6 +457,13 @@ sealed class ThrowingInspector : IStorageRootInspector
 {
     public VolumeObservation ObserveVolume(string path) => throw new InvalidOperationException("secret-detail " + path);
     public DirectoryObservation ObserveDirectory(string path) => throw new InvalidOperationException("secret-detail " + path);
+}
+
+/// <summary>Fixed volume observation; any directory lookup is a test failure.</summary>
+sealed class ThrowingDirectoryInspector(VolumeObservation volume) : IStorageRootInspector
+{
+    public VolumeObservation ObserveVolume(string path) => volume;
+    public DirectoryObservation ObserveDirectory(string path) => throw new InvalidOperationException("directory inspected on an unavailable volume");
 }
 
 /// <summary>Maps each path in the chain of <c>root</c> to a supplied synthetic observation (index 0 = root).</summary>

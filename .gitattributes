@@ -1,4 +1,5 @@
 * text=auto
 *.sh text eol=lf
+*.cmd text eol=crlf
 vendor/** -text
 src/SourceVault.Editor.Web/vendor/** -text

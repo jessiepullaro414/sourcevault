@@ -46,7 +46,8 @@ internal sealed class ScmHost
             }
             switch (ParseStartMode(ReadArguments(count, arguments)))
             {
-                case StartMode.ProvisionKey: Provision(); return;
+                case StartMode.ProvisionKey: Provision(importKey: false); return;
+                case StartMode.ProvisionImportKey: Provision(importKey: true); return;
                 case StartMode.CreateSyntheticProject: CreateSyntheticProject(); return;
                 case StartMode.Invalid: Report(new(ServiceState.Stopped, 0, 87, 0, 0)); return; // ERROR_INVALID_PARAMETER
             }
@@ -59,7 +60,7 @@ internal sealed class ScmHost
         catch { failure = 3; }
         finally { lifecycle = null; }
     }
-    internal enum StartMode { Run, ProvisionKey, CreateSyntheticProject, Invalid }
+    internal enum StartMode { Run, ProvisionKey, ProvisionImportKey, CreateSyntheticProject, Invalid }
 
     // SCM passes the service name as argv[0], then any `sc start SourceVault <args>` start parameters.
     // Only the fixed lab parameters are accepted; everything else is refused.
@@ -67,6 +68,7 @@ internal sealed class ScmHost
     {
         1 => StartMode.Run,
         2 when args[1] == "provision-key" => StartMode.ProvisionKey,
+        2 when args[1] == "provision-import-key" => StartMode.ProvisionImportKey,
         2 when args[1] == "create-synthetic-project" => StartMode.CreateSyntheticProject,
         _ => StartMode.Invalid,
     };
@@ -77,6 +79,7 @@ internal sealed class ScmHost
     private IDisposable StartEndpoints()
     {
         var (key, catalog, projects) = OpenVerifiedVault();
+        var importKey = OpenImportKey();
         try
         {
             SecurityIdentifier operators;
@@ -84,7 +87,8 @@ internal sealed class ScmHost
             catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.OperatorsGroupMissing); }
             using var self = WindowsIdentity.GetCurrent();
             var pipeServer = new VaultPipeServer(VaultPipe.ProductionName, self.User!,
-                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, projects, builds: new BuildCoordinator(catalog, BuildServiceClient())));
+                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, projects, builds: new BuildCoordinator(catalog, BuildServiceClient()),
+                    packages: importKey is null ? null : new PackageImports(importKey, importKey.ExportSubjectPublicKeyInfo(), PackageImports.ComputerName, PackageImports.DefaultSendersFolder)));
             try { pipeServer.Start(); }
             catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
             {
@@ -92,9 +96,9 @@ internal sealed class ScmHost
                 throw new StartupRefusedException(StartupRefusedException.PipeUnavailable); // e.g. name already taken
             }
             server = pipeServer;
-            return new Owned(() => { server = null; pipeServer.Dispose(); key.Dispose(); });
+            return new Owned(() => { server = null; pipeServer.Dispose(); importKey?.Dispose(); key.Dispose(); });
         }
-        catch { key.Dispose(); throw; }
+        catch { importKey?.Dispose(); key.Dispose(); throw; }
     }
 
     // Build role: running as NT SERVICE\SourceVaultBuild, serving the private build pipe to NT SERVICE\SourceVault only.
@@ -109,7 +113,7 @@ internal sealed class ScmHost
         }
         catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.VaultServiceMissing); }
         if (self.User is null || !expectedSelf.Equals(self.User)) throw new StartupRefusedException(StartupRefusedException.WrongIdentity);
-        var pipeServer = new BuildPipeServer(BuildChannel.PipeName, self.User!, vault, () => BuildConfig.Load(BuildConfig.DefaultPath),
+        var pipeServer = new BuildPipeServer(BuildChannel.PipeName, self.User!, vault, () => BuildConfig.Load(BuildConfig.DefaultPath, VaultRoot.ConfiguredVaultFolder()),
             target => new DockerEngineClient(target.Engine, target.CaFile, target.ClientCertificateThumbprint));
         try { pipeServer.Start(); }
         catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
@@ -150,11 +154,11 @@ internal sealed class ScmHost
     {
         TpmKeyProtector.RequireServiceIdentity();
         var config = ServiceConfiguration.LoadFromApplicationDirectory();
-        if (!VaultRoot.Validate().Passed) throw new StartupRefusedException(StartupRefusedException.VaultRootUntrusted);
+        VaultRoot.RequireTrusted(config.VaultRootPath);
         var key = TpmKeyProtector.OpenExisting(config.KeyName);
         try
         {
-            var catalog = new ProjectCatalog(VaultRoot.Path, key);
+            var catalog = new ProjectCatalog(config.VaultRootPath, key);
             IReadOnlyList<ProjectInfo> projects;
             try { projects = catalog.OpenAndVerify(); }
             catch (VaultCatalogException e)
@@ -209,13 +213,26 @@ internal sealed class ScmHost
         return result;
     }
 
-    // One-shot key creation under the service identity. Reports START_PENDING, creates and checks the key,
-    // then STOPPED. The outcome is only the service-specific exit code; nothing is logged.
-    private void Provision()
+    // The package import key, if provisioned (provision-import-key). Without it package import is Unavailable and
+    // nothing else changes, so a missing or unusable import key never stops the vault.
+    private static TpmKeyProtector? OpenImportKey()
+    {
+        try { return TpmKeyProtector.OpenExisting(ServiceConfiguration.LoadFromApplicationDirectory().ImportKeyName); }
+        catch (Exception e) when (e is System.Security.Cryptography.CryptographicException or UnauthorizedAccessException or ArgumentException or InvalidDataException or IOException) { return null; }
+    }
+
+    // One-shot key creation under the service identity: the vault key (provision-key) or the separate package import
+    // key (provision-import-key). Reports START_PENDING, creates and checks the key, then STOPPED. The outcome is only
+    // the service-specific exit code (AlreadyExists = 1 when the key is already there); nothing is logged.
+    private void Provision(bool importKey)
     {
         Report(new(ServiceState.StartPending, 0, 0, 1, 60000));
         var outcome = ProvisionOutcome.Unavailable;
-        try { outcome = TpmKeyProvisioner.CreateDecryptOnly(ServiceConfiguration.LoadFromApplicationDirectory().KeyName); }
+        try
+        {
+            var config = ServiceConfiguration.LoadFromApplicationDirectory();
+            outcome = TpmKeyProvisioner.CreateDecryptOnly(importKey ? config.ImportKeyName : config.KeyName);
+        }
         catch { outcome = ProvisionOutcome.Unavailable; }
         Report(outcome == ProvisionOutcome.Created
             ? new(ServiceState.Stopped, 0, 0, 0, 0)

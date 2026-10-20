@@ -9,7 +9,55 @@ dotnet publish src/SourceVault.Editor.Host/SourceVault.Editor.Host.csproj -c Rel
 ./artifacts/editor-preview/SourceVault.Editor.exe --synthetic-preview
 ```
 
-The published application maps `https://sourcevault.local` to its `assets` directory. Resource requests and navigations outside that exact HTTPS origin are blocked; origin-bound blob workers are allowed for Monaco. Downloads, new windows, permissions, browser accelerator keys (including browser print/devtools), default menus, external drops, password storage, and autofill are disabled. Startup rejects all nonempty `WEBVIEW2_` environment variables, including browser arguments, runtime/profile folders, and debugger controls. Registry/policy runtime overrides and runtime process launch auditing remain deployment review gates. These controls reduce accidental export; they do not establish a confidentiality boundary against a process owner, administrator, debugger, modified renderer, or operating-system capture.
+The published application maps `https://sourcevault.local` to its `assets` directory. Downloads, new windows, permissions, screen capture (`getDisplayMedia`), browser accelerator keys (including browser print/devtools), default menus, external drops, password storage, and autofill are disabled. Startup rejects all nonempty `WEBVIEW2_` environment variables (browser arguments, runtime/profile folders, debugger controls) and the WebView2 registry policy overrides described below. Runtime process launch auditing remains a deployment review gate. These controls reduce accidental export; they do not establish a confidentiality boundary against a process owner, administrator, debugger, modified renderer, or operating-system capture.
+
+## Only the bundled app, no network
+
+Owner requirement (2026-10-19): the editor runs only its own bundled Monaco app and cannot reach any website or network address, in `--synthetic-preview` and `--vault` alike. The host enforces this in layers that do not depend on each other. Decisions are pure functions in `PreviewPolicy` and `NetworkPolicy`, tested in `tests/SourceVault.Editor.Host.Tests`.
+
+1. **What may load (`PreviewPolicy`).**
+   - Top-level navigation is allowed only to exactly `https://sourcevault.local/index.html`: no query, no fragment, no other asset on the app origin, no other origin or scheme. Every frame navigation is cancelled.
+   - Every resource request goes through the host filter: all URIs, all resource contexts, and all request sources (pages and dedicated workers, shared workers, service workers). Only the app origin and app-origin blob workers are served; anything else gets a host-made 403 and is never sent.
+   - External URI schemes (`mailto:`, `ms-settings:`, `file:` and so on) are refused by navigation and cancelled again in `LaunchingExternalUriScheme`, so no other application is launched. Basic-auth and client-certificate prompts are cancelled; certificate errors cancel the request.
+2. **Browser arguments (`NetworkPolicy`).** These cover traffic that never reaches the request filter (DNS prefetch, preconnect, WebRTC ICE, browser background services) and a renderer that gets past it. WebView2 starts with:
+   - `--proxy-server=http://127.0.0.1:1 --proxy-bypass-list=<-loopback>`: every HTTP(S) and WebSocket connection, loopback included, goes to a loopback port nothing serves. A fixed proxy has no direct fallback.
+   - `--host-resolver-rules="MAP * ~NOTFOUND"`: no host name resolves.
+   - `--webrtc-ip-handling-policy=disable_non_proxied_udp`: WebRTC may use only the dead proxy. Upstream Chromium spells this `--force-webrtc-ip-handling-policy`; the runtime measured here ignored that spelling, which is passed as well in case a later runtime honours only it.
+   - `--disable-background-networking --disable-component-update --disable-domain-reliability --no-pings`.
+
+   The virtual host is served inside the browser and does not use the proxy.
+3. **Services that call home.** SmartScreen is off (`IsReputationCheckingRequired = false`). Crash dumps are never sent to Microsoft (`IsCustomCrashReportingEnabled = true`); they stay in the profile, which vault mode deletes after each run. There is no OS-account single sign-on and no browser extensions. The profile is exclusive to this editor's browser process.
+4. **WebRTC removed by the host.** WebRTC traffic (STUN, TURN, peer UDP) bypasses the proxy, the request filter and CSP. Before any page script runs, the host's document-created script (`NetworkPolicy.DocumentCreatedScript`) removes `RTCPeerConnection`, `webkitRTCPeerConnection`, `RTCDataChannel` and `RTCIceTransport` from every document. This does not depend on the shipped page.
+5. **Renderer.** The `index.html` CSP is `default-src 'none'` with `connect-src 'self'`, `form-action 'none'` and `base-uri 'none'`. A test pins each directive to an allowlist and checks that the CSP comes before every link and script. Before anything else runs, `installNetworkBlocks()` in `shell.mjs` removes these and makes them unredefinable:
+   - `WebSocket`, `WebSocketStream`, `WebTransport` and `EventSource`;
+   - the WebRTC constructors and `SharedWorker`;
+   - `navigator.sendBeacon` and `navigator.serviceWorker`.
+
+   `window.open` returns `null`. Tests scan the shipped first-party files for network calls, URL sinks, HTML injection and external URLs, and confirm `index.html` is the only shipped document.
+6. **Overrides refused.** The WebView2 loader appends `[HKLM|HKCU]\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments` after the host's arguments, and the last copy of a switch wins. It also lets the registry replace the runtime and profile folders. The host therefore reads, but never writes, every setting subkey there. It refuses to start if a value could apply to it: named `SourceVault.Editor.exe`, `*`, or anything else that is not another program's `.exe`.
+
+**Limits.** These are not boundaries against same-user processes or administrators, which AGENTS.md puts out of scope:
+- a same-user process listening on 127.0.0.1:1 would receive proxied requests;
+- the registry can be changed after the startup check;
+- a debugger or replaced runtime defeats all of it.
+
+The WebView2 runtime may ignore switches it considers essential, and here it did ignore one WebRTC spelling, so only native observation proves their effect (see the lab checklist in [editor-preview-checks.md](editor-preview-checks.md)). Some traffic belongs to the operating system rather than the editor's browser: the Edge Update service, Windows diagnostic data and the OS spellchecker. These are machine policy. The renderer guard is page script only: Monaco's workers keep their own globals, and there the CSP, the host filter and the proxy still apply.
+
+**Checked on this machine (2026-10-19, WebView2 Runtime 155.0.4283.62, synthetic assets only).** A scratch probe (not in the repository) opened a WebView2 with the host's environment options, browser arguments and document-created script. It mapped the shipped `assets` folder and a second, CSP-free probe page, with no request filter, so only the browser layer was under test. Loopback TCP and UDP listeners counted anything that got through. Results:
+- Monaco loaded through the virtual host with the dead proxy, and the TypeScript worker reported diagnostics.
+- These probes from the CSP-free page all failed, and the listeners received **0 TCP connections and 0 UDP packets**: `fetch` to `127.0.0.1` and `localhost`, WebSocket, image, `sendBeacon`, `<link rel=preconnect>`, and top-level navigation to a loopback port and to `example.invalid`. WebRTC was unavailable (`TypeError`).
+- After 60 s idle the browser process tree (5 processes) held no TCP connections and no UDP endpoints.
+- A control run with WebView2 defaults reached the listeners (8 TCP connections, 6 STUN packets). Its browser held 4 established TLS connections to Microsoft addresses with no page asking for them.
+- Before the fix, `--force-webrtc-ip-handling-policy` alone still let 6 STUN packets out. `--webrtc-ip-handling-policy` alone and the document-created script alone each stopped them.
+
+The published host was also launched with `--synthetic-preview` for 45 s. Its browser command line carried the switches, Monaco rendered the synthetic workspace, and its process tree held no TCP connections or UDP endpoints.
+
+Not exercised natively:
+- the registry refusal (writing the policy key needs administrator rights);
+- `LaunchingExternalUriScheme`, the host's navigation and request filters (the probe page bypassed them on purpose), and vault mode;
+- traffic seen on the wire.
+
+The probe observed sockets, not packets. See the lab checklist.
 
 Profiles live under `%LOCALAPPDATA%\SourceVault\profiles\{preview|vault}\<random>`. An installed editor's own folder is not user-writable, so the profile can't live there. Only synthetic data should be used.
 
@@ -54,6 +102,28 @@ For browser review, `index.html?fake-vault` loads `dev/fake-host.mjs`, which mir
 Reviewed in the browser with the fake host: picker, open, edit and save, external edit then conflict then reload, user lock and unlock, Windows lock, a failed unlock message, new file, and switch project, with no console errors. Preview mode was rechecked unchanged.
 
 **Not yet done:** running vault mode as the installed editor against the service (design step 4).
+
+## Editor features (owner request, 2026-10-19)
+
+Everyday comforts in vault mode. Shortcuts are listed in the editor (Ctrl+K Ctrl+S) and in [user-guide.md](user-guide.md).
+
+- **Navigation.** Go to file (Ctrl+P, fuzzy; `:` line, `@` symbol, `>` command), recently opened files (Ctrl+E), Search all files (Ctrl+Shift+F), and an outline (Ctrl+Shift+O).
+- **Comfort.** Editor settings (Ctrl+,), Save all (Ctrl+Alt+S) with an unsaved count in the status bar, Compare with saved (Ctrl+K D, with Revert that Ctrl+Z undoes), and Format document (Shift+Alt+F) where Monaco has a formatter. Otherwise the editor says there is none.
+- **Layout.** Split editor (Ctrl+\\, two Monaco editors sharing the models), status-bar details (selection, indentation, line endings, file size against the 256 KiB limit), the shortcut list, and focus mode (Ctrl+K Z).
+- **C and C++.** `.c` is C. `.cpp`, `.cc`, `.cxx`, `.c++`, `.cppm`, `.ixx` and the headers `.h`, `.hpp`, `.hh`, `.hxx`, `.h++`, `.inl`, `.ipp`, `.tpp` are C++ (Monaco's C++ highlighting covers both). Alt+O switches between a header and its source: same folder first, then anywhere, for `include/` and `src/` layouts. Build files are mapped as well: `.vcxproj`, `.csproj`, `.props`, `.targets` as XML, `.ps1`, `.sh`, `.cmd`/`.bat`, `.ini` and `Dockerfile`.
+- **Outline.** Monaco's TypeScript worker outlines TypeScript and JavaScript. For C#, C and C++, `workbench.mjs` has a line-based outline (namespaces, types, functions and methods, C# properties and fields, C/C++ macros). It skips comments, strings and preprocessor lines. It is not a compiler: several declarations on one line, or multi-line raw strings, can be missed or misplaced. Go to definition and completion across files remain TypeScript/JavaScript only (no C# or C++ language server).
+
+**New bridge operations** (`BridgePolicy`):
+- `searchProject {projectId, query, matchCase, wholeWord}`: the query is 1 to 200 characters with no control characters, and the flags are booleans. The host passes it to the service's `SearchProject` (contract: [protocol-v2.md](../contracts/protocol-v2.md)) and returns `matches`, `truncated` and `filesSearched`. The renderer then searches files with unsaved edits in their drafts, with the same rules (`withDrafts` in `workbench.mjs`), because the service only has the saved text.
+- `getSettings {}` and `saveSettings {settings}`: these need no vault session and work while locked.
+
+**Settings file.** `%LOCALAPPDATA%\SourceVault\editor-settings.json`, per Windows user, read and written only by the host (`EditorSettings`). It holds exactly eight display fields: theme (`dark`, `light` or `highContrast`), font size 10 to 28, tab size 2, 4 or 8, and the booleans insert spaces, word wrap, minimap, show whitespace and line numbers. It never holds file names, paths, project names or text. The bridge refuses any other field (a `recentFiles` list, for example). On read, a file over 4 KiB, a link, or any invalid content means the defaults. Writes go to a temporary file, then a rename.
+
+**What stays in memory only.** Recently opened files, search results and the split layout are never written anywhere. Search results hold lines of text from files that may not be open, so locking drops them, as it closes the comparison view.
+
+**Closing with unsaved edits.** In vault mode, closing the window while the renderer reports unsaved edits (the status message's `dirtyCount`) asks *Close anyway?* first. Closing discards them, as before. This prompt only adds a warning.
+
+Reviewed in the browser with the fake host (2026-10-19), which has a fictional C++ project: C++ highlighting and outline, Alt+O, Go to file, Ctrl+E, search including an unsaved draft and the jump to a match, split editor, compare and revert then undo, settings (theme and font live, then saved), the shortcut list, Ctrl+K Ctrl+S not saving, focus mode, Save all, the C++ "no formatter" message, and lock dropping search results then unlock. TypeScript kept its formatter and outline, and preview mode was unchanged. The browser automation could not send Ctrl+\\ or Ctrl+, (it sends no key code for punctuation), so those were run through their commands and buttons. A real keyboard check is a lab row.
 
 The bridge accepts messages from the app origin only, bounded to 4 KiB and depth 3. The exact shape is `{ "type": "sourcevault.preview.ready" | "sourcevault.preview.status", "locked": boolean, "dirtyCount": integer, "revisionCount": integer }`. Counts must be 0..32 and 0..1000000 respectively. Duplicate/unknown properties and operations have no effect. A ready message receives `{ "type": "sourcevault.host.metadata", "mode": "synthetic-preview", "captureExclusion": false, "serviceConnected": false }`. The bridge never receives source text or evaluates script; status messages only update the window title. The frontend owns its synthetic lock presentation.
 

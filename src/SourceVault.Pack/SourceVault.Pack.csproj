@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SourceVault Pack (docs/package-import-design.md): runs on the OTHER computer, encrypts a project folder to the
+       vault PC's recipient file and signs it with this computer's TPM sender key. Shipped as a folder with its own
+       runtime: SourceVault-Pack\pack\SourceVault.Pack.exe runs only on SourceVault-Pack\runtime. BCL only. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SourceVault.Pack</AssemblyName>
+    <UseAppHost>true</UseAppHost>
+    <AppHostRelativeDotNet>..\runtime</AppHostRelativeDotNet>
+    <AppHostDotNetSearch>AppRelative</AppHostDotNetSearch>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../SourceVault.Packaging/SourceVault.Packaging.csproj" />
+    <!-- The importer's scan rules, shared as source so both programs pick exactly the same files. -->
+    <Compile Include="../SourceVault.Import/ImportPlan.cs" Link="ImportPlan.cs" />
+  </ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /><InternalsVisibleTo Include="SourceVaultPack" /></ItemGroup>
+</Project>

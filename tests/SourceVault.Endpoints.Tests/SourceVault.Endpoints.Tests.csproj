@@ -4,5 +4,7 @@
     <ProjectReference Include="../../src/SourceVault.Service/SourceVault.Service.csproj" />
     <ProjectReference Include="../../src/SourceVault.LabClient/SourceVault.LabClient.csproj" />
     <ProjectReference Include="../../src/SourceVault.Import/SourceVault.Import.csproj" />
+    <!-- Aliased: Pack links the importer's ImportPlan source, so both assemblies contain that internal type. -->
+    <ProjectReference Include="../../src/SourceVault.Pack/SourceVault.Pack.csproj" Aliases="pack" />
   </ItemGroup>
 </Project>

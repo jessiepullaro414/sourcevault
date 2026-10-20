@@ -33,7 +33,8 @@ $checks = @(
     @{ Assembly='tests/SourceVault.Editor.Host.Tests/bin/Release/net10.0/SourceVault.Editor.Host.Tests.dll'; Args=@() },
     @{ Assembly='tests/SourceVault.Windows.Tests/bin/Release/net10.0-windows/SourceVault.Windows.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/windows-tests')) },
     @{ Assembly='tests/SourceVault.Endpoints.Tests/bin/Release/net10.0-windows/SourceVault.Endpoints.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/endpoint-tests')) },
-    @{ Assembly='tests/SourceVault.Build.Tests/bin/Release/net10.0-windows/SourceVault.Build.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/build-tests')) }
+    @{ Assembly='tests/SourceVault.Build.Tests/bin/Release/net10.0-windows/SourceVault.Build.Tests.dll'; Args=@((Join-Path $repoRoot 'artifacts/build-tests')) },
+    @{ Assembly='tests/SourceVault.Packaging.Tests/bin/Release/net10.0/SourceVault.Packaging.Tests.dll'; Args=@() }
 )
 foreach ($check in $checks) {
     $testAssembly = Join-Path $repoRoot $check.Assembly
@@ -41,11 +42,11 @@ foreach ($check in $checks) {
     & $DotnetPath $testAssembly @testArgs
     if ($LASTEXITCODE -ne 0) { throw "Tests failed: $($check.Assembly)" }
 }
-foreach ($module in 'app.mjs', 'shell.mjs', 'preview-app.mjs', 'vault-app.mjs', 'vault-session.mjs', 'merge.mjs', 'state.mjs', 'mock-service.mjs', 'dev/fake-host.mjs') {
+foreach ($module in 'app.mjs', 'shell.mjs', 'preview-app.mjs', 'vault-app.mjs', 'vault-session.mjs', 'merge.mjs', 'state.mjs', 'mock-service.mjs', 'workbench.mjs', 'workbench-ui.mjs', 'dev/fake-host.mjs') {
     & node --check (Join-Path $repoRoot "src/SourceVault.Editor.Web/$module")
     if ($LASTEXITCODE -ne 0) { throw "Editor script syntax check failed: $module" }
 }
-& node --test (Join-Path $repoRoot 'tests/editor-web/state.test.mjs') (Join-Path $repoRoot 'tests/editor-web/mock-service.test.mjs') (Join-Path $repoRoot 'tests/editor-web/vault-session.test.mjs') (Join-Path $repoRoot 'tests/editor-web/merge.test.mjs')
+& node --test (Join-Path $repoRoot 'tests/editor-web/state.test.mjs') (Join-Path $repoRoot 'tests/editor-web/mock-service.test.mjs') (Join-Path $repoRoot 'tests/editor-web/vault-session.test.mjs') (Join-Path $repoRoot 'tests/editor-web/merge.test.mjs') (Join-Path $repoRoot 'tests/editor-web/network-guard.test.mjs') (Join-Path $repoRoot 'tests/editor-web/workbench.test.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'Editor session tests failed' }
 Write-Output 'Verification passed. These synthetic tests do not validate service identities, TPM operations, or VM isolation.'
 } finally {

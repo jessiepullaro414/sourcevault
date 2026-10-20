@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using SourceVault.Contracts;
+using SourceVault.Packaging;
 using SourceVault.Storage;
 
 namespace SourceVault.Service;
@@ -15,6 +16,9 @@ internal sealed class ConnectionState
     internal bool Closed; // terminal: expired, ended, revoked or rejected
     internal uint WindowsSession;
     internal string? Actor; // the operator's account name, recorded in encrypted file history
+    internal byte[]? Upload; // a package being uploaded (ciphertext), at most one per connection
+    internal int UploadReceived;
+    internal Action? OnClose; // releases an upload's service-wide slot when the connection closes
 }
 
 internal readonly record struct ProtocolResponse(ArrayBufferWriter<byte> Buffer, bool Close);
@@ -30,14 +34,16 @@ internal sealed class VaultProtocol
     internal static readonly TimeSpan AbsoluteExpiry = TimeSpan.FromMinutes(30);
     private readonly ProjectCatalog catalog;
     private readonly BuildCoordinator? builds; // null: no build service configured, so build operations are Unavailable
+    private readonly PackageImports? packages; // null: no import key provisioned, so package import is Unavailable
     private readonly TimeProvider clock;
     // Projects created or verified in this process. Only the service creates projects, so this is authoritative.
     private readonly ConcurrentDictionary<Guid, bool> projects = new();
 
-    internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null)
+    internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null, PackageImports? packages = null)
     {
         this.catalog = catalog;
         this.builds = builds;
+        this.packages = packages;
         this.clock = clock ?? TimeProvider.System;
         foreach (var p in verified) projects[p.ProjectId] = true;
     }
@@ -91,6 +97,12 @@ internal sealed class VaultProtocol
                 "ListDeletedFiles" => ListDeletedFiles(request),
                 "RestoreFile" => RestoreFile(request, state),
                 "ApplyEdits" => ApplyEdits(request, state),
+                "SearchProject" => SearchProject(request),
+                "GetImportRecipient" or "BeginPackageImport" or "PackageImportPart" or "FinishPackageImport" when packages is null => Error(request, "Unavailable"),
+                "GetImportRecipient" => GetImportRecipient(request, packages!),
+                "BeginPackageImport" => BeginPackageImport(request, state, packages!),
+                "PackageImportPart" => PackageImportPart(request, state),
+                "FinishPackageImport" => FinishPackageImport(request, state, packages!),
                 "ListBuildTargets" or "RequestBuild" or "GetBuildStatus" or "ListBuilds" or "OpenBuildLog" when builds is null => Error(request, "Unavailable"),
                 "ListBuildTargets" => ListBuildTargets(request),
                 "RequestBuild" => RequestBuild(request, state),
@@ -489,6 +501,172 @@ internal sealed class VaultProtocol
             });
         }
         finally { foreach (var (_, content) in documents) CryptographicOperations.ZeroMemory(content); }
+    }
+
+    // ---- encrypted packages from another computer (docs/package-import-design.md) ---------------------------------
+
+    internal const int MaxPackagePartBytes = 512 * 1024;
+
+    /// <summary>This PC's recipient file (the import key's public half): public, for SourceVault Pack on the other computer.</summary>
+    private ProtocolResponse GetImportRecipient(ParsedRequest request, PackageImports packages)
+    {
+        Require(request.Body, "capability");
+        var recipient = packages.Recipient;
+        return Ok(request, w =>
+        {
+            w.WriteString("computer", recipient.Computer);
+            w.WriteString("publicKey", Convert.ToBase64String(recipient.SubjectPublicKeyInfo));
+            w.WriteString("fingerprint", Convert.ToHexStringLower(recipient.Fingerprint));
+        });
+    }
+
+    /// <summary>Starts an upload of <c>length</c> bytes. One per connection, and one at a time across the service.</summary>
+    private ProtocolResponse BeginPackageImport(ParsedRequest request, ConnectionState state, PackageImports packages)
+    {
+        Require(request.Body, "capability", "length");
+        var value = request.Body.GetProperty("length");
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out long length) || length < Package.HeaderBytes + Package.SignatureBytes || state.Upload is not null)
+            throw new RequestException("InvalidRequest");
+        if (length > Package.MaxPackageBytes) throw new RequestException("LimitExceeded");
+        if (!packages.TryEnter()) throw new RequestException("Unavailable"); // another package import is running
+        state.Upload = new byte[length];
+        state.UploadReceived = 0;
+        int released = 0; // the connection closing (another thread) and FinishPackageImport may both release it
+        state.OnClose = () => { if (Interlocked.Exchange(ref released, 1) == 1) return; state.Upload = null; packages.Exit(); };
+        return Ok(request, _ => { });
+    }
+
+    /// <summary>The next part of the upload, in order and without gaps: <c>offset</c> must equal the bytes received so far.</summary>
+    private ProtocolResponse PackageImportPart(ParsedRequest request, ConnectionState state)
+    {
+        Require(request.Body, "capability", "offset", "dataBase64");
+        var upload = state.Upload ?? throw new RequestException("InvalidRequest");
+        var offset = request.Body.GetProperty("offset");
+        if (offset.ValueKind != JsonValueKind.Number || !offset.TryGetInt64(out long at) || at != state.UploadReceived) throw new RequestException("InvalidRequest");
+        var data = request.Body.GetProperty("dataBase64");
+        if (data.ValueKind != JsonValueKind.String || !data.TryGetBytesFromBase64(out var bytes) || bytes.Length == 0) throw new RequestException("InvalidRequest");
+        if (bytes.Length > MaxPackagePartBytes || state.UploadReceived + bytes.Length > upload.Length) throw new RequestException("LimitExceeded");
+        bytes.CopyTo(upload, state.UploadReceived);
+        state.UploadReceived += bytes.Length;
+        return Ok(request, w => w.WriteNumber("received", state.UploadReceived));
+    }
+
+    /// <summary>
+    /// Verifies and decrypts the uploaded package and creates a new project from it, all or nothing. A package that
+    /// is malformed, altered or for another PC is PackageRejected; a valid one from an unregistered computer is
+    /// UnknownSender. The upload ends either way.
+    /// </summary>
+    private ProtocolResponse FinishPackageImport(ParsedRequest request, ConnectionState state, PackageImports packages)
+    {
+        try
+        {
+            Require(request.Body, "capability", "projectName");
+            var upload = state.Upload;
+            if (upload is null || state.UploadReceived != upload.Length) throw new RequestException("InvalidRequest");
+            var name = Text(request.Body, "projectName");
+            try { ProjectCatalog.ValidateProjectName(name); } catch (ArgumentException) { throw new RequestException("InvalidRequest"); }
+            PackageContents contents;
+            try { contents = packages.Open(upload); }
+            catch (PackageRejectedException) { throw new RequestException("PackageRejected"); }
+            catch (UnknownSenderException) { throw new RequestException("UnknownSender"); }
+            using (contents)
+            {
+                var sender = packages.RegisteredSender(contents.SenderFingerprint)?.Computer ?? throw new RequestException("UnknownSender");
+                var created = catalog.CreateProject(name); // a taken name is AlreadyExists, before anything is written
+                projects[created.ProjectId] = true;
+                StoreSnapshot next;
+                try
+                {
+                    var store = catalog.OpenProject(created.ProjectId);
+                    next = store.CommitChanges(created.Snapshot.SnapshotId,
+                        contents.Files.Select(f => (StoreChange)new StoreChange.Write(f.Path, f.Content, "imported")).ToList(), state.Actor);
+                }
+                catch (Exception e) when (e is not OutOfMemoryException)
+                {
+                    // All or nothing: remove the empty project again. A file/folder path clash inside the package is the package's fault.
+                    try { catalog.DeleteProject(created.ProjectId, name); projects.TryRemove(created.ProjectId, out _); } catch (Exception cleanup) when (cleanup is not OutOfMemoryException) { }
+                    if (e is NameExistsException) throw new RequestException("PackageRejected");
+                    throw;
+                }
+                return Ok(request, w =>
+                {
+                    w.WriteString("projectId", created.ProjectId.ToString("D"));
+                    w.WriteString("snapshotId", next.SnapshotId.ToString("D"));
+                    w.WriteNumber("imported", contents.Files.Count);
+                    w.WriteString("packageId", contents.PackageId.ToString("D"));
+                    w.WriteString("sender", sender);
+                });
+            }
+        }
+        finally { state.OnClose?.Invoke(); state.OnClose = null; }
+    }
+
+    // ---- searching a project (the editor's "Search all files") ---------------------------------------------------
+
+    internal const int MaxSearchMatches = 500, MaxSearchQueryChars = 200, MaxSearchPreviewChars = 240;
+
+    /// <summary>
+    /// Plain-text search over every file of the project's current snapshot (no regular expressions). Returns up to 500
+    /// matches with the matching line as a short preview, in file-name order. Decrypts each file once, in this process.
+    /// </summary>
+    private ProtocolResponse SearchProject(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "query", "matchCase", "wholeWord");
+        var store = Project(request.Body);
+        var query = Text(request.Body, "query");
+        if (query.Length is 0 or > MaxSearchQueryChars || query.Contains('\n') || query.Contains('\r')) throw new RequestException("InvalidRequest");
+        bool Flag(string name) => request.Body.GetProperty(name).ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => throw new RequestException("InvalidRequest") };
+        bool matchCase = Flag("matchCase"), wholeWord = Flag("wholeWord");
+        var comparison = matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        var found = new List<(Guid FileId, string Name, int Line, int Column, string Preview, int PreviewOffset)>();
+        bool truncated = false; int searched = 0;
+        var snapshot = store.List();
+        store.ReadSnapshot(snapshot.SnapshotId, (file, content) =>
+        {
+            searched++;
+            if (truncated) return;
+            var text = System.Text.Encoding.UTF8.GetString(content);
+            int lineNumber = 0;
+            foreach (var line in text.Split('\n'))
+            {
+                lineNumber++;
+                var trimmed = line.TrimEnd('\r');
+                for (int at = trimmed.IndexOf(query, comparison); at >= 0; at = trimmed.IndexOf(query, at + 1, comparison))
+                {
+                    if (wholeWord && (IsWordChar(trimmed, at - 1) || IsWordChar(trimmed, at + query.Length))) continue;
+                    if (found.Count == MaxSearchMatches) { truncated = true; return; }
+                    var (preview, offset) = Preview(trimmed, at);
+                    found.Add((file.FileId, file.LogicalName, lineNumber, at + 1, preview, offset));
+                }
+            }
+        });
+        found.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase) is var c && c != 0 ? c : a.Line != b.Line ? a.Line.CompareTo(b.Line) : a.Column.CompareTo(b.Column));
+        return Ok(request, w =>
+        {
+            w.WriteStartArray("matches");
+            foreach (var m in found)
+            {
+                w.WriteStartObject();
+                w.WriteString("fileId", m.FileId.ToString("D")); w.WriteString("name", m.Name);
+                w.WriteNumber("line", m.Line); w.WriteNumber("column", m.Column); w.WriteNumber("length", query.Length);
+                w.WriteString("preview", m.Preview); w.WriteNumber("previewOffset", m.PreviewOffset);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteBoolean("truncated", truncated);
+            w.WriteNumber("filesSearched", searched);
+        });
+
+        static bool IsWordChar(string s, int i) => i >= 0 && i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '_');
+        // The line around the match, at most 240 characters, leading whitespace removed, and where the match starts in it.
+        static (string Text, int Offset) Preview(string line, int at)
+        {
+            int start = Math.Max(0, Math.Min(at - 60, line.Length - MaxSearchPreviewChars));
+            var window = line.Substring(start, Math.Min(MaxSearchPreviewChars, line.Length - start));
+            if (start > 0) return ("…" + window, at - start + 1);
+            var trimmed = window.TrimStart();
+            return (trimmed, Math.Max(0, at - (window.Length - trimmed.Length)));
+        }
     }
 
     private ProtocolResponse ApplyEdits(ParsedRequest request, ConnectionState state)

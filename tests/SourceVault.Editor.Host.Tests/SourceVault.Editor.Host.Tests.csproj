@@ -4,5 +4,7 @@
     <!-- Link the pure policy source so this project needs no WPF or WebView2 reference. -->
     <Compile Include="../../src/SourceVault.Editor.Host/PreviewPolicy.cs" Link="PreviewPolicy.cs" />
     <Compile Include="../../src/SourceVault.Editor.Host/BridgePolicy.cs" Link="BridgePolicy.cs" />
+    <Compile Include="../../src/SourceVault.Editor.Host/EditorSettings.cs" Link="EditorSettings.cs" />
+    <Compile Include="../../src/SourceVault.Editor.Host/NetworkPolicy.cs" Link="NetworkPolicy.cs" />
   </ItemGroup>
 </Project>

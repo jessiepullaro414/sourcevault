@@ -3,7 +3,7 @@
 # The service's TPM key stays in the NT SERVICE\SourceVault profile; this script does not delete keys.
 param(
     [string]$InstallRoot = (Join-Path $env:ProgramFiles 'SourceVault'),
-    [switch]$RemoveVaultRoot, # also remove C:\ProgramData\SourceVault, only if the vault folder is empty
+    [switch]$RemoveVaultRoot, # also remove the configured vault's parent (default C:\ProgramData\SourceVault), only if the vault is empty
     [switch]$RemoveOperatorsGroup # also delete the local group SourceVault Operators
 )
 $ErrorActionPreference = 'Stop'
@@ -21,6 +21,15 @@ if ($service) {
     Write-Output "Deleted service '$serviceName'."
 } else { Write-Output "Service '$serviceName' is not installed." }
 
+# The configured vault root, read before the install folder (which holds the configuration) is removed.
+$vaultRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault\vault'
+$serviceConfig = Join-Path $InstallRoot 'service\sourcevault.service.json'
+if (Test-Path -LiteralPath $serviceConfig) {
+    $config = Get-Content -LiteralPath $serviceConfig -Raw | ConvertFrom-Json
+    if ($config.schemaVersion -eq 2) { $vaultRoot = [string]$config.vaultRoot }
+}
+if ($vaultRoot -notmatch '^[A-Za-z]:\\[^\\]+(\\[^\\]+)+$') { throw "Configured vault root '$vaultRoot' is not a valid vault path; nothing removed." }
+
 # Only remove a folder that looks like this installer's output.
 if (Test-Path -LiteralPath $InstallRoot) {
     $looksInstalled = (Test-Path -LiteralPath (Join-Path $InstallRoot 'install-manifest.sha256')) -and
@@ -29,10 +38,10 @@ if (Test-Path -LiteralPath $InstallRoot) {
     Remove-Item -LiteralPath $InstallRoot -Recurse -Force
     Write-Output "Removed $InstallRoot."
 }
-$vaultParent = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault'
+$vaultParent = Split-Path -Parent $vaultRoot
 if ($RemoveVaultRoot -and (Test-Path -LiteralPath $vaultParent)) {
     $contents = @(Get-ChildItem -LiteralPath $vaultParent -Recurse -Force)
-    if ($contents.Count -gt 1 -or ($contents.Count -eq 1 -and $contents[0].Name -ne 'vault')) { throw "$vaultParent is not empty; not removed." }
+    if ($contents.Count -gt 1 -or ($contents.Count -eq 1 -and $contents[0].Name -ne (Split-Path -Leaf $vaultRoot))) { throw "$vaultParent is not empty; not removed." }
     Remove-Item -LiteralPath $vaultParent -Recurse -Force
     Write-Output "Removed empty $vaultParent."
 } elseif (Test-Path -LiteralPath $vaultParent) { Write-Output "Kept $vaultParent (use -RemoveVaultRoot to remove it when empty)." }

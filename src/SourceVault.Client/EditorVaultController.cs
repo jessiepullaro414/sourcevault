@@ -17,6 +17,10 @@ public sealed record MergeSources(string BaseText, string TheirsText, Guid Their
 public sealed record BuildSummary(int Number, string Target, string State, string? Reason, int? ExitCode, string? RequestedBy, DateTimeOffset RequestedAt,
     DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated, int ArtifactsDropped = 0);
 
+/// <summary>One "Search all files" hit: 1-based line and column (UTF-16), the match length, a short preview of the line and where the match starts in it.</summary>
+public sealed record SearchMatch(Guid FileId, string Name, int Line, int Column, int Length, string Preview, int PreviewOffset);
+public sealed record SearchResult(IReadOnlyList<SearchMatch> Matches, bool Truncated, int FilesSearched);
+
 /// <summary>Outcome of a controller call: a protocol code, or <c>Conflict</c> / <c>Locked</c> / <c>NotOpen</c>.</summary>
 public sealed record VaultResult<T>(string Code, T? Value)
 {
@@ -174,6 +178,21 @@ public sealed class EditorVaultController : IDisposable
         try { return new("Ok", StrictUtf8.GetString(bytes)); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
+
+    /// <summary>Plain-text search across the project's saved files, done by the service (at most 500 matches).</summary>
+    public Task<VaultResult<SearchResult>> SearchProjectAsync(Guid projectId, string query, bool matchCase, bool wholeWord, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("SearchProject", w =>
+        {
+            w.WriteString("projectId", projectId.ToString("D")); w.WriteString("query", query);
+            w.WriteBoolean("matchCase", matchCase); w.WriteBoolean("wholeWord", wholeWord);
+        }, null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<SearchResult>(r.Code);
+        return new("Ok", new SearchResult(r.Body.GetProperty("matches").EnumerateArray().Select(e => new SearchMatch(
+            Guid.Parse(e.GetProperty("fileId").GetString()!), e.GetProperty("name").GetString()!, e.GetProperty("line").GetInt32(),
+            e.GetProperty("column").GetInt32(), e.GetProperty("length").GetInt32(), e.GetProperty("preview").GetString()!, e.GetProperty("previewOffset").GetInt32())).ToList(),
+            r.Body.GetProperty("truncated").GetBoolean(), r.Body.GetProperty("filesSearched").GetInt32()));
+    });
 
     public Task<VaultResult<IReadOnlyList<DeletedSummary>>> ListDeletedAsync(Guid projectId, CancellationToken ct = default) => Guarded(async () =>
     {

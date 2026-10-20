@@ -2,7 +2,18 @@
 
 Owner-run tests that development cannot do: they need the installed service, administrator rights, real hardware, a sign-out or a reboot. Tick each one and add the date and anything odd. Use synthetic projects only. **Needs** says what the test disturbs, so tests can wait until the machine is free.
 
-Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run `Setup-SourceVault.ps1 -Update` from it, elevated. (Needs: admin; closes editors; restarts the services.)
+Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run `Setup-SourceVault.ps1 -Update` from it, elevated. (Needs: admin; closes editors; restarts the services.) Run scripts as `powershell -ExecutionPolicy Bypass -File .\<script>.ps1`, because Windows blocks running `.ps1` files directly by default. Run setup from the package folder, not from the repository's `installer\` folder.
+
+## Results
+
+- **2026-10-18, Windows 11 Pro 25H2 (build 26200), firmware TPM 2.0:** `Setup-SourceVault.ps1 -Update` installed the hardening build. The installed service, `SourceVault.Windows.dll` and lab client hashes match the package, and the service is RUNNING. Then the installed lab client `check` passed all 8 steps:
+  - listed 3 projects, all authenticated at startup;
+  - saved and decrypted `check.txt`, with the stale edit refused;
+  - decrypted `README.md` from *Synthetic demo 1*;
+  - refused a forged capability.
+
+  So on the real service, the new **client hash pins** and the **PID-reuse check** accept an untouched installed client. The tamper half of the pin test (row below) is still to do.
+- **2026-10-18, Docker:** Docker Desktop 4.95 was installed **per user** (no `com.docker.service`). `docker desktop engine use windows` refused with *engine is disabled*, and `\\.\pipe\docker_engine` answered as Docker Desktop (paused). The first `New-WindowsBuildContainer.ps1` run then failed on a script bug: its helper called itself instead of `docker.exe`. That is fixed, and the script now targets `npipe:////./pipe/docker_engine` explicitly. Decision: Microsoft's standalone engine for Windows, Docker Engine in WSL for Linux, no Docker Desktop.
 
 ## Editor and vault (no sign-out or reboot)
 
@@ -17,18 +28,77 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | Profile canary: type a unique marker, save, close; search `%LOCALAPPDATA%\SourceVault\profiles`, `%LOCALAPPDATA%\Temp` and `%LOCALAPPDATA%\CrashDumps` for it (UTF-8 and UTF-16) | — |
 | [ ] | Delete a project (typed name); another open editor gets "no longer exists" | — |
 | [ ] | `SourceVault.Import.exe` on a synthetic folder with `--dry-run`, then a real import, then `--delete-source` (type `DELETE`) | — |
-| [ ] | **Client hash pin (new):** after setup, the editor and importer connect. Then, as admin, append one byte to a copy of `client\SourceVault.Import.dll`, swap it in, and check the importer is refused ("only accepts the installed…"). Restore it with `Setup-SourceVault.ps1 -Update` | admin |
+| [~] | **Client hash pin (new):** after setup, the editor and importer connect (lab client connected 2026-10-18; editor and importer not yet run). Then, as admin, append one byte to a copy of `client\SourceVault.Import.dll`, swap it in, and check the importer is refused ("only accepts the installed…"). Restore it with `Setup-SourceVault.ps1 -Update` | admin |
 | [ ] | `Setup-SourceVault.ps1 -Status` reports everything OK | admin |
+| [ ] | **Editor features (new):** in the installed editor with a synthetic C++ project, on a real keyboard: Ctrl+P, Ctrl+E, Ctrl+Shift+F (a result in an unsaved file too), Ctrl+Shift+O and Alt+O on a `.cpp`, **Ctrl+\\** (split) and **Ctrl+,** (settings; the browser check could not send these two), Ctrl+K Ctrl+S opens the list without saving, Ctrl+K D then **Revert to saved** and Ctrl+Z, Ctrl+Alt+S, Ctrl+K Z | — |
+| [ ] | **Settings file (new):** after saving settings, `%LOCALAPPDATA%\SourceVault\editor-settings.json` holds only the eight display fields; the canary marker is not in it. Replace it with `{}`, then with 5 KiB of text: the editor starts with defaults | — |
+| [ ] | **Close warning (new):** with an unsaved edit, closing the window asks *Close anyway?*; **No** keeps it open with the edit; with nothing unsaved it closes without asking | — |
 
+## Encrypted import from another computer (no sign-out or reboot)
+
+Needs a second Windows computer with a TPM 2.0 (the "source computer"), and synthetic code only.
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | After `Setup-SourceVault.ps1 -Update`: the *TPM key for package import* step says "created" (or "already exists"), and `-Status` lists `package senders registered: (none)` | admin |
+| [ ] | `SourceVault.Import.exe --export-recipient recipient.json` writes the file and prints a fingerprint | — |
+| [ ] | On the source computer: copy `tools\SourceVault-Pack`, open `pack\SourceVaultPack.exe` and click **Set up this computer** (or run `pack\SourceVault.Pack.exe init`). **Record whether the TPM created the key**, then copy its sender file back | source computer |
+| [ ] | The Pack window: choosing a recipient shows its computer and fingerprint; choosing a folder fills **Included** and **Skipped** (binaries, `.git`, `bin`, `obj`); **Create encrypted package** writes a package after the confirmation | source computer |
+| [ ] | `Setup-SourceVault.ps1 -RegisterSender <file>`: the fingerprint matches what `init` printed; type YES | admin |
+| [ ] | On the source computer: `SourceVault.Pack.exe <synthetic folder> --to recipient.json --out test.svpkg`. The recipient fingerprint matches the vault PC's. **Record whether the TPM signed** (RSA-PSS) | source computer |
+| [ ] | `SourceVault.Import.exe --package test.svpkg --project "Packed sample"`: imports N files, names the sender computer, and the project opens in the editor with the same files | — |
+| [ ] | Refusals: the same package with one byte changed is *rejected*; a package from an unregistered computer gives *not registered*; importing to a taken name gives *already exists*. Nothing is created in any of them | — |
+| [ ] | Search the vault PC's `%TEMP%` and the importer's folder for a marker inside the packed files: nothing (plaintext only ever existed in the service's memory) | — |
+## Vault on another drive (e.g. K:)
+
+The full owner-run steps are in [vault-location-design.md](vault-location-design.md), "Lab checklist". Most need an elevated prompt, and step 6 a reboot.
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | Record the drive's type, file system, bus and root ACL (step 1) | admin |
+| [ ] | Fresh install with `-VaultRoot K:\SourceVault\vault -WithSyntheticDemo`: RUNNING, and `-Status` shows the K: path; an existing C: install still passes after `-Update` (steps 2-3) | admin; a test machine or fresh install |
+| [ ] | K: offline or locked: start refuses with 1066/17 and creates nothing; back online, RUNNING (step 4). A USB drive is refused (step 5) | admin; service down |
+| [ ] | Reboot with the vault on K: (step 6); uninstall keeps it and a reinstall authenticates it (step 7); the tamper drill on K: (step 8) | **reboot**; admin |
+
+## Editor: Monaco only, no network
+
+The full steps are in [editor-preview-checks.md](editor-preview-checks.md), "Owner lab checklist: no network".
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | Find the editor's `msedgewebview2.exe` processes, then watch them with Resource Monitor or a packet capture through 10 minutes of use and 10 idle: no connection, UDP or DNS to any non-loopback address (steps 1-2) | — |
+| [ ] | Links in content open nothing; no external application or "open this app?" prompt (steps 3-4) | — |
+| [ ] | A `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` environment variable is refused (step 5) | — |
+| [ ] | A registry `AdditionalBrowserArguments` policy for the editor is refused, and one for another program isn't (step 6; undo afterwards) | admin; lab VM; machine policy |
+| [ ] | Crash data: the profile, including `Crashpad`, is gone after a vault session, and nothing is reported to Microsoft (step 7) | — |
+## Offline deployment drive
+
+Builds on a connected PC, then a **fresh Windows 11 Pro PC with a TPM 2.0 and no internet** (needs restarts and a sign-out). Steps are in the user guide, "Deploying from a drive".
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | `Build-DeploymentKit.ps1 -Destination <drive>\SourceVaultKit -RecordNewHashes`: every download verified; both images saved; review and commit the recorded Docker hashes in `installer\kit-sources.json` | about 4.5 GB download |
+| [ ] | `Test-DeploymentKit.ps1` on the drive: OK. Change one byte of any file: FAIL | — |
+| [ ] | On the target: `Deploy-SourceVault.ps1` phases 1-2, then restart | admin; **restart** |
+| [ ] | Run it again: the Windows engine, WSL and Ubuntu, and the Linux engine come up from the drive. **Record the Windows container's isolation and copy check**, and that both images load with their pinned image IDs | admin |
+| [ ] | SourceVault is installed in the chosen vault location, with builds for the targets that work; `-Status` OK. Sign out and in, run it again: `transfer\recipient-<PC>.json` is written | admin; **sign-out** |
+| [ ] | Two legs: Pack encrypts the sample to that recipient on the source computer; `-ImportPackages` imports it; build it on each target | source computer |
+| [ ] | After a restart and sign-in, the WSL keep-alive task is running and a Linux build still works | **restart** |
 ## Builds (no sign-out or reboot)
 
 | Done | Test | Needs |
 |---|---|---|
-| [ ] | Run `Setup-SourceVault.ps1 -Update -WithBuilds`, write `build.json` from `build.example.json`, then run `Grant-BuildDockerAccess.ps1` | admin; restarts Docker access for the build service |
-| [ ] | WSL target: `New-WslDockerTls.ps1 -Distro <name>`, apply the printed dockerd settings, restart that distro's Docker | the WSL distro restarts |
-| [ ] | Build a synthetic project on the Linux target: succeeds, log shown, output folder has the files | — |
-| [ ] | Build on the Windows target. **Record whether copying into the running Windows container works** (Hyper-V isolation may refuse it) | — |
-| [ ] | **Dropped files (new):** a build that writes `app.js.map` and `app.pdb` publishes the other files and lists both as dropped | — |
+| [ ] | **Remove Docker Desktop** (or quit it and stop it starting at sign-in, and turn off its WSL integration). On 2026-10-18 it held `\\.\pipe\docker_engine` even while paused, which the standalone engine needs | your uninstall |
+| [ ] | **Windows engine:** follow Microsoft Learn's "Prep Windows for containers" (`install-docker-ce.ps1` from `microsoft/Windows-Containers`; read it first). It turns on **Containers** and restarts. Afterwards, `Get-Service docker` is Running and `docker version` reports server OS `windows` | admin; **restart**; download |
+| [ ] | Windows engine access: `New-LocalGroup -Name docker`, add `"group": "docker"` to `C:\ProgramData\docker\config\daemon.json`, `Restart-Service docker` | admin |
+| [ ] | **Windows build container (new):** elevated `New-WindowsBuildContainer.ps1`. It pulls the pinned Windows Server Core .NET SDK image (about 2.7 GB) and creates `sourcevault-build-windows`. **Record which isolation it used and whether the copy check passed**: that decides whether the Windows target can work at all | admin; download |
+| [ ] | **Linux engine:** Docker Engine installed in the WSL distro (Docker's "Install Docker Engine on Ubuntu" apt instructions), with systemd on in `/etc/wsl.conf` so `dockerd` starts with the distro | your install; `wsl --shutdown` |
+| [ ] | **Linux build container (new):** `New-BuildContainer.ps1 -Distro <name>`, run as your normal user. It pulls the pinned .NET SDK image (about 335 MB), creates `sourcevault-build-linux`, and must end with "a fictional console app built and ran with no network". Record the output | download |
+| [ ] | Run `Setup-SourceVault.ps1 -Update -WithBuilds`, then `Grant-BuildDockerAccess.ps1 -Group docker`, then `New-WslDockerTls.ps1 -Distro <name>` and apply the dockerd settings it prints (restart that distro's Docker) | admin; the WSL distro's Docker restarts |
+| [ ] | Write `C:\ProgramData\SourceVault\config\build.json` with the `windows` and `linux` targets the two container scripts printed (the `tls` thumbprint comes from `New-WslDockerTls.ps1`), then run `Setup-SourceVault.ps1 -Update -WithBuilds` again and `-Status` | admin |
+| [ ] | Import `samples\dotnet-hello` from the package (`SourceVault.Import.exe <package>\samples\dotnet-hello --project "Hello sample"`). **Build** it on the Linux target: the output folder has `Hello.dll`, `Hello`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
+| [ ] | **Build** `Hello sample` on the Windows target: the output folder has `Hello.exe`, `Hello.dll`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
+| [ ] | **Dropped files (new):** the `dotnet-hello` build lists `Hello.pdb` as left out (DebugSymbols) at the end of its log, and *Left out: 1 file* in the result | — |
 | [ ] | A build that runs past `timeoutSeconds` is *timed out*; a container with a network gets *refused* when `allowNetwork` is false | — |
 
 ## Needs a sign-out or reboot (wait until the machine is free)

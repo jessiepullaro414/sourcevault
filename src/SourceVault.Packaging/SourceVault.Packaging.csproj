@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Encrypted project packages from another computer (docs/package-import-design.md). BCL only: RSA-OAEP-SHA256,
+       RSA-PSS-SHA256 and AES-256-GCM from System.Security.Cryptography. Keys are supplied by the caller: the vault
+       service's TPM import key, or the packer's TPM sender key; this library never creates or stores keys. -->
+  <PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../SourceVault.Storage/SourceVault.Storage.csproj" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Packaging.Tests" /></ItemGroup>
+</Project>
