@@ -154,9 +154,14 @@ public static class BuildRunner
     }
 
     // Removes and recreates sourcePath and artifactPath inside the container. Paths come from the validated admin config.
+    // Windows: one bare word per argument, with no quotes or spaces in any of them. The engine joins the arguments into
+    // a command line and escapes embedded quotes with backslashes, which cmd.exe doesn't understand: a quoted path
+    // reached mkdir as \"C:\...\\\" and every build failed with CleanupFailed. The config allows no spaces in these paths.
+    // mkdir fails if a folder is still there, so a folder rmdir couldn't remove fails the cleanup.
     internal static IReadOnlyList<string> CleanupCommand(BuildTarget target) => target.IsWindows
         ? ["cmd.exe", "/d", "/c",
-           $"(if exist \"{target.SourcePath}\" rmdir /s /q \"{target.SourcePath}\") & (if exist \"{target.ArtifactPath}\" rmdir /s /q \"{target.ArtifactPath}\") & mkdir \"{target.SourcePath}\" & (if not exist \"{target.ArtifactPath}\" mkdir \"{target.ArtifactPath}\")"]
+           "rmdir", "/s", "/q", target.SourcePath, "2>nul", "&", "rmdir", "/s", "/q", target.ArtifactPath, "2>nul", "&",
+           "mkdir", target.SourcePath, "&&", "mkdir", target.ArtifactPath]
         : ["/bin/sh", "-c", "rm -rf -- \"$1\" \"$2\" && mkdir -p -- \"$1\" \"$2\"", "sourcevault-clean", target.SourcePath, target.ArtifactPath];
 
     private static async Task<bool> CleanAsync(BuildTarget target, IDockerEngine engine, CancellationToken ct)

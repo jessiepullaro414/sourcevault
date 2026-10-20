@@ -60,6 +60,7 @@ Test("config: unsafe or ambiguous settings are refused", () =>
     var windows = LinuxTarget.Replace("\"platform\":\"linux\"", "\"platform\":\"windows\"").Replace("\"/sv/src\"", "\"C:\\\\sv\\\\src\"").Replace("\"/sv/out\"", "\"C:\\\\sv\\\\out\"");
     Assert(BuildConfig.Parse(Utf8(Config(windows))).Targets[0].IsWindows, "windows paths");
     RejectConfig(Config(windows.Replace("C:\\\\sv\\\\src", "C:\\\\sv\\\\src&calc")), "cmd metacharacter in a windows path");
+    RejectConfig(Config(windows.Replace("C:\\\\sv\\\\src", "C:\\\\sv\\\\my src")), "space in a windows path (it would need quoting)");
     RejectConfig("{\"version\":1,\"version\":1}", "duplicate property");
     RejectConfig("not json", "not json");
 });
@@ -214,11 +215,14 @@ Test("build: failures, timeouts and unsafe containers", () =>
     Assert(none.State == BuildState.Succeeded && none.Artifacts!.Files == 0, "no output folder: success with no artifacts");
 });
 
-Test("build: the windows cleanup line quotes the configured paths", () =>
+Test("build: the windows cleanup line is bare words, so the engine's argument escaping leaves it as written", () =>
 {
     var windows = linux with { Platform = "windows", SourcePath = @"C:\sv\src", ArtifactPath = @"C:\sv\out" };
     var line = BuildRunner.CleanupCommand(windows);
-    Assert(line[0] == "cmd.exe" && line[^1].Contains("rmdir /s /q \"C:\\sv\\src\"") && line[^1].Contains("mkdir \"C:\\sv\\out\""), line[^1]);
+    // The Windows engine joins arguments the CommandLineToArgv way: an argument with a space or quote is wrapped in
+    // quotes and its quotes become \" , which cmd.exe reads literally. No argument may need that.
+    Assert(line.All(a => a.Length > 0 && !a.Contains('"') && !a.Contains(' ') && !a.Contains('\t')), string.Join(" | ", line));
+    Assert(string.Join(' ', line) == @"cmd.exe /d /c rmdir /s /q C:\sv\src 2>nul & rmdir /s /q C:\sv\out 2>nul & mkdir C:\sv\src && mkdir C:\sv\out", string.Join(' ', line));
 });
 
 // ---- Docker Engine API client over a named pipe ---------------------------------------------------------------------

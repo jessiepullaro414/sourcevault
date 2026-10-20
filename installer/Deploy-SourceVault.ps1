@@ -134,7 +134,7 @@ if ($state.done -notcontains 'docker') {
         } finally { Pop-Location }
         Ok 'installed the docker service from the drive'
     } else { Ok 'docker service already installed' }
-    if (!(Get-LocalGroup -Name docker -ErrorAction SilentlyContinue)) { New-LocalGroup -Name docker -Description 'May use the Windows Docker engine (only the SourceVault build service)' | Out-Null; Ok 'created local group docker' }
+    if (!(Get-LocalGroup -Name docker -ErrorAction SilentlyContinue)) { New-LocalGroup -Name docker -Description 'May use Docker (SourceVault build service only)' | Out-Null; Ok 'created local group docker' }
     $daemon = Join-Path $env:ProgramData 'docker\config\daemon.json'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $daemon) | Out-Null
     [IO.File]::WriteAllText($daemon, '{"hosts": ["npipe://"], "group": "docker"}', [Text.Encoding]::ASCII)
