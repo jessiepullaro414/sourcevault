@@ -6,7 +6,8 @@
 #                          [-Name sourcevault-build-java] [-TargetName java]
 #
 # -ImageArchive (offline, the deployment drive): loads the image from that archive instead of pulling, and accepts it
-# only if its image ID is the pinned configuration digest below.
+# only if its image ID is the pinned configuration digest below, or (Docker's containerd image store) the pinned
+# manifest or index digest.
 #
 # -OwnerImageId (docs/cpp-build-design.md, section 1): YOUR build image instead of Microsoft's .NET SDK image, for tools
 # the .NET image lacks (a JDK for Ant, GCC, CMake...). It is never pulled: it must already be in this engine
@@ -47,7 +48,10 @@ $imageRepo = 'mcr.microsoft.com/dotnet/sdk'
 $imageTag = '10.0.402'
 $imageDigest = 'sha256:0d99ebf1ccad15037b5c98c9fe8979d6b8dbac23812feae2277a0b277b5c5ffa'
 $image = "$imageRepo@$imageDigest"
-# The linux/amd64 image of that index: its configuration digest is the image ID after `docker load` (kit-sources.json).
+# The linux/amd64 image of that index, as kit-sources.json pins it: its manifest digest and its configuration digest.
+# After `docker load`, the image ID is the configuration digest on Docker's classic image store, and the manifest
+# digest on the containerd image store (Docker 29's default in WSL). Either one is accepted, nothing else.
+$imageManifest = 'sha256:3a48280a9a7c6276c3eeaba1efa6a08820f18c84fb9e6274c187719ecfaf9fbc'
 $imageId = 'sha256:9cd0d6fa04def99891bf4d5a29eb9a3878b6041f9cc25cb389ea0df2177d23fd'
 
 if ($Distro -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw 'Invalid distro name.' }
@@ -75,17 +79,24 @@ if ($exists) {
     Ok "removed the old '$Name'"
 }
 
-if ($OwnerImageId) { $imageId = $OwnerImageId } # the ID every check below must match
+# The IDs a loaded image may have: the configuration digest (classic store) or the manifest or index digest (containerd
+# store). Your image has exactly the ID you give, as the engine it runs on reports it.
+$acceptedIds = @($imageId, $imageManifest, $imageDigest)
+if ($OwnerImageId) { $imageId = $OwnerImageId; $acceptedIds = @($OwnerImageId) } # the ID every check below must match
 if ($ImageArchive) {
     $archive = (Resolve-Path -LiteralPath $ImageArchive).Path
     $linuxPath = (& wsl.exe -d $Distro -u root --exec wslpath -u $archive) -join ''
     if ($LASTEXITCODE -ne 0 -or $linuxPath -notmatch '^/') { throw "WSL could not see $archive." }
     Write-Host "Loading the image from $archive (no download)..."
     Invoke-Wsl "docker load -i '$($linuxPath -replace "'", "'\''")'" | Out-Null
-    $loaded = (Invoke-Wsl "docker image inspect --format '{{.Id}}' '$imageId' 2>/dev/null" -AllowFailure) -join ''
-    if ($loaded -ne $imageId) { throw "The archive did not load the pinned image $imageId; not creating the container." }
-    $image = $imageId # create the container from the verified image ID
-    Ok "image loaded from the archive and matches the pinned image ID"
+    $verified = $null
+    foreach ($id in $acceptedIds) {
+        $loaded = (Invoke-Wsl "docker image inspect --format '{{.Id}}' '$id' 2>/dev/null" -AllowFailure) -join ''
+        if ($loaded -eq $id) { $verified = $id; break }
+    }
+    if (!$verified) { throw "The archive did not load the pinned image (ID $($acceptedIds -join ' or ')); not creating the container." }
+    $image = $verified # create the container from the verified image ID
+    Ok "image loaded from the archive and matches the pinned image ID ($verified)"
 } elseif ($OwnerImageId) {
     $found = (Invoke-Wsl "docker image inspect --format '{{.Id}}' '$imageId' 2>/dev/null" -AllowFailure) -join ''
     if ($found -ne $imageId) { throw "Image $imageId is not in the Docker engine in '$Distro'. Load it first (docker load -i <archive>) or pass -ImageArchive; SourceVault never pulls your images." }

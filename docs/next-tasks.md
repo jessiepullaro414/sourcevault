@@ -8,7 +8,7 @@ Updated 2026-10-18. The vault service, encrypted store, editor vault mode, impor
 
 ## Development work
 
-- **Own build images (2026-10-20):** `-OwnerImageId` in both container scripts ([cpp-build-design.md](cpp-build-design.md), section 1); lab row in the checklist. **Follow-up:** on Docker 29's containerd image store, an image's ID is its manifest digest, so the drive's pinned configuration-digest `imageId`s won't match after `docker load`. The offline check should accept the pinned manifest digest as well (kit-sources.json already records it), and the kit half for owner images is still to build.
+- **Own build images (2026-10-20):** `-OwnerImageId` in both container scripts ([cpp-build-design.md](cpp-build-design.md), section 1); lab row in the checklist. **Containerd image store (2026-10-20):** done, unverified on a real `docker load`. Docker 29's containerd store gives an image its manifest digest as its ID. So the `-ImageArchive` check now accepts the pinned configuration digest or the pinned manifest digest (Linux: also the index digest), and nothing else. `Save-RegistryImage.ps1` now writes an OCI `index.json` with the registry's exact manifest next to `manifest.json`, so the containerd store keeps that digest (drives built earlier must be rebuilt). See [cpp-build-design.md](cpp-build-design.md), section 1; lab row in the checklist. The kit half for owner images is still to build. Its archive check must read `index.json` for a containerd-store ID.
 
 Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-design.md](hardening-design.md)):
 - **Pipe client PID reuse:** the client must still be running and be older than the connection.
