@@ -31,7 +31,15 @@ test('only the notice is ever written to the clipboard; drag, context menu and t
   const shell = readFileSync(new URL('../../src/SourceVault.Editor.Web/shell.mjs', import.meta.url), 'utf8');
   const writes = [...shell.matchAll(/setData\(([^)]*)\)/g)].map(m => m[1]);
   assert.deepEqual(writes, ["'text/plain', CLIPBOARD_NOTICE"], 'the only clipboard write');
-  assert.match(shell, /for \(const name of \['dragstart', 'drop', 'contextmenu'\]\)/);
+  assert.match(shell, /for \(const name of \['dragstart', 'contextmenu'\]\)/, 'nothing can be dragged out of the page');
+  assert.match(shell, /closest\('\[data-file-drop\]'\)/, 'files drop only on the marked explorer');
   assert.match(shell, /defineProperty\(navigator, 'clipboard', \{ value: undefined, configurable: false \}\)/);
   assert.match(shell, /window\.addEventListener\(name, onClipboard, true\)/, 'capture phase, before Monaco');
+});
+
+test('dropped files are passed on unread: no first-party code reads a File', () => {
+  for (const name of ['shell.mjs', 'app.mjs', 'vault-app.mjs', 'vault-session.mjs', 'demo-host.mjs', 'workbench-ui.mjs']) {
+    const source = readFileSync(new URL(`../../src/SourceVault.Editor.Web/${name}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /FileReader|readAs(Text|ArrayBuffer|DataURL)|\.arrayBuffer\(|\.stream\(|\.text\(\)|\.bytes\(\)|createObjectURL/, name);
+  }
 });

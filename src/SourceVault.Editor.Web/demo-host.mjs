@@ -22,6 +22,7 @@ const ARGS = {
   lock: [], unlock: [],
   fileInfo: ['projectId', 'fileId'], replaceFromDisk: ['projectId', 'fileId'], keepMine: ['projectId', 'fileId'], keepTheirs: ['projectId', 'fileId'],
   addFromDisk: ['projectId', 'folder'], revertFile: ['projectId', 'fileId', 'revisionId'],
+  chooseImportFolder: [], importFolder: ['name'], cancelImport: [], dropFiles: ['projectId', 'folder'],
 };
 const isQuery = q => typeof q === 'string' && q.length > 0 && q.length <= 200 && ![...q].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
 const MAX_TEXT_BYTES = 1024 * 1024; // the editor's text limit
@@ -69,6 +70,7 @@ export class DemoVaultHost {
                            // file: { name, text, kind, length, sha256, rev, history: [{ revisionId, rev, text, kind, length, sha256, savedAt, savedBy, action, name }] }
                            // text is null for binary content; sha256 is a promise of the hex digest
   #pending = new Map();    // `${projectId}/${fileId}` -> made-up content staged by a replacement that conflicted
+  #importPlan = null;      // "Import a folder": the made-up folder chosen, waiting for importFolder
   #madeUp = 0;
   actor = 'DEMO\\operator';
   #opened = new Map();     // `${projectId}/${fileId}` -> rev the editor's copy is based on
@@ -352,6 +354,35 @@ export class DemoVaultHost {
         }
         matches.sort((a, b) => (a.name.toUpperCase() < b.name.toUpperCase() ? -1 : a.name.toUpperCase() > b.name.toUpperCase() ? 1 : 0) || a.line - b.line || a.column - b.column);
         return reply('Ok', { matches, truncated, filesSearched: project.files.size - skipped, filesSkipped: skipped });
+      }
+      // "Import a folder" and dropped files: the real host reads them from disk; the demo makes them up.
+      case 'chooseImportFolder': {
+        this.#madeUp++;
+        const files = [['README.md', `# Imported demo folder ${this.#madeUp}\n\nMade-up files: nothing was read from this computer.\n`],
+          ['src/app.cpp', '#include <cstdio>\n\nint main() {\n    std::puts("made up");\n    return 0;\n}\n'], ['res/app.ico', this.#madeUpFile()]];
+        this.#importPlan = { folder: `demo-folder-${this.#madeUp}`, files };
+        const size = c => typeof c === 'string' ? bytes(c) : c.length;
+        return reply('Ok', { folder: this.#importPlan.folder, files: files.length, bytes: files.reduce((n, [, c]) => n + size(c), 0), problem: null,
+          skippedCount: 2, skipped: [{ path: '.git/', reason: 'excluded folder' }, { path: 'bin/', reason: 'excluded folder' }] });
+      }
+      case 'importFolder': {
+        const plan = this.#importPlan;
+        this.#importPlan = null;
+        if (!plan) return reply('NotFound');
+        if (args.name.length > 64 || args.name.trim() !== args.name) return reply('InvalidRequest');
+        if ([...this.#projects.values()].some(p => p.name.toLowerCase() === args.name.toLowerCase())) return reply('AlreadyExists');
+        const projectId = crypto.randomUUID();
+        this.#projects.set(projectId, { name: args.name, files: new Map(plan.files.map(([name, content]) => [crypto.randomUUID(), this.#newFile(name, content, 'imported')])), deleted: new Map() });
+        return reply('Ok', { projectId, imported: plan.files.length, verified: plan.files.length });
+      }
+      case 'cancelImport': this.#importPlan = null; return reply('Ok', {});
+      case 'dropFiles': {
+        const folder = args.folder;
+        if (typeof folder !== 'string' || (folder && (!isName(folder) || folder.startsWith('/') || folder.endsWith('/')))) return;
+        const name = `${folder ? folder + '/' : ''}dropped-demo-${++this.#madeUp}.bin`;
+        if ([...project.files.values()].some(f => f.name.toLowerCase() === name.toLowerCase())) return reply('AlreadyExists');
+        project.files.set(crypto.randomUUID(), this.#newFile(name, this.#madeUpFile(), 'created'));
+        return reply('Ok', { added: 1, skipped: 0, names: [name], stopped: null });
       }
       case 'listFiles':
         return reply('Ok', { files: await Promise.all([...project.files].map(([fileId, f]) => this.#listed(fileId, f))) });

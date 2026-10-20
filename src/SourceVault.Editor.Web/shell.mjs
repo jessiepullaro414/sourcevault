@@ -78,10 +78,28 @@ function onClipboard(event) {
   event.clipboardData?.setData('text/plain', CLIPBOARD_NOTICE); // the only thing that reaches the Windows clipboard
 }
 
+// Dropping files from Explorer (owner request 2026-10-20): only on an element marked data-file-drop (the vault
+// explorer), only files, and only when a handler is set. The page never reads them: it hands the File objects to the
+// host (vault mode), which reads them, or to the demo vault, which makes files up instead. Every other drop, and every
+// drag out of the page, stays blocked.
+let fileDropHandler = null; // (files: File[], target: Element) => void
+export function setFileDropHandler(handler) { fileDropHandler = handler; }
+const dropZone = event => (fileDropHandler && event.target instanceof Element && event.dataTransfer?.types?.includes('Files') && event.target.closest('[data-file-drop]')) || null;
+
 export function installExportBlocks() {
   for (const name of ['copy', 'cut', 'paste']) window.addEventListener(name, onClipboard, true);
-  for (const name of ['dragstart', 'drop', 'contextmenu'])
+  for (const name of ['dragstart', 'contextmenu'])
     window.addEventListener(name, event => { event.preventDefault(); event.stopImmediatePropagation(); }, true);
+  for (const name of ['dragenter', 'dragover'])
+    window.addEventListener(name, event => {
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = dropZone(event) ? 'copy' : 'none';
+    }, true);
+  window.addEventListener('drop', event => {
+    event.preventDefault(); event.stopImmediatePropagation();
+    const zone = dropZone(event), files = [...(event.dataTransfer?.files ?? [])];
+    if (zone && files.length) fileDropHandler(files, event.target);
+  }, true);
   window.addEventListener('beforeinput', event => {
     if (/^(insertFromPaste|insertFromDrop|insertFromYank|deleteByCut|deleteByDrag)/.test(event.inputType)) { event.preventDefault(); event.stopImmediatePropagation(); }
   }, true);

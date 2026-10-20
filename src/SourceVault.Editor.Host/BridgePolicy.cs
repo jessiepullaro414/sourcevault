@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace SourceVault.Editor.Host;
 
 internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock, SearchProject, GetSettings, SaveSettings,
-    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile, OpenBuildFolder }
+    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile, OpenBuildFolder, ChooseImportFolder, ImportFolder, CancelImport, DropFiles }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
 internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0,
@@ -23,6 +23,9 @@ internal static class BridgePolicy
     internal const string RequestType = "sourcevault.vault.request";
     internal const string ResponseType = "sourcevault.vault.response";
     internal const string LockedType = "sourcevault.vault.locked";
+    internal const string ProgressType = "sourcevault.vault.progress";
+    /// <summary>Files dropped in one message (WebView2 additional objects); more is ignored like any malformed request.</summary>
+    internal const int MaxDroppedItems = 1000;
     internal const int MaxMessageChars = 8 * 1024 * 1024; // checked before parsing; escaped 1 MiB text fits (at most 6 characters a byte)
     internal const int MaxTextBytes = 1024 * 1024; // the editor's text limit (docs/vault-any-file-design.md section 4)
     internal const int MaxNameChars = 260; // vault paths: up to 260 characters ("src/app/main.ts")
@@ -68,6 +71,13 @@ internal static class BridgePolicy
         ["keepTheirs"] = (VaultOperation.KeepTheirs, ["projectId", "fileId"]),
         ["addFromDisk"] = (VaultOperation.AddFromDisk, ["projectId", "folder"]), // folder: "" for the project root
         ["revertFile"] = (VaultOperation.RevertFile, ["projectId", "fileId", "revisionId"]),
+        // Import a folder as a new project: the host's folder dialog and scan, then the import (owner request 2026-10-20).
+        ["chooseImportFolder"] = (VaultOperation.ChooseImportFolder, []),
+        ["importFolder"] = (VaultOperation.ImportFolder, ["name"]), // name: the new project's name
+        ["cancelImport"] = (VaultOperation.CancelImport, []),
+        // Files and folders dropped on the explorer. The dropped items travel as WebView2 additional objects, which the
+        // host turns into paths; the JSON carries only where they go. Every other operation must carry none.
+        ["dropFiles"] = (VaultOperation.DropFiles, ["projectId", "folder"]),
     };
 
     /// <summary>Exactly {type, requestId, operation, args} with the operation's exact argument set. Never throws.</summary>
@@ -121,6 +131,14 @@ internal static class BridgePolicy
         w.WriteString("code", code);
         if (result is null) w.WriteNull("result");
         else { w.WriteStartObject("result"); result(w); w.WriteEndObject(); }
+    });
+
+    /// <summary>{type: progress, requestId, done, total}: bytes uploaded so far by a long request (import, drop).</summary>
+    internal static string BuildProgress(Guid requestId, long done, long total) => Build(w =>
+    {
+        w.WriteString("type", ProgressType);
+        w.WriteString("requestId", requestId.ToString("D"));
+        w.WriteNumber("done", done); w.WriteNumber("total", total);
     });
 
     /// <summary>{type: locked, reason} with reason one of user | windows | closed | expired.</summary>

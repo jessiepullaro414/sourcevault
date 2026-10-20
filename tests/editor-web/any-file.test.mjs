@@ -110,3 +110,53 @@ test('the editor saves text up to 1 MiB and refuses more before sending it', asy
   await rejectsWith(session.save(id), 'LimitExceeded');
   await rejectsWith(session.createFile('docs/too-big.txt', 'y'.repeat(MAX_EDITOR_TEXT_BYTES + 1)), 'LimitExceeded');
 });
+
+// ---- import a folder and dropped files (owner request 2026-10-20) ----
+test('import a folder: choose, check the plan, import as a new project (opened); cancel changes nothing', async () => {
+  const { session } = await cppProject();
+  const plan = await session.chooseImportFolder();
+  assert.ok(plan.files === 3 && plan.skippedCount === 2 && plan.problem === null && plan.folder.startsWith('demo-folder-'));
+  await session.cancelImport();
+  await rejectsWith(session.importFolder('Never'), 'NotFound');
+  await session.chooseImportFolder();
+  await rejectsWith(session.importFolder('Synthetic demo 1'), 'AlreadyExists');
+  await session.chooseImportFolder();
+  const result = await session.importFolder('From disk');
+  assert.equal(result.imported, 3); assert.equal(result.verified, 3);
+  assert.equal(session.project.name, 'From disk', 'the new project is opened');
+  assert.deepEqual([...session.files.values()].map(f => f.path).sort(), ['README.md', 'res/app.ico', 'src/app.cpp']);
+  assert.equal([...session.files.values()].find(f => f.path === 'res/app.ico').kind, 'binary');
+});
+
+test('dropped files go to the host with the request, unread; the explorer refreshes', async () => {
+  const host = new DemoVaultHost();
+  const sent = [];
+  const transport = { send: (m, objects) => { sent.push([m.operation, objects ?? null]); host.transport.send(m); }, subscribe: h => host.transport.subscribe(h) };
+  const session = new VaultSession(transport, { timeoutMs: 500 });
+  await session.unlock();
+  await session.selectProject(host.projectIdByName('Synthetic C++ demo'));
+  const files = [{ name: 'a.bin' }, { name: 'b.bin' }]; // stand-ins for File objects: never read
+  const result = await session.dropFiles('res', files);
+  assert.deepEqual(sent.filter(([, objects]) => objects).map(([op, objects]) => [op, objects]), [['dropFiles', files]], 'the dropped items travel with the dropFiles request only');
+  assert.ok(result.added === 1 && result.names[0].startsWith('res/dropped-demo-') && result.stopped === null);
+  assert.ok([...session.files.values()].some(f => f.path === result.names[0]));
+});
+
+test('a long request stays alive while the host reports progress', async () => {
+  const listeners = new Set();
+  const emit = m => { for (const l of listeners) l(m); };
+  const transport = {
+    send: m => {
+      for (const [i, at] of [60, 120, 180].entries()) setTimeout(() => emit({ type: 'sourcevault.vault.progress', requestId: m.requestId, done: (i + 1) * 10, total: 30 }), at);
+      setTimeout(() => emit({ type: 'sourcevault.vault.response', requestId: m.requestId, code: 'Ok', result: { done: true } }), 240);
+    },
+    subscribe: h => { listeners.add(h); return () => listeners.delete(h); },
+  };
+  const { BridgeClient } = await import('../../src/SourceVault.Editor.Web/vault-session.mjs');
+  const client = new BridgeClient(transport, { timeoutMs: 100 });
+  const seen = [];
+  const reply = await client.request('importFolder', { name: 'x' }, { onProgress: (done, total) => seen.push([done, total]) });
+  assert.equal(reply.code, 'Ok');
+  assert.deepEqual(seen, [[10, 30], [20, 30], [30, 30]]);
+  client.dispose();
+});

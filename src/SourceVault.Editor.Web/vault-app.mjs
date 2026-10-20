@@ -2,7 +2,7 @@
 // names and the text of files it opens. Nothing here logs or posts document text anywhere but the host bridge.
 import { VaultSession, languageFor as languageOf, isOpenable, badgeOf, MAX_EDITOR_TEXT_BYTES } from './vault-session.mjs';
 import { resolve } from './merge.mjs';
-import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure, clearInternalClipboard } from './shell.mjs';
+import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure, clearInternalClipboard, setFileDropHandler } from './shell.mjs';
 import { touchRecent, counterpart, isCFamily, outline } from './workbench.mjs';
 import { createWorkbench } from './workbench-ui.mjs';
 
@@ -46,6 +46,7 @@ const FAILURES = {
   UploadExpired: 'The file you chose is no longer held by the service (it keeps it for 2 minutes). Choose it again.',
   SourceChanged: 'The file on disk changed while it was being read. Nothing was changed in the vault; try again.',
   FileUnreadable: 'The editor could not read that file from disk. Nothing was changed in the vault.',
+  NothingToAdd: 'Nothing that the vault can hold was dropped: links, excluded folders (.git, bin, obj…) and names the vault can\u2019t hold are skipped.',
   InvalidRequest: 'The vault rejected that name or content.',
   AlreadyExists: 'That name is already taken (names are not case-sensitive).',
   UnsavedChanges: 'Save or reload the edited files first.',
@@ -69,6 +70,7 @@ export async function startVault(transport, metadata, onSession) {
   let showDeleted = false, deletedFiles = [], restoring = null; // the deleted-files view; restoring: { fileId, value } when the old path is taken
   let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
   let info = null; // the info panel of a file the editor doesn't show (binary, or text over 1 MiB): { id, details }
+  let importing = null; // "Import a folder" waiting for its name and a confirmation: { plan, name }
   const notMergeable = new Map(); // fileId -> their revision, when a conflict can't be merged as text (keep mine / keep theirs)
   // Split editor: two Monaco editors share the models. `focused` is the side that has the keyboard; session.activeId
   // is always the focused side's file and paneIds[other] the file on the other side.
@@ -121,6 +123,7 @@ export async function startVault(transport, metadata, onSession) {
     $('lock').disabled = locked || busy;
 
     $('tabs').replaceChildren(); $('source-files').replaceChildren(); $('root-files').replaceChildren();
+    $('explorer').toggleAttribute('data-file-drop', hasProject && !locked);
     if (hasProject) {
       for (const file of [...session.files.values()].sort((a, b) => a.path.localeCompare(b.path))) {
         const button = document.createElement('button');
@@ -144,6 +147,7 @@ export async function startVault(transport, metadata, onSession) {
         more.setAttribute('aria-expanded', String(fileMenu?.id === file.id));
         more.onclick = () => { fileMenu = fileMenu?.id === file.id ? null : { id: file.id, mode: 'menu' }; render(); };
         const row = document.createElement('div'); row.className = 'file-row'; row.append(button, more);
+        if (file.path.includes('/')) row.dataset.folder = file.path.slice(0, file.path.lastIndexOf('/')); // dropping on a row adds to its folder
         $('root-files').append(row);
         if (fileMenu?.id === file.id && !locked) $('root-files').append(filePanel(file));
       }
@@ -204,6 +208,7 @@ export async function startVault(transport, metadata, onSession) {
     const list = $('project-list');
     list.replaceChildren();
     if (!session.projects.length) { const p = document.createElement('p'); p.className = 'project-empty'; p.textContent = 'No projects yet. Create one below.'; list.append(p); }
+    renderImport();
     if (deleting && !session.projects.some(p => p.projectId === deleting.projectId)) deleting = null;
     for (const project of session.projects) {
       const row = document.createElement('div'); row.className = 'project-row';
@@ -228,6 +233,72 @@ export async function startVault(transport, metadata, onSession) {
       if (deleting?.projectId === project.projectId) list.append(deleteForm(project));
     }
   }
+
+  // ---- import a folder as a new project (the host scans and reads it; the page sees names and counts) -------------
+  const progressText = (verb, done, total) => `${verb}… ${total ? Math.min(100, Math.floor(done * 100 / total)) : 0}% (${formatBytes(done)} of ${formatBytes(total)})`;
+  function renderImport() {
+    const panel = $('import-panel');
+    $('import-folder').disabled = busy || !!importing;
+    panel.hidden = !importing;
+    panel.replaceChildren();
+    if (!importing) return;
+    const { plan } = importing;
+    const heading = document.createElement('p');
+    heading.textContent = demo ? `Demo: a made-up folder "${plan.folder}" (nothing is read from this computer). ` : '';
+    heading.append(`${plan.files.toLocaleString()} file${plan.files === 1 ? '' : 's'} (${formatBytes(plan.bytes)}) from "${plan.folder}" become a new project. The service checks every file after the import.`);
+    panel.append(heading);
+    if (plan.problem) { const problem = document.createElement('p'); problem.className = 'danger-text'; problem.textContent = plan.problem.replace('with --exclude', 'by choosing a smaller folder'); panel.append(problem); }
+    if (plan.skippedCount) {
+      const skipped = document.createElement('details');
+      const summary = document.createElement('summary'); summary.textContent = `${plan.skippedCount.toLocaleString()} skipped`; skipped.append(summary);
+      const list = document.createElement('ul');
+      for (const s of plan.skipped.slice(0, 50)) { const li = document.createElement('li'); li.textContent = `${s.path} — ${s.reason}`; list.append(li); }
+      if (plan.skippedCount > 50) { const li = document.createElement('li'); li.textContent = `…and ${(plan.skippedCount - 50).toLocaleString()} more`; list.append(li); }
+      skipped.append(list); panel.append(skipped);
+    }
+    const form = document.createElement('form');
+    const input = document.createElement('input'); input.maxLength = 64; input.autocomplete = 'off'; input.spellcheck = false; input.value = importing.name; input.setAttribute('aria-label', 'Name of the new project');
+    input.oninput = () => { importing.name = input.value; };
+    const ok = document.createElement('button'); ok.type = 'submit'; ok.textContent = 'Import'; ok.disabled = busy || !!plan.problem || !plan.files;
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancel'; cancel.disabled = busy;
+    cancel.onclick = () => act(async () => { await session.cancelImport(); importing = null; return 'Import cancelled. Nothing was changed.'; });
+    form.onsubmit = event => {
+      event.preventDefault();
+      const name = input.value.trim();
+      if (!name || plan.problem) return;
+      act(async () => {
+        const before = session.project?.projectId;
+        const result = await session.importFolder(name, (done, total) => { $('footer-status').textContent = progressText('Importing', done, total); });
+        importing = null;
+        if (session.project?.projectId !== before) { disposeAllModels(); keepEditing.clear(); picking = false; }
+        return `Imported ${result.imported.toLocaleString()} file${result.imported === 1 ? '' : 's'} into "${name}". ${demo ? 'Demo: made-up files, nothing encrypted.' : `The service decrypted and checked all ${result.verified.toLocaleString()}.`}`
+          + (session.project?.projectId === result.projectId ? '' : ' Save or reload your open files, then open it from the list.');
+      });
+    };
+    const actions = document.createElement('div'); actions.className = 'delete-actions'; actions.append(ok, cancel);
+    form.append(input, actions);
+    panel.append(form);
+  }
+  $('import-folder').onclick = () => act(async () => {
+    const plan = await session.chooseImportFolder();
+    if (!plan) return 'No folder chosen.';
+    importing = { plan, name: plan.folder.slice(0, 64) };
+    return plan.problem ? `"${plan.folder}" can't be imported as it is: ${plan.problem}` : `Scanned "${plan.folder}": ${plan.files.toLocaleString()} file${plan.files === 1 ? '' : 's'} ready. Check the name, then Import.`;
+  });
+
+  // ---- dropping files and folders from Explorer onto the explorer (the host reads them; the page never does) -------
+  setFileDropHandler((files, target) => {
+    if (session.locked || !session.project || picking) { announce('Open a project first, then drop files on the explorer.'); return; }
+    const folder = target.closest('[data-folder]')?.dataset.folder ?? '';
+    const where = folder ? ` to ${folder}/` : '';
+    act(async () => {
+      const result = await session.dropFiles(folder, files, (done, total) => { $('footer-status').textContent = progressText('Adding', done, total); });
+      const added = `${demo ? 'Demo: the dropped files were not read; added ' : 'Added '}${result.added.toLocaleString()} file${result.added === 1 ? '' : 's'}${where}${demo ? ' (made up)' : ', encrypted in the vault'}`;
+      const skipped = result.skipped ? ` ${result.skipped.toLocaleString()} skipped (links, excluded folders like .git, or names the vault can't hold).` : '';
+      const stopped = result.stopped ? ` It stopped part-way: ${FAILURES[result.stopped] ?? result.stopped}` : '';
+      return `${added}.${skipped}${stopped}`;
+    });
+  });
 
   // ---- file actions (right-click menus are blocked, so each explorer row has a ⋯ panel) ----------------------------
   function filePanel(file) {

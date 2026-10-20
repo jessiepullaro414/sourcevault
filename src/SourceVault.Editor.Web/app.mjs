@@ -23,7 +23,8 @@ async function detectMode() {
     });
     if (metadata?.mode === 'vault') {
       return { kind: 'vault', metadata, transport: {
-        send: message => host.postMessage(message),
+        // Dropped files travel as WebView2 additional objects; the host reads them, this page does not.
+        send: (message, objects) => objects?.length ? host.postMessageWithAdditionalObjects(message, objects) : host.postMessage(message),
         subscribe: handler => { const listener = e => handler(e.data); host.addEventListener('message', listener); return () => host.removeEventListener('message', listener); },
       } };
     }
