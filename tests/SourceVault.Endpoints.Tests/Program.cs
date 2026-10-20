@@ -393,7 +393,7 @@ Test("Windows session lock/logoff ends sessions from that session only", () =>
     }
 });
 
-Test("unwrap budget over the pipe: warm list 1 (index), warm open 1, warm edit 0", () =>
+Test("unwrap budget over the pipe: warm list 1 (index), warm open 1, warm edit 1 (the project key, never cached between operations)", () =>
 {
     var (server, pipe) = StartServer();
     using (server)
@@ -407,7 +407,7 @@ Test("unwrap budget over the pipe: warm list 1 (index), warm open 1, warm edit 0
         c.Ok("ListProjects");
         key.Unwraps = 0; c.Ok("ListProjects"); Assert(key.Unwraps == 1, "warm ListProjects = " + key.Unwraps);
         key.Unwraps = 0; c.Ok("OpenDocument", ("projectId", project), ("fileId", fileId), ("expectedSnapshotId", s1)); Assert(key.Unwraps == 1, "warm OpenDocument = " + key.Unwraps);
-        key.Unwraps = 0; c.Ok("ApplyEdits", ("projectId", project), ("fileId", fileId), ("expectedSnapshotId", s1), ("contentBase64", B64("y"))); Assert(key.Unwraps == 0, "warm ApplyEdits = " + key.Unwraps);
+        key.Unwraps = 0; c.Ok("ApplyEdits", ("projectId", project), ("fileId", fileId), ("expectedSnapshotId", s1), ("contentBase64", B64("y"))); Assert(key.Unwraps == 1, "warm ApplyEdits = " + key.Unwraps);
     }
 });
 
@@ -677,7 +677,7 @@ Test("ImportFiles: batches of new files with folder paths; create-only; limits; 
         key.Unwraps = 0;
         using var first = JsonDocument.Parse(ImportCode(c, project, s0, ImportBody(("src/app/main.ts", "export const a = 1;\n"), ("src/util.ts", "u"), ("README.md", "# r"))));
         Assert(first.RootElement.GetProperty("code").GetString() == "Ok" && first.RootElement.GetProperty("body").GetProperty("imported").GetInt32() == 3, "first batch");
-        Assert(key.Unwraps == 0, "import needs no unwraps: " + key.Unwraps);
+        Assert(key.Unwraps == 1, "an import batch needs one unwrap (the project key): " + key.Unwraps);
         var s1 = first.RootElement.GetProperty("body").GetProperty("snapshotId").GetString()!;
         var names = c.Ok("ListFiles", ("projectId", project)).GetProperty("files").EnumerateArray().Select(f => f.GetProperty("name").GetString()).OrderBy(n => n).ToArray();
         Assert(names.SequenceEqual(new[] { "README.md", "src/app/main.ts", "src/util.ts" }), "paths kept");

@@ -115,6 +115,7 @@ internal sealed class VaultProtocol
         catch (RevisionConflictException) { return Error(request, "RevisionConflict"); }
         catch (KeyNotFoundException) { return Error(request, "NotFound"); }
         catch (NameExistsException) { return Error(request, "AlreadyExists"); }
+        catch (StoreLimitException) { return Error(request, "LimitExceeded"); } // count, size or free space (any-file design)
         catch (RequestException e) { return Error(request, e.Code); }
         catch (SourceVault.Build.BuildServiceUnavailableException) { return Error(request, "Unavailable"); }
         // Input is validated before the store is called, so anything the store or catalog rejects here is an
