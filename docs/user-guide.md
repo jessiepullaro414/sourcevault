@@ -252,12 +252,14 @@ Start menu → **SourceVault Editor**. It connects to the vault by itself.
 - The title bar says **Vault**. If it says *Synthetic preview*, you started the demonstration mode, not the vault.
 - The right-hand panel shows **Capture: Excluded (best effort)**. The window asks Windows to keep it out of screenshots and screen recordings.
 
+**If the editor turns red with *NOT CONNECTED*,** it can't reach the SourceVault service: it isn't running, isn't installed, didn't answer, or something else answered in its place. The banner, the lock screen and the window title say which. Until the service is back, nothing can be opened or saved and nothing is decrypted; unsaved edits already in the window stay there. Ask your administrator (Start menu → **SourceVault Administration** → *Check SourceVault*), then click **Try again**. There is no way to keep working unencrypted.
+
 If you see a lock screen instead, it explains why:
 
 | Message | What to do |
 |---|---|
 | *not in 'SourceVault Operators'* | Ask your administrator to add you, then sign out and back in. |
-| *service is not running* | Ask your administrator to run `Setup-SourceVault.ps1 -Status`. |
+| *service isn't running* (red, *NOT CONNECTED*) | Ask your administrator to check SourceVault (*SourceVault Administration*, or `Setup-SourceVault.ps1 -Status`), then click **Try again**. |
 | *only accepts the installed SourceVault editor* | Start the editor from the Start menu, not from a copy elsewhere. |
 | *all service connections are in use* | Up to 4 editors can connect at once. Close one and try again. |
 

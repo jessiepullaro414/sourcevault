@@ -150,5 +150,5 @@ test('demo mode: only app.mjs loads the demo vault, and only when the host (or a
   assert.match(app, /metadata\?\.mode === 'demo'\) return \{ kind: 'demo'/, 'the native host chooses demo mode');
   assert.match(app, /if \(metadata\?\.mode === 'vault'\)/, 'vault mode is checked first and never falls into the demo');
   const css = await readFile(new URL('app.css', web), 'utf8');
-  assert.match(css, /body\.mode-demo\{[^}]*--accent:#ff6b6b/, 'demo mode is red');
+  assert.match(css, /body\.mode-red\{[^}]*--accent:#ff6b6b/, 'demo mode, and an editor that cannot reach the service, are red');
 });
