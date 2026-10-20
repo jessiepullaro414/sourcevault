@@ -56,6 +56,26 @@ Run the other elevated scripts the same way.
 
 Win32 exit 1066 means "service-specific error"; the number after the slash is the service-specific code.
 
+## Build targets without the deployment drive (2026-10-20)
+
+These set up the build engines and targets on a PC that has no offline drive, the way `installer/Deploy-SourceVault.ps1` does from the drive. They were used on the dev PC on 2026-10-20 (results in `docs/lab-checklist.md`).
+
+**Before you start:**
+- The package comes from `scripts\Build-Installer.ps1`, in `artifacts\installer\SourceVault-Setup`.
+- The downloads go in a folder you choose; the default is `C:\WslInstall`.
+- Run each script **as administrator**, signed in as yourself, because WSL distros belong to the account that creates them.
+- Close the SourceVault editor before any step that runs setup.
+
+| Step | Script | What it does |
+|---|---|---|
+| 1 | `Set-DockerGroup.ps1` | After Microsoft's `install-docker-ce.ps1`: creates the empty local group `docker`, sets `"group": "docker"` in the Windows engine's `daemon.json` (keeping other settings), restarts the engine and checks it. `Grant-BuildDockerAccess.ps1 -Group docker` later adds only the build service. |
+| 2 | `Install-WslBuildEngine.ps1` | Needs WSL. Imports Ubuntu 24.04's WSL image as its own distro `SourceVault-Ubuntu`; your own distros are untouched. Installs Docker 29.9.1's static Linux engine under systemd, with no bridge and no iptables, and adds a sign-in task that keeps the distro running. Both downloads are checked by hash first: Ubuntu's published SHA-256, and Docker's recorded at first download (trust on first use). |
+| 3 | `Add-LinuxBuildTarget.ps1` | After `New-BuildContainer.ps1 -Distro SourceVault-Ubuntu`: runs `New-WslDockerTls.ps1` and turns on the engine's TLS listener on 127.0.0.1:2376. Checks that Windows can reach it, adds a `linux` target to `build.json` (keeping the others), then runs setup `-Update -WithBuilds` and `-Status`. |
+| 2–3 | `Setup-LinuxBuildTarget.ps1` | Steps 2, `New-BuildContainer.ps1` and 3 in one run. Safe to repeat: an existing container and an existing `linux` target are kept (`-ReplaceContainer`, `-ReconnectTls`). |
+| 4 | `Add-JavaBuildTarget.ps1` | For Ant projects: pulls a JDK image (`eclipse-temurin`, `-JdkTag 21-jdk` by default) into the SourceVault distro, then creates `sourcevault-build-java` from its exact image ID (`New-BuildContainer.ps1 -OwnerImageId`). Adds a `java` target with the linux target's TLS settings and applies it. |
+
+The pull in step 4 is a test convenience. On a vault PC, own images come from the drive (`docs/cpp-build-design.md`).
+
 ## Limits
 
 The service binary is `dotnet.exe` running `SourceVault.Service.dll`, so Windows sees `dotnet.exe` as the executable; no executable-identity claim follows. Local administrators can still act as the service, read its profile, or replace the install. Anything later wrapped by this key is lost if the TPM is cleared or the service profile is deleted; by owner decision there is no recovery envelope.

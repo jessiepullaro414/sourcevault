@@ -426,8 +426,12 @@ internal sealed class VaultProtocol
     private ProtocolResponse ListBuildTargets(ParsedRequest request)
     {
         Require(request.Body, "capability");
-        var names = builds!.Targets();
-        return Ok(request, w => { w.WriteStartArray("targets"); foreach (var n in names) w.WriteStringValue(n); w.WriteEndArray(); });
+        var list = builds!.Targets();
+        return Ok(request, w =>
+        {
+            w.WriteStartArray("targets"); foreach (var t in list) w.WriteStringValue(t.Name); w.WriteEndArray();
+            w.WriteStartArray("platforms"); foreach (var t in list) w.WriteStringValue(t.Platform); w.WriteEndArray(); // same order; "" if unknown
+        });
     }
 
     private ProtocolResponse RequestBuild(ParsedRequest request, ConnectionState state)

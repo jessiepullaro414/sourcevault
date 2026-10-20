@@ -120,7 +120,7 @@ See `docs/files-history-builds-design.md`, section 4. Every operation also takes
 
 | Operation | Request body | Success body |
 |---|---|---|
-| ListBuildTargets | — | `targets[]`: names from the administrator's `build.json` |
+| ListBuildTargets | — | `targets[]`: names from the administrator's `build.json`; `platforms[]`: each target's platform (`windows` or `linux`), in the same order (added 2026-10-20; a client must accept its absence) |
 | RequestBuild | `projectId`, `target` | `buildNumber` (1, 2, … per project) |
 | GetBuildStatus | `projectId`, `buildNumber` | a build |
 | ListBuilds | `projectId` | `builds[]`, newest first (the 100 newest stored, plus queued and running) |

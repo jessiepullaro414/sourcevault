@@ -336,7 +336,7 @@ export class DemoVaultHost {
         return reply('Ok', { byteLength: bytes(args.text) });
       }
       case 'listBuildTargets':
-        return this.buildTargets.length ? reply('Ok', { targets: this.buildTargets }) : reply('Unavailable');
+        return this.buildTargets.length ? reply('Ok', { targets: this.buildTargets, platforms: this.buildTargets.map(t => (t === 'windows' ? 'windows' : 'linux')) }) : reply('Unavailable');
       case 'requestBuild': {
         if (!this.buildTargets.includes(args.name)) return reply('NotFound');
         const list = this.#builds.get(args.projectId) ?? []; this.#builds.set(args.projectId, list);

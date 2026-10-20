@@ -8,6 +8,8 @@ Updated 2026-10-18. The vault service, encrypted store, editor vault mode, impor
 
 ## Development work
 
+- **Own build images (2026-10-20):** `-OwnerImageId` in both container scripts ([cpp-build-design.md](cpp-build-design.md), section 1); lab row in the checklist. **Follow-up:** on Docker 29's containerd image store, an image's ID is its manifest digest, so the drive's pinned configuration-digest `imageId`s won't match after `docker load`. The offline check should accept the pinned manifest digest as well (kit-sources.json already records it), and the kit half for owner images is still to build.
+
 Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-design.md](hardening-design.md)):
 - **Pipe client PID reuse:** the client must still be running and be older than the connection.
 - **Client hash pins:** every file in the client's install folder must match `install-manifest.sha256`, re-read per connection.

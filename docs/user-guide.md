@@ -176,6 +176,36 @@ A project with a Windows part and a Linux part has both build scripts: `build.cm
 
 **No network in builds:** NuGet packages can't be downloaded in either container, so projects with package references don't build yet.
 
+**Other toolchains (Java/Ant, C++, ...): your own build image.** A build script can run any program that's in its container. Microsoft's .NET images have only the .NET SDK, so a project needing other tools needs a build image that has them. For example, an Ant project that carries Ant itself still needs a JDK.
+
+1. **Get the image into the engine.** You can `docker pull` or `docker build` it there, or `docker load` it from an archive.
+   - **Linux:** for a JDK, run this inside the SourceVault distro, as root:
+     ```bash
+     docker pull eclipse-temurin:21-jdk
+     ```
+   - **What the image must have:** everything the build needs, because builds have no network. It must hold no secrets, and it needs `/bin/sh` (Linux) or PowerShell (Windows).
+2. **Read its image ID** from that engine:
+   ```bash
+   docker image inspect --format '{{.Id}}' eclipse-temurin:21-jdk
+   ```
+3. **Create a container from exactly that ID**, as a separate target. SourceVault never pulls your image itself.
+   ```powershell
+   .\New-BuildContainer.ps1 -Distro SourceVault-Ubuntu -OwnerImageId sha256:<the ID> -Name sourcevault-build-java -TargetName java
+   ```
+   On Windows, as administrator:
+   ```powershell
+   .\New-WindowsBuildContainer.ps1 -OwnerImageId sha256:<the ID> -Name ... -TargetName ...
+   ```
+   What the script does:
+   - applies the same settings as for the .NET containers: no network, all capabilities dropped on Linux, and builds run as root inside the container;
+   - lists the build tools it finds in the image;
+   - prints the `build.json` target.
+4. **Add the target** to `build.json`, then run setup `-Update -WithBuilds`. The target appears in the editor's **Builds** list, and **Build steps** creates its `build.sh` or `build.cmd`. For an Ant project that keeps Ant in an `ant` folder:
+   ```sh
+   sh ant/bin/ant -noinput dist
+   cp -r dist/. /sourcevault/out/
+   ```
+
 1. **Install the build service** (as administrator, from the package folder):
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update -WithBuilds
@@ -424,7 +454,17 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
 
 **Builds** in the Explorer opens the build view (only if your administrator set up builds).
 
-- Pick a **target** and click **Build saved files**. The build uses the files **as saved in the vault**; unsaved edits are not included. One build per target runs at a time; up to 4 more wait.
+- **What a build runs:** the project's own build script, in its top folder. A **Windows** target runs `build.cmd` and a **Linux** target runs `build.sh`. Put your build commands there, and have them write the output to `C:\sourcevault\out` (Windows) or `/sourcevault/out` (Linux).
+- **Build steps:** pick a target, then click **Build steps**.
+  - **If the script exists,** it opens in the editor.
+  - **If it doesn't,** you can create it from a template: .NET, C++ with MSBuild (Windows), CMake, or empty. Then edit it and **save** it like any file.
+
+  The script is encrypted and versioned like the rest of the project, so build changes show in its history.
+- **The standard build images have only the .NET SDK.** The C++ and CMake templates need build images that include those tools.
+- **Building:** pick a **target** and click **Build saved files**.
+  - If the project has no script for that target, the editor says so first. You can create it there, or build anyway.
+  - The build uses the files **as saved in the vault**; unsaved edits are not included.
+  - One build per target runs at a time; up to 4 more wait.
 - The list shows each build with when, who and how long. It refreshes while a build is queued or running.
 - Click a build to see its result, its **output folder** on this PC (*Output (N files)*, with **Open folder** to show it in Explorer), and its **log**. The log is stored encrypted in the vault and shown read-only here, like files; copying from it stays inside the editor.
 - **Output files are ordinary, unencrypted files** in that folder, readable by every operator. That is their purpose.

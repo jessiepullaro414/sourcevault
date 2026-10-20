@@ -152,6 +152,7 @@ Builds on a connected PC, then a **fresh Windows 11 Pro PC with a TPM 2.0 and no
 | [x] 2026-10-20 dev PC, from the editor, after the cleanup fix | **Build** `Hello sample` on the Windows target: the output folder has `Hello.exe`, `Hello.dll`, `Hello.deps.json` and `Hello.runtimeconfig.json` | — |
 | [ ] | **Dropped files (new):** the `dotnet-hello` build lists `Hello.pdb` as left out (DebugSymbols) at the end of its log, and *Left out: 1 file* in the result | — |
 | [ ] | A build that runs past `timeoutSeconds` is *timed out*; a container with a network gets *refused* when `allowNetwork` is false | — |
+| [ ] | **Own build image (Java/Ant, new):** in the SourceVault distro, `docker pull eclipse-temurin:21-jdk` and read its ID (`docker image inspect --format '{{.Id}}'`). `New-BuildContainer.ps1 -Distro SourceVault-Ubuntu -OwnerImageId <ID> -Name sourcevault-build-java -TargetName java` lists `java`/`javac`. Add the printed `java` target (with the Linux target's `tls` block) to `build.json`; setup `-Update -WithBuilds`. In the editor, **Build steps** on `java` creates `build.sh` with the project's Ant (`sh ant/bin/ant -noinput dist && cp -r dist/. /sourcevault/out/`). **Build:** the output folder has the jar(s). A wrong `-OwnerImageId` is refused before any container is created | download (the image, once) |
 
 ## Needs a sign-out or reboot (wait until the machine is free)
 

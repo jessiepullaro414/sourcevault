@@ -9,10 +9,14 @@ namespace SourceVault.Build;
 public sealed record BuildReply(string State, string? Reason, int? ExitCode, byte[] Log, bool LogTruncated, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes,
     int ArtifactsDropped = 0);
 
+/// <summary>A build target as operators see it: its name, and its platform ("windows" or "linux"; "" from an older
+/// build service), which tells the editor which build script the target runs (build.cmd or build.sh).</summary>
+public sealed record BuildTargetInfo(string Name, string Platform);
+
 /// <summary>The vault service's view of the build service (the test seam).</summary>
 public interface IBuildService
 {
-    Task<IReadOnlyList<string>> TargetsAsync(CancellationToken ct);
+    Task<IReadOnlyList<BuildTargetInfo>> TargetsAsync(CancellationToken ct);
     Task<BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IBuildSource source, CancellationToken ct);
 }
 
@@ -25,7 +29,7 @@ public sealed class BuildServiceUnavailableException(string reason) : Exception(
 /// <summary>
 /// The private channel between the vault service (client) and the build service (server), over a pipe only those two
 /// accounts can use. Frames are <see cref="FrameCodec"/> JSON. One connection per request:
-///   {op:"targets"}                                   -> {ok, targets[] | code}
+///   {op:"targets"}                                   -> {ok, targets[], platforms[] (same order) | code}
 ///   build, version 2 (any-file design section 6; both services are installed together):
 ///     {op:"build", version:2, target, projectId, buildNumber, fileCount, totalBytes}
 ///                                                     -> {ok:true, accepted:true} | {ok:false, code}
@@ -53,13 +57,16 @@ public static class BuildChannel
     // ---- client (vault service) ----------------------------------------------------------------------------------
     public sealed class Client(Func<CancellationToken, Task<Stream>> connect) : IBuildService
     {
-        public async Task<IReadOnlyList<string>> TargetsAsync(CancellationToken ct)
+        public async Task<IReadOnlyList<BuildTargetInfo>> TargetsAsync(CancellationToken ct)
         {
             await using var pipe = await Connect(ct).ConfigureAwait(false);
             await Send(pipe, w => w.WriteString("op", "targets"), ct).ConfigureAwait(false);
             using var reply = await Receive(pipe, TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
             var root = Ok(reply);
-            return root.GetProperty("targets").EnumerateArray().Select(t => t.GetString()!).ToList();
+            var names = root.GetProperty("targets").EnumerateArray().Select(t => t.GetString()!).ToList();
+            var platforms = root.TryGetProperty("platforms", out var p) && p.ValueKind == JsonValueKind.Array // absent from an older build service
+                ? p.EnumerateArray().Select(x => x.ValueKind == JsonValueKind.String ? x.GetString()! : "").ToList() : [];
+            return names.Select((n, i) => new BuildTargetInfo(n, i < platforms.Count ? platforms[i] : "")).ToList();
         }
 
         public async Task<BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IBuildSource source, CancellationToken ct)
@@ -137,7 +144,12 @@ public static class BuildChannel
         catch (BuildConfigException) { await Refuse(pipe, "ConfigInvalid", ct).ConfigureAwait(false); return; }
         if (op == "targets")
         {
-            await Send(pipe, w => { w.WriteBoolean("ok", true); w.WriteStartArray("targets"); foreach (var t in config.Targets) w.WriteStringValue(t.Name); w.WriteEndArray(); }, ct).ConfigureAwait(false);
+            await Send(pipe, w =>
+            {
+                w.WriteBoolean("ok", true);
+                w.WriteStartArray("targets"); foreach (var t in config.Targets) w.WriteStringValue(t.Name); w.WriteEndArray();
+                w.WriteStartArray("platforms"); foreach (var t in config.Targets) w.WriteStringValue(t.Platform); w.WriteEndArray();
+            }, ct).ConfigureAwait(false);
             return;
         }
         if (op != "build") { await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; }

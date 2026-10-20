@@ -215,7 +215,9 @@ Test("builds: queue, run through the build service, status, encrypted logs that 
     var project = created.GetProperty("projectId").GetString()!;
     var snap = c.Ok("CreateFile", ("projectId", project), ("name", "src/app.ts"), ("expectedSnapshotId", created.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("export const synthetic = 1;\n"))).GetProperty("snapshotId").GetString()!;
     c.Ok("CreateFile", ("projectId", project), ("name", "build.sh"), ("expectedSnapshotId", snap), ("contentBase64", B64("echo build\n")));
-    Assert(c.Ok("ListBuildTargets").GetProperty("targets").EnumerateArray().Select(t => t.GetString()).SequenceEqual(["linux"]), "targets");
+    var listed = c.Ok("ListBuildTargets");
+    Assert(listed.GetProperty("targets").EnumerateArray().Select(t => t.GetString()).SequenceEqual(["linux"]), "targets");
+    Assert(listed.GetProperty("platforms").EnumerateArray().Select(t => t.GetString()).SequenceEqual(["linux"]), "each target's platform, in the same order");
     Assert(c.Code("RequestBuild", ("projectId", project), ("target", "mac")) == "NotFound", "unknown target");
     Assert(c.Code("RequestBuild", ("projectId", Guid.NewGuid().ToString("D")), ("target", "linux")) == "NotFound", "unknown project");
     var number = c.Ok("RequestBuild", ("projectId", project), ("target", "linux")).GetProperty("buildNumber").GetInt32();
@@ -1663,8 +1665,8 @@ sealed class FakeBuildService : SourceVault.Build.IBuildService
     public bool Offline, Fail;
     public readonly List<IReadOnlyList<(string Name, byte[] Content)>> Received = [];
     public readonly Dictionary<string, string> ReceivedText = [];
-    public Task<IReadOnlyList<string>> TargetsAsync(CancellationToken ct) =>
-        Offline ? throw new SourceVault.Build.BuildServiceUnavailableException("NotRunning") : Task.FromResult<IReadOnlyList<string>>(["linux"]);
+    public Task<IReadOnlyList<SourceVault.Build.BuildTargetInfo>> TargetsAsync(CancellationToken ct) =>
+        Offline ? throw new SourceVault.Build.BuildServiceUnavailableException("NotRunning") : Task.FromResult<IReadOnlyList<SourceVault.Build.BuildTargetInfo>>([new("linux", "linux")]);
     public async Task<SourceVault.Build.BuildReply> RunAsync(string target, Guid projectId, int buildNumber, SourceVault.Build.IBuildSource source, CancellationToken ct)
     {
         if (Offline) throw new SourceVault.Build.BuildServiceUnavailableException("NotRunning");
