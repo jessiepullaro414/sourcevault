@@ -640,7 +640,9 @@ internal sealed class EditorWindow : Window
             or Microsoft.Win32.SessionSwitchReason.ConsoleDisconnect or Microsoft.Win32.SessionSwitchReason.RemoteDisconnect)) return;
         Dispatcher.InvokeAsync(async () =>
         {
-            if (vault is null || vault.IsLocked) return;
+            if (vault is null) return;
+            // No vault session (the page may be working offline, with files in memory): the page must still hide them.
+            if (vault.IsLocked) { PostLocked("windows"); return; }
             lockReasonOverride = "windows"; // the controller reports this as a user lock; the renderer should say why
             await vault.LockAsync();
         });

@@ -252,7 +252,15 @@ Start menu → **SourceVault Editor**. It connects to the vault by itself.
 - The title bar says **Vault**. If it says *Synthetic preview*, you started the demonstration mode, not the vault.
 - The right-hand panel shows **Capture: Excluded (best effort)**. The window asks Windows to keep it out of screenshots and screen recordings.
 
-**If the editor turns red with *NOT CONNECTED*,** it can't reach the SourceVault service: it isn't running, isn't installed, didn't answer, or something else answered in its place. The banner, the lock screen and the window title say which. Until the service is back, nothing can be opened or saved and nothing is decrypted; unsaved edits already in the window stay there. Ask your administrator (Start menu → **SourceVault Administration** → *Check SourceVault*), then click **Try again**. There is no way to keep working unencrypted.
+**If the editor turns red with *NOT CONNECTED*,** it can't reach the SourceVault service: it isn't running, isn't installed, didn't answer, or something else answered in its place. The banner, the lock screen and the window title say which. Until the service is back, nothing can be opened from the vault or saved to it, and nothing is decrypted. Ask your administrator (Start menu → **SourceVault Administration** → *Check SourceVault*), then click **Try again**.
+
+**Work offline** (on that red screen) lets you keep working meanwhile. The editor stays red with *OFFLINE · NOT SAVED*.
+- **What works:** editing the files that were open and making new files.
+- **What doesn't:** opening other files, history, search, builds and the rest, which need the vault and say so.
+- **Save** marks a file (*Offline · saves when the vault is back*). When **Try again** connects, those files are saved. A file someone else changed meanwhile is left for you to **Merge** instead.
+- **New files** made offline without a project open are saved into the project you open next.
+- **Offline work is only in this window's memory.** It is never written to disk, so closing the editor or a crash loses it. Closing asks first.
+- **Locking Windows ends offline work.** Your edits stay hidden behind the lock as usual; unlock, then **Work offline** again if the vault is still down.
 
 If you see a lock screen instead, it explains why:
 

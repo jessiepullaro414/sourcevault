@@ -46,6 +46,7 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | **Guided setup:** double-click `SourceVault Setup.cmd` on a test PC: the elevation prompt, the questions, the summary, the install. Then Start menu → *SourceVault Administration*: status ends with *All good*; add a second account (the sign-out prompt), remove it (the "until they sign out" note) | admin; a test PC |
 | [ ] | **Offline project:** `scripts/lab/Test-VaultTamper.ps1` now expects the service to start with the tampered project offline and `status\vault.json` to list it; the editor shows it struck through; Delete works; `-Status` warns | admin; service down |
 | [ ] | **Not connected:** stop the service (`sc stop SourceVault`, admin), open the editor: it is red, says *The SourceVault service isn't running*, and the window title says *NOT CONNECTED*; start the service, click **Try again**: it unlocks and the red goes away | admin |
+| [ ] | **Offline work:** with a file open, stop the service; lock and unlock the editor (it can't connect): **Work offline**, edit, make a new file, Save both; Win+L hides them and unlocking Windows shows the lock screen, not the files; start the service, **Try again**: both are saved. Search the profile and `%TEMP%` for a marker typed offline: not found | admin |
 | [ ] | **Check codes:** Pack (window and `init`), `--export-recipient` and `-RegisterSender` all show the same six-group code for the same key | second PC |
 
 ## Any-file vault (no sign-out or reboot; synthetic files only)
