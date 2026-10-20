@@ -15,7 +15,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="[1.0.4258.31]" />
     <ProjectReference Include="../SourceVault.Client/SourceVault.Client.csproj" />
-    <!-- dev/ holds the browser-review fake host; it is never shipped in the native editor. -->
+    <!-- dev/ is for development-only files, never shipped. (The demo vault, demo-host.mjs, is shipped: demo mode uses it.) -->
     <Content Include="../SourceVault.Editor.Web/**/*" Exclude="../SourceVault.Editor.Web/dev/**">
       <Link>assets/%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

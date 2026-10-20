@@ -249,6 +249,14 @@ If you see a lock screen instead, it explains why:
 | *only accepts the installed SourceVault editor* | Start the editor from the Start menu, not from a copy elsewhere. |
 | *all service connections are in use* | Up to 4 editors can connect at once. Close one and try again. |
 
+### Demo mode (no vault)
+
+To show SourceVault to people on a PC without the vault, run **Start SourceVault Demo** from the demo folder (`scripts\Build-EditorDemo.ps1` makes it; from the repository, `scripts\Start-Editor.ps1 -Demo`).
+
+- **The demo is red everywhere and is NOT encrypted.** There is no service and no TPM key. Projects live only in the window's memory and are gone when it closes.
+- **Spillage can happen:** what you type can stay in memory, reach the page file or crash data, and be screen-captured (the demo allows capture so it can be presented). **Use made-up code only.**
+- Everything below works in the demo too. Builds are simulated. **Demo controls** (bottom right) make the events other people cause: an edit or delete elsewhere, a Windows lock, session expiry, a failed unlock or build.
+
 ### Projects and files
 
 - **Choose a project** from the list, or type a name and **Create project**. Names are 1–64 characters.

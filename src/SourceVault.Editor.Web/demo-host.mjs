@@ -1,11 +1,13 @@
-// DEVELOPMENT ONLY: an in-page stand-in for the native editor host in vault mode, for browser review
-// (index.html?fake-vault) and node tests. Not shipped in the native editor's assets.
+// The demo vault: an in-page stand-in for the native editor host in vault mode. It runs the editor's demo mode
+// (`SourceVault.Editor.exe --demo`, owner request 2026-10-19), browser review (index.html?demo) and the node tests.
+// NOTHING HERE IS ENCRYPTED OR STORED: projects live in this page's memory and are gone when it closes. The vault
+// editor never loads this module; the host decides the mode, and demo mode never connects to the service.
 //
 // It follows the real host's bridge v2 rules (BridgePolicy): requests that are malformed in any way get no response,
 // just as the real host ignores them. Vault semantics mirror EditorVaultController: per-file conflicts, Locked while
 // locked, unlock re-check of opened files. All content is fictional.
 
-import { searchText, MAX_SEARCH_MATCHES, DEFAULT_SETTINGS, validSettings } from '../workbench.mjs';
+import { searchText, MAX_SEARCH_MATCHES, DEFAULT_SETTINGS, validSettings } from './workbench.mjs';
 
 const REQUEST_TYPE = 'sourcevault.vault.request';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -45,18 +47,18 @@ const SEED = [
   { name: 'Lab client check', files: [['check.txt', 'SourceVault lab client check\nnonce: fictional\n']] },
 ];
 
-export class FakeVaultHost {
+export class DemoVaultHost {
   locked = true;
   failNextUnlock = null;   // e.g. 'ServiceNotRunning' to rehearse unlock errors
   latencyMs;
   #projects = new Map();   // projectId -> { name, files: Map(fileId -> file), deleted: Map(fileId -> { file, deletedAt, deletedBy }) }
                            // file: { name, text, rev, history: [{ revisionId, rev, text, savedAt, savedBy, action, name }] }
-  actor = 'FAKE\\operator';
+  actor = 'DEMO\\operator';
   #opened = new Map();     // `${projectId}/${fileId}` -> rev the editor's copy is based on
   #listeners = new Set();
   requests = [];           // operations received (names only), for tests
   buildTargets = ['linux', 'windows']; // [] rehearses 'builds not set up'
-  buildMs = 1500;          // how long a fake build runs
+  buildMs = 1500;          // how long a demo build runs
   buildFails = false;
   #builds = new Map();     // projectId -> [build], newest last
   settings = { ...DEFAULT_SETTINGS }; // the host's editor-settings.json
@@ -85,7 +87,7 @@ export class FakeVaultHost {
     const [p, f] = key.split('/');
     const file = this.#projects.get(p)?.files.get(f);
     if (!file) return false;
-    this.#save(file, text, 'edited', 'FAKE\\someone-else');
+    this.#save(file, text, 'edited', 'DEMO\\someone-else');
     return true;
   }
   #newFile(name, text, action) { const file = { name, text, rev: 0, history: [] }; this.#save(file, text, action); return file; }
@@ -286,7 +288,13 @@ export class FakeVaultHost {
     return set.size === names.length && !names.some(n => n.split('/').slice(0, -1).some((_, i, parts) => set.has(parts.slice(0, i + 1).join('/'))));
   }
   /** Someone else deletes a file (another editor). */
-  externalDelete(projectId, fileId) { return this.#projects.get(projectId)?.files.delete(fileId) ?? false; }
+  externalDelete(projectId, fileId) {
+    const project = this.#projects.get(projectId), file = project?.files.get(fileId);
+    if (!file) return false;
+    project.files.delete(fileId);
+    project.deleted.set(fileId, { file, deletedAt: new Date().toISOString(), deletedBy: 'DEMO\\someone-else' });
+    return true;
+  }
 
   #unlock() {
     if (this.failNextUnlock) { const code = this.failNextUnlock; this.failNextUnlock = null; return [code, null]; }
@@ -300,24 +308,39 @@ export class FakeVaultHost {
   }
 }
 
-/** A small floating panel for browser review: simulate the events a real host and service produce. */
-export function installFakeHostPanel(fake, getActive) {
-  const panel = document.createElement('div');
-  panel.className = 'fake-host-panel';
-  panel.innerHTML = '<strong>Fake host · browser review</strong><span>No service, no encryption. Fictional data.</span>';
+/**
+ * The demo controls: a small floating panel that makes the events a real service and other people produce, so every
+ * feature can be shown (conflicts and merge, a file deleted elsewhere, lock screens, a failed unlock, a failed build).
+ */
+export function installDemoPanel(demo, getActive) {
+  const panel = document.createElement('section');
+  panel.className = 'demo-panel';
+  panel.setAttribute('aria-label', 'Demo controls');
+  const head = document.createElement('button');
+  head.type = 'button'; head.className = 'demo-panel-head'; head.setAttribute('aria-expanded', 'true');
+  const title = document.createElement('strong'); title.textContent = 'Demo controls';
+  const chevron = document.createElement('span'); chevron.textContent = '⌄';
+  head.append(title, chevron);
+  const body = document.createElement('div'); body.className = 'demo-panel-body';
+  const intro = document.createElement('span'); intro.textContent = 'Simulate what other people and the service do. Nothing here is encrypted.';
+  body.append(intro);
   const actions = [
-    ['Someone else edits this file', () => { const a = getActive(); return fake.externalEdit(a?.projectId, a?.fileId) ? 'Edited elsewhere; your next save will conflict.' : 'Open a file first.'; }],
-    ['Windows lock', () => { fake.simulateLock('windows'); return 'Simulated Windows lock.'; }],
-    ['Session expiry', () => { fake.simulateLock('expired'); return 'Simulated 30-minute expiry.'; }],
-    ['Next unlock: service not running', () => { fake.failNextUnlock = 'ServiceNotRunning'; return 'The next unlock will fail.'; }],
+    ['Someone else edits this file', () => { const a = getActive(); return demo.externalEdit(a?.projectId, a?.fileId) ? 'Edited elsewhere: the next save conflicts (then Merge).' : 'Open a file first.'; }],
+    ['Someone else deletes this file', () => { const a = getActive(); return a && demo.externalDelete(a.projectId, a.fileId) ? 'Deleted elsewhere: edit it and lock/unlock to see the notice, or open Deleted files.' : 'Open a file first.'; }],
+    ['Windows lock', () => { demo.simulateLock('windows'); return 'Simulated a Windows lock.'; }],
+    ['Session expiry', () => { demo.simulateLock('expired'); return 'Simulated the 30-minute expiry.'; }],
+    ['Next unlock fails', () => { demo.failNextUnlock = 'ServiceNotRunning'; return 'The next unlock reports the service as not running.'; }],
+    ['Next build fails', () => { demo.buildFails = !demo.buildFails; return demo.buildFails ? 'Builds now fail (click again to undo).' : 'Builds succeed again.'; }],
   ];
   const note = document.createElement('em');
   for (const [label, act] of actions) {
     const button = document.createElement('button');
-    button.textContent = label;
+    button.type = 'button'; button.textContent = label;
     button.onclick = () => { note.textContent = act(); };
-    panel.append(button);
+    body.append(button);
   }
-  panel.append(note);
+  body.append(note);
+  head.onclick = () => { const open = body.hidden; body.hidden = !open; head.setAttribute('aria-expanded', String(open)); chevron.textContent = open ? '⌄' : '⌃'; };
+  panel.append(head, body);
   document.body.append(panel);
 }

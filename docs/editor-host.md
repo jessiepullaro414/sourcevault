@@ -97,11 +97,23 @@ Design: [editor-vault-design.md](editor-vault-design.md).
 - lock screens for the user, Windows, expiry and disconnects, plus explained unlock failures;
 - drafts kept while locked and re-checked on unlock.
 
-For browser review, `index.html?fake-vault` loads `dev/fake-host.mjs`, which mirrors the host bridge rules and controller semantics and has buttons to simulate an external edit, a Windows lock, expiry and an unlock failure. `dev/` is excluded from the native editor's assets.
+For browser review, `index.html?demo` (or the older `?fake-vault`) runs the demo below without a host. The demo vault (`demo-host.mjs`) mirrors the host bridge rules and controller semantics.
 
 Reviewed in the browser with the fake host: picker, open, edit and save, external edit then conflict then reload, user lock and unlock, Windows lock, a failed unlock message, new file, and switch project, with no console errors. Preview mode was rechecked unchanged.
 
 **Not yet done:** running vault mode as the installed editor against the service (design step 4).
+
+## Demo mode (`--demo`, owner request, 2026-10-19)
+
+The whole vault editor, without the service, for showing it to people. `SourceVault.Editor.exe --demo` runs the vault UI on `demo-host.mjs`, a simulated vault in the page's memory. It has fictional TypeScript and C++ projects, history, conflicts and merge, deleted files, simulated builds, search, settings and every editor feature.
+
+- **Nothing is encrypted, and the demo says so in red.** The chrome and the editor theme are red. A banner, the title-bar badge, the status bar, the window title, the lock screens, the explorer note, the session card, the Save tooltip and messages, the builds caption and the settings dialog all say *not encrypted*. The inspector's note says spillage can happen: typed text stays in memory, can reach the page file or crash data, and the window can be captured.
+- **Host:** demo mode never creates the service controller and never opens the pipe. It accepts only the status messages that preview mode accepts. Every network and export block is unchanged. Capture exclusion is **off**, so the demo can be presented and screen-shared. The browser profile (`profiles\demo`) is deleted after each run, as in vault mode. Closing with unsaved demo edits asks first.
+- **Page:** `app.mjs` loads `demo-host.mjs` only when the host reports `mode: "demo"` (or for `?demo` in a development browser). Vault mode never imports it (a test checks this). Settings in the demo stay in memory; nothing goes to `editor-settings.json`.
+- **Demo controls:** a foldable panel makes the events other people and the service cause: someone else edits or deletes the open file, a Windows lock, session expiry, a failed unlock, a failed build.
+- **Launching:**
+  - `scripts\Start-Editor.ps1 -Demo` from the repository;
+  - `scripts\Build-EditorDemo.ps1` builds `artifacts\demo\SourceVault-Demo` and a zip: the editor on its own private runtime, `Start SourceVault Demo.cmd`, a README and a SHA-256 manifest. It runs on any Windows 10/11 x64 PC with the WebView2 Runtime, with no install and no administrator rights.
 
 ## Editor features (owner request, 2026-10-19)
 

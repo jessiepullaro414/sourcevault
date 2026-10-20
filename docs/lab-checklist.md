@@ -32,6 +32,7 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | `Setup-SourceVault.ps1 -Status` reports everything OK | admin |
 | [ ] | **Editor features (new):** in the installed editor with a synthetic C++ project, on a real keyboard: Ctrl+P, Ctrl+E, Ctrl+Shift+F (a result in an unsaved file too), Ctrl+Shift+O and Alt+O on a `.cpp`, **Ctrl+\\** (split) and **Ctrl+,** (settings; the browser check could not send these two), Ctrl+K Ctrl+S opens the list without saving, Ctrl+K D then **Revert to saved** and Ctrl+Z, Ctrl+Alt+S, Ctrl+K Z | — |
 | [ ] | **Settings file (new):** after saving settings, `%LOCALAPPDATA%\SourceVault\editor-settings.json` holds only the eight display fields; the canary marker is not in it. Replace it with `{}`, then with 5 KiB of text: the editor starts with defaults | — |
+| [ ] | **Demo (new):** `Build-EditorDemo.ps1`, copy the zip to a PC **without** SourceVault, unzip, run *Start SourceVault Demo*: the window is red and titled *DEMO (not encrypted)*, the demo controls work, and a screenshot captures it. Close it: `%LOCALAPPDATA%\SourceVault\profiles\demo` is empty | a second PC (or this one) |
 | [ ] | **Close warning (new):** with an unsaved edit, closing the window asks *Close anyway?*; **No** keeps it open with the edit; with nothing unsaved it closes without asking | — |
 
 ## Encrypted import from another computer (no sign-out or reboot)

@@ -11,7 +11,9 @@ using SourceVault.Client;
 
 namespace SourceVault.Editor.Host;
 
-internal enum EditorMode { SyntheticPreview, Vault }
+// Demo (owner request, 2026-10-19): the vault editor on an in-page simulated vault, for showing it without the
+// service. Nothing is encrypted; the page says so in red.
+internal enum EditorMode { SyntheticPreview, Vault, Demo }
 
 internal static class Program
 {
@@ -22,18 +24,20 @@ internal static class Program
         {
             ["--synthetic-preview"] => EditorMode.SyntheticPreview,
             ["--vault"] => EditorMode.Vault,
+            ["--demo"] => EditorMode.Demo,
             _ => null,
         };
         if (mode is null)
         {
-            MessageBox.Show("Launch with --synthetic-preview for the synthetic demonstration, or --vault to open the SourceVault service (installed editor only).",
+            MessageBox.Show("Launch with --demo for the demonstration (a simulated vault; nothing is encrypted), --synthetic-preview for the synthetic preview, or --vault to open the SourceVault service (installed editor only).",
                 "SourceVault editor", MessageBoxButton.OK, MessageBoxImage.Information);
             return 2;
         }
         var window = new EditorWindow(mode.Value);
         int exit = new Application().Run(window);
         // Vault mode (owner decision): the per-run browser profile is deleted once the browser process has exited.
-        if (mode == EditorMode.Vault && window.ProfilePath is { } profile)
+        // Demo mode does the same, so typed demo text leaves less behind.
+        if (mode is EditorMode.Vault or EditorMode.Demo && window.ProfilePath is { } profile)
         {
             window.BrowserExited.Wait(TimeSpan.FromSeconds(10));
             ProfileStore.TryDelete(profile);
@@ -68,7 +72,12 @@ internal sealed class EditorWindow : Window
         Background = new SolidColorBrush(Color.FromRgb(16, 20, 29));
         Content = surface;
         UpdateTitle(locked: mode == EditorMode.Vault);
-        ShowNotice("Opening SourceVault", mode == EditorMode.Vault ? "Preparing the vault editor…" : "Preparing the offline synthetic editor…");
+        ShowNotice("Opening SourceVault", mode switch
+        {
+            EditorMode.Vault => "Preparing the vault editor…",
+            EditorMode.Demo => "Preparing the demo. Nothing in it is encrypted.",
+            _ => "Preparing the offline synthetic editor…",
+        });
         // Vault mode (owner decision): ask Windows to exclude this window from capture. Best effort, reported truthfully.
         SourceInitialized += (_, _) =>
         {
@@ -79,8 +88,10 @@ internal sealed class EditorWindow : Window
         // Unsaved edits live only in this window: ask before closing it with some.
         Closing += (_, e) =>
         {
-            if (mode != EditorMode.Vault || unsavedFiles == 0 || closeConfirmed) return;
-            var answer = MessageBox.Show(this, $"{unsavedFiles} file(s) have unsaved edits. They exist only in this window and are lost if you close it.\n\nClose anyway?",
+            if (mode == EditorMode.SyntheticPreview || unsavedFiles == 0 || closeConfirmed) return;
+            var answer = MessageBox.Show(this, mode == EditorMode.Demo
+                ? $"{unsavedFiles} demo file(s) have unsaved edits. Demo projects are never stored, so closing discards everything in them.\n\nClose anyway?"
+                : $"{unsavedFiles} file(s) have unsaved edits. They exist only in this window and are lost if you close it.\n\nClose anyway?",
                 "Unsaved edits", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
             if (answer == MessageBoxResult.Yes) closeConfirmed = true; else e.Cancel = true;
         };
@@ -241,7 +252,7 @@ internal sealed class EditorWindow : Window
                 webView.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new
                 {
                     type = "sourcevault.host.metadata",
-                    mode = mode == EditorMode.Vault ? "vault" : "synthetic-preview",
+                    mode = mode switch { EditorMode.Vault => "vault", EditorMode.Demo => "demo", _ => "synthetic-preview" },
                     captureExclusion = captureExcluded,
                     serviceConnected = vault is { IsLocked: false },
                 }));
@@ -438,9 +449,12 @@ internal sealed class EditorWindow : Window
         if (!closing) webView.CoreWebView2?.PostWebMessageAsJson(BridgePolicy.BuildLocked(reason));
     }
 
-    private void UpdateTitle(bool locked) => Title = mode == EditorMode.Vault
-        ? (locked ? "SourceVault — Vault editor (locked)" : "SourceVault — Vault editor")
-        : (locked ? "SourceVault — Locked synthetic preview" : "SourceVault — Synthetic editor preview");
+    private void UpdateTitle(bool locked) => Title = mode switch
+    {
+        EditorMode.Vault => locked ? "SourceVault — Vault editor (locked)" : "SourceVault — Vault editor",
+        EditorMode.Demo => "SourceVault — DEMO (not encrypted)",
+        _ => locked ? "SourceVault — Locked synthetic preview" : "SourceVault — Synthetic editor preview",
+    };
 
     private void ShowNotice(string heading, string detail)
     {
@@ -453,14 +467,14 @@ internal sealed class EditorWindow : Window
 }
 
 /// <summary>
-/// WebView2 profiles live under %LOCALAPPDATA%\SourceVault\profiles\{vault|preview}\&lt;random&gt;, because an installed
-/// editor's own folder is not user-writable. Vault profiles are deleted after each run and leftovers from crashed runs
-/// at the next start (owner decision). Preview profiles are kept for inspection, as before.
+/// WebView2 profiles live under %LOCALAPPDATA%\SourceVault\profiles\{vault|demo|preview}\&lt;random&gt;, because an installed
+/// editor's own folder is not user-writable. Vault and demo profiles are deleted after each run and leftovers from crashed
+/// runs at the next start (owner decision). Preview profiles are kept for inspection, as before.
 /// </summary>
 internal static class ProfileStore
 {
     internal static string Root(EditorMode mode) => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SourceVault", "profiles", mode == EditorMode.Vault ? "vault" : "preview");
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SourceVault", "profiles", mode switch { EditorMode.Vault => "vault", EditorMode.Demo => "demo", _ => "preview" });
 
     private const string LockFile = "sourcevault.lock";
     // Held for the life of this process, so a second running editor never deletes this profile as "stale".
@@ -471,7 +485,7 @@ internal static class ProfileStore
         var root = Root(mode);
         Directory.CreateDirectory(root);
         if (IsReparsePoint(root)) throw new IOException("Profile root is a link.");
-        if (mode == EditorMode.Vault)
+        if (mode is EditorMode.Vault or EditorMode.Demo)
             foreach (var stale in Directory.EnumerateDirectories(root))
                 if (!InUse(stale)) TryDelete(stale);
         var profile = Path.Combine(root, Guid.NewGuid().ToString("N"));

@@ -42,7 +42,7 @@ foreach ($check in $checks) {
     & $DotnetPath $testAssembly @testArgs
     if ($LASTEXITCODE -ne 0) { throw "Tests failed: $($check.Assembly)" }
 }
-foreach ($module in 'app.mjs', 'shell.mjs', 'preview-app.mjs', 'vault-app.mjs', 'vault-session.mjs', 'merge.mjs', 'state.mjs', 'mock-service.mjs', 'workbench.mjs', 'workbench-ui.mjs', 'dev/fake-host.mjs') {
+foreach ($module in 'app.mjs', 'shell.mjs', 'preview-app.mjs', 'vault-app.mjs', 'vault-session.mjs', 'merge.mjs', 'state.mjs', 'mock-service.mjs', 'workbench.mjs', 'workbench-ui.mjs', 'demo-host.mjs') {
     & node --check (Join-Path $repoRoot "src/SourceVault.Editor.Web/$module")
     if ($LASTEXITCODE -ne 0) { throw "Editor script syntax check failed: $module" }
 }

@@ -16,6 +16,7 @@
     <div class="workspace-title"><span class="status-dot"></span><span id="workspace-name">synthetic-workspace</span><span id="mode-badge" class="preview-badge">Synthetic preview</span></div>
     <button id="lock" class="quiet-button"><span aria-hidden="true">▣</span> Lock session</button>
   </header>
+  <div id="demo-banner" class="demo-banner" role="note" hidden><strong>DEMO · NOT ENCRYPTED</strong><span>No vault is connected and nothing is encrypted. What you type stays in this computer’s memory, can reach the disk (page file, crash data) and can be captured on screen. Use made-up code only.</span></div>
   <div class="workbench">
     <nav class="rail" aria-label="Workspace panels">
       <button id="explorer-toggle" class="rail-button selected" title="Toggle explorer" aria-label="Toggle explorer" aria-pressed="true">▤</button>
@@ -69,7 +70,7 @@
       <button id="reset" class="reset-button">↺ Reset sample workspace</button>
     </aside>
   </div>
-  <footer class="statusbar"><div><span class="footer-mark">◈</span><span id="footer-status" role="status" aria-live="polite">Loading offline Monaco…</span></div><div><button id="unsaved-status" class="status-button" title="Save all (Ctrl+Alt+S)" hidden></button><span id="cursor-position">Ln 1, Col 1</span><span id="indent-status">Spaces: 2</span><span id="eol-status">LF</span><span>UTF-8</span><span id="size-status" title="Files can be up to 256 KiB"></span><span id="language-status">TypeScript</span><span class="offline-label">● Offline assets</span></div></footer>
+  <footer class="statusbar"><div><span class="footer-mark">◈</span><span id="footer-status" role="status" aria-live="polite">Loading offline Monaco…</span></div><div><button id="unsaved-status" class="status-button" title="Save all (Ctrl+Alt+S)" hidden></button><span id="cursor-position">Ln 1, Col 1</span><span id="indent-status">Spaces: 2</span><span id="eol-status">LF</span><span>UTF-8</span><span id="size-status" title="Files can be up to 256 KiB"></span><span id="language-status">TypeScript</span><span id="demo-status" class="demo-status" hidden>DEMO · NOT ENCRYPTED</span><span class="offline-label">● Offline assets</span></div></footer>
 </div>
 <div id="palette" class="palette" role="dialog" aria-modal="true" aria-labelledby="palette-title" hidden>
   <span id="palette-title" class="tiny-label">GO TO FILE</span>

@@ -441,7 +441,7 @@ Check("top-level navigation allows only the exact entry document", () =>
         App, App + "/", App + "/index.html?fake-vault", App + "/index.html?", App + "/index.html#", App + "/index.html#top",
         App + "/INDEX.HTML", App + "/Index.html", App + "/index.htm", App + "/index.html/", App + "/index.html/x", App + "//index.html",
         App + "/index%2ehtml", App + "/./index.html", App + "/vendor/../index.html", App + "/vendor/monaco/vs/loader.js",
-        App + "/vendor/monaco/LICENSE", App + "/README.md", App + "/app.mjs", App + "/dev/fake-host.mjs", App + "/vendor/monaco/vs/editor/editor.main.js");
+        App + "/vendor/monaco/LICENSE", App + "/README.md", App + "/app.mjs", App + "/demo-host.mjs", App + "/vendor/monaco/vs/editor/editor.main.js");
 });
 
 Check("external URI schemes and browser-internal pages are never navigable", () => Rejects(PreviewPolicy.IsNavigationAllowed,

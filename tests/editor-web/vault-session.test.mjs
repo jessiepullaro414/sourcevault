@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { VaultSession, BridgeClient, VaultError, languageFor } from '../../src/SourceVault.Editor.Web/vault-session.mjs';
-import { FakeVaultHost } from '../../src/SourceVault.Editor.Web/dev/fake-host.mjs';
+import { DemoVaultHost } from '../../src/SourceVault.Editor.Web/demo-host.mjs';
 
 async function opened(options = {}) {
-  const host = new FakeVaultHost();
+  const host = new DemoVaultHost();
   const session = new VaultSession(host.transport, { timeoutMs: 500, ...options });
   await session.unlock();
   await session.selectProject(host.projectIdByName('Synthetic demo 1'));
@@ -13,7 +13,7 @@ async function opened(options = {}) {
 const rejectsWith = (promise, code) => assert.rejects(promise, e => e instanceof VaultError && e.code === code);
 
 test('starts locked; unlock opens a session and lists projects; nothing is loaded until opened', async () => {
-  const host = new FakeVaultHost();
+  const host = new DemoVaultHost();
   const session = new VaultSession(host.transport, { timeoutMs: 500 });
   assert.equal(session.locked, true);
   assert.deepEqual(await session.unlock(), []);
@@ -151,7 +151,7 @@ test('history lists saved versions; an old version restores as unsaved edits; de
   const { revisions, more } = await session.listHistory(main.id);
   assert.equal(more, false);
   assert.deepEqual(revisions.map(r => r.action), ['edited', 'created']);
-  assert.equal(revisions[0].savedBy, 'FAKE\\operator');
+  assert.equal(revisions[0].savedBy, 'DEMO\\operator');
   const original = await session.openRevision(main.id, revisions[1].revisionId);
   assert.match(original, /greet\('synthetic'\)/);
   await session.restoreRevision(main.id, revisions[1].revisionId);
@@ -161,7 +161,7 @@ test('history lists saved versions; an old version restores as unsaved edits; de
   // Delete, list deleted, restore under its old name; a taken name is AlreadyExists.
   await session.deleteFile(main.id);
   const deleted = await session.listDeleted();
-  assert.equal(deleted.length, 1); assert.equal(deleted[0].name, 'main.ts'); assert.equal(deleted[0].deletedBy, 'FAKE\\operator');
+  assert.equal(deleted.length, 1); assert.equal(deleted[0].name, 'main.ts'); assert.equal(deleted[0].deletedBy, 'DEMO\\operator');
   assert.equal((await session.listHistory(deleted[0].fileId)).revisions.length, 3, 'a deleted file keeps its history');
   await session.createFile('main.ts', '// new file in the old place\n');
   await rejectsWith(session.restoreFile(deleted[0].fileId, 'MAIN.TS'), 'AlreadyExists');
@@ -256,7 +256,7 @@ test('host lock events (Windows lock, expiry) lock the session and notify the UI
 });
 
 test('unlock failures surface their code and leave the session locked', async () => {
-  const host = new FakeVaultHost();
+  const host = new DemoVaultHost();
   const session = new VaultSession(host.transport, { timeoutMs: 500 });
   host.failNextUnlock = 'AccessDenied';
   await rejectsWith(session.unlock(), 'AccessDenied');
@@ -265,7 +265,7 @@ test('unlock failures surface their code and leave the session locked', async ()
 });
 
 test('requests match the host bridge exactly: a malformed request gets no answer and times out', async () => {
-  const host = new FakeVaultHost();
+  const host = new DemoVaultHost();
   const client = new BridgeClient(host.transport, { timeoutMs: 100 });
   assert.equal((await client.request('unlock')).code, 'Ok');
   await rejectsWith(client.request('unlock', { extra: 1 }), 'Timeout');

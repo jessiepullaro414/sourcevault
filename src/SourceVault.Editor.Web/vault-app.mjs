@@ -71,8 +71,10 @@ export async function startVault(transport, metadata, onSession) {
   const active = () => (session.activeId ? session.files.get(session.activeId) : null);
   const focusedEditor = () => (split && focused === 1 ? editor2 : editor);
 
-  document.title = 'SourceVault — Vault editor';
+  const demo = !!metadata.demo; // demo mode: the in-page demo vault, nothing encrypted (shown in red)
+  document.title = demo ? 'SourceVault — DEMO (not encrypted)' : 'SourceVault — Vault editor';
   document.body.classList.add('mode-vault');
+  document.body.classList.toggle('mode-demo', demo);
   relabel(metadata);
 
   async function act(work, after) {
@@ -96,7 +98,7 @@ export async function startVault(transport, metadata, onSession) {
     const [eyebrow, title, detail] = LOCK_SCREENS[session.lockReason] ?? LOCK_SCREENS.closed;
     $('locked-view').hidden = !locked;
     $('locked-eyebrow').textContent = eyebrow; $('locked-title').textContent = title;
-    $('locked-detail').textContent = unlockError ?? detail;
+    $('locked-detail').textContent = unlockError ?? (demo ? `${detail} ${DEMO_NOTE}` : detail);
     $('unlock').disabled = busy;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
@@ -142,7 +144,7 @@ export async function startVault(transport, metadata, onSession) {
       }
     }
     $('breadcrumb-file').textContent = f ? f.path : 'No file selected';
-    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : 'Saved in vault';
+    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : demo ? 'Saved in the demo vault · not encrypted' : 'Saved in vault';
     $('conflict-banner').hidden = locked || !f || !f.conflict || keepEditing.has(f.id);
     $('save').disabled = !editor || locked || busy || !f || !session.dirty(f.id);
     const unsaved = locked ? 0 : session.dirtyIds.length;
@@ -437,7 +439,9 @@ export async function startVault(transport, metadata, onSession) {
     $('builds-view').hidden = !open;
     if (!open) return;
     $('builds-title').textContent = `Builds of ${session.project.name}`;
-    $('builds-caption').textContent = buildsView.note ?? 'Builds use the saved files in the vault (not unsaved edits). Output files go to the folder your administrator set; the build log stays encrypted here.';
+    $('builds-caption').textContent = buildsView.note ?? (demo
+      ? 'Demo builds are simulated: nothing is compiled, no container runs and no output files are written. The log below is made up.'
+      : 'Builds use the saved files in the vault (not unsaved edits). Output files go to the folder your administrator set; the build log stays encrypted here.');
     const select = $('build-target');
     if (select.options.length !== buildsView.targets.length) {
       select.replaceChildren(...buildsView.targets.map(t => { const o = document.createElement('option'); o.value = o.textContent = t; return o; }));
@@ -625,14 +629,14 @@ export async function startVault(transport, metadata, onSession) {
       try { var changed = await session.unlock(); unlockError = null; }
       catch (e) { unlockError = UNLOCK_FAILURES[e?.code] ?? `Could not connect to the vault (${e?.code ?? 'InternalError'}).`; return 'Still locked.'; }
       for (const id of changed) keepEditing.delete(id);
-      return changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : 'Connected to the vault.';
+      return changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : demo ? 'Demo vault ready (simulated, not encrypted).' : 'Connected to the vault.';
     }, () => { wb.renderSearch(); if (!session.locked && !session.project) $('new-project-name').focus(); });
   }
   function save() {
     const f = active();
     if (!f || session.locked || !session.dirty(f.id)) return;
     if (f.deleted) { act(async () => { await session.saveAsNew(f.id); dropModel(f.id); return `${f.path} was deleted by someone else; saved your version as a new file.`; }); return; }
-    act(async () => (await session.save(f.id)) ? `Saved ${f.path} to the vault as a new encrypted revision.` : 'No unsaved edits.');
+    act(async () => (await session.save(f.id)) ? (demo ? `Saved ${f.path} to the demo vault (in memory, not encrypted).` : `Saved ${f.path} to the vault as a new encrypted revision.`) : 'No unsaved edits.');
   }
   // ---- workbench: open and reveal, compare with saved, save all, split, focus mode, header/source --------------
   const available = () => !!editor && !session.locked && !!session.project && !picking;
@@ -726,7 +730,7 @@ export async function startVault(transport, metadata, onSession) {
     if (!split) {
       if (!session.activeId) { announce('Open a file first.'); return; }
       if (!editor2) {
-        editor2 = createEditor('Vault source editor, right side. Saved changes become encrypted revisions in the vault.', $('editor-2'));
+        editor2 = createEditor(demo ? 'Demo editor, right side. Nothing is encrypted.' : 'Vault source editor, right side. Saved changes become encrypted revisions in the vault.', $('editor-2'));
         wireEditor(editor2, 1);
       }
       split = true; $('editor-2').hidden = false;
@@ -771,7 +775,7 @@ export async function startVault(transport, metadata, onSession) {
     if (sidebar === 'search') wb.renderSearch();
   }
 
-  const THEMES = { dark: 'sourcevault', light: 'vs', highContrast: 'hc-black' };
+  const THEMES = { dark: demo ? 'sourcevault-demo' : 'sourcevault', light: 'vs', highContrast: 'hc-black' };
   function applySettings(s, retab) {
     if (!editor) return;
     monaco.editor.setTheme(THEMES[s.theme] ?? 'sourcevault');
@@ -874,7 +878,7 @@ export async function startVault(transport, metadata, onSession) {
   try {
     await loadMonaco();
     registerOutlines();
-    editor = createEditor('Vault source editor. Saved changes become encrypted revisions in the vault.');
+    editor = createEditor(demo ? 'Demo editor. Nothing is encrypted.' : 'Vault source editor. Saved changes become encrypted revisions in the vault.');
     wireEditor(editor, 0);
     await wb.loadSettings(); // display preferences: available before unlocking
     $('loading').hidden = true;
@@ -904,32 +908,41 @@ function registerOutlines() {
     monaco.languages.registerDocumentSymbolProvider(language, { displayName: 'SourceVault outline', provideDocumentSymbols: model => outline(language, model.getValue()).map(toSymbol) });
 }
 
+const DEMO_NOTE = 'DEMO: nothing here is encrypted and no vault is connected. Use made-up code only.';
+
 function relabel(metadata) {
-  const fake = !!metadata.fake;
-  $('mode-badge').textContent = fake ? 'Vault · fake host' : 'Vault';
+  const demo = !!metadata.demo;
+  $('mode-badge').textContent = demo ? 'DEMO · NOT ENCRYPTED' : 'Vault';
+  $('demo-banner').hidden = $('demo-status').hidden = !demo;
   $('vault-explorer-actions').hidden = false;
   $('settings-button').hidden = $('shortcuts-button').hidden = false;
   $('find').title = 'Search all files (Ctrl+Shift+F). Ctrl+F finds in the open file.'; $('find').setAttribute('aria-label', 'Search all files');
   $('new-file-name').placeholder = 'src/name.cpp';
   $('folder-row').hidden = true;
-  $('explorer-note-label').textContent = fake ? 'FAKE HOST' : 'VAULT';
-  $('explorer-note-text').textContent = fake
-    ? 'Browser review only. Nothing is encrypted and no service is connected.'
+  $('explorer-note-label').textContent = demo ? 'DEMO · NOT ENCRYPTED' : 'VAULT';
+  $('explorer-note-text').textContent = demo
+    ? 'Demo projects live only in this window’s memory and are gone when it closes. Nothing is encrypted; what you type can be left on this computer or captured on screen.'
     : 'Encrypted at rest by the SourceVault service. Text is decrypted only for files you open.';
   $('save-label').textContent = 'Save';
-  $('save').title = 'Save to the vault as a new encrypted revision (Ctrl+S)';
+  $('save').title = demo ? 'Save to the demo vault: in memory, NOT encrypted (Ctrl+S)' : 'Save to the vault as a new encrypted revision (Ctrl+S)';
   $('no-file-title').textContent = 'Choose a file';
   $('no-file-detail').textContent = 'Open a file from the explorer, or create one with + New file.';
   $('unlock-label').textContent = 'Unlock vault';
-  $('session-title').textContent = fake ? 'Fake host' : 'SourceVault service';
-  $('session-subtitle').textContent = fake ? 'Browser review · no encryption' : 'TPM-protected key · operator session';
-  $('source-detail').textContent = fake ? 'Fake host' : 'Vault';
-  $('capture-detail').textContent = metadata.captureExclusion ? 'Excluded (best effort)' : 'Allowed';
+  $('session-title').textContent = demo ? 'Demo vault (simulated)' : 'SourceVault service';
+  $('session-subtitle').textContent = demo ? 'No service · no TPM key · no encryption' : 'TPM-protected key · operator session';
+  $('source-detail').textContent = demo ? 'Demo, in memory' : 'Vault';
+  $('capture-detail').textContent = metadata.captureExclusion ? 'Excluded (best effort)' : demo ? 'Allowed (demo)' : 'Allowed';
   $('revision-label').textContent = 'SAVED THIS SESSION';
-  $('revision-copy').textContent = 'Each save is a new immutable revision in the vault.';
-  $('memory-text').textContent = fake ? 'Not encrypted' : 'Encrypted at rest';
-  $('boundary-title').textContent = 'Vault editor';
-  $('boundary-text').textContent = 'Text of open files lives in this editor’s memory. Screen-capture exclusion is best effort. Builds are not connected.';
+  $('revision-copy').textContent = demo ? 'Each save is a new revision in the demo vault, in memory and not encrypted.' : 'Each save is a new immutable revision in the vault.';
+  $('memory-text').textContent = demo ? 'NOT ENCRYPTED' : 'Encrypted at rest';
+  $('boundary-title').textContent = demo ? 'Demo: spillage can happen' : 'Vault editor';
+  $('boundary-text').textContent = demo
+    ? 'Nothing typed here is protected. It stays in memory, can reach the page file or crash data, and this window can be screen-captured and shared. Do not type real source code.'
+    : 'Text of open files lives in this editor’s memory. Screen-capture exclusion is best effort. Builds are not connected.';
+  if (demo) {
+    document.querySelector('#settings-dialog .dialog-note').textContent = 'Demo: these choices are kept only until the editor closes. Only display choices, never file names or text.';
+    $('project-picker').querySelector('.eyebrow').textContent = 'DEMO PROJECTS · NOT ENCRYPTED';
+  }
   $('reset').hidden = true;
-  $('activity-message').textContent = 'Vault mode.';
+  $('activity-message').textContent = demo ? 'Demo mode. Nothing is encrypted.' : 'Vault mode.';
 }
