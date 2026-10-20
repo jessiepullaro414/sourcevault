@@ -53,6 +53,9 @@ public static class BuildRunner
             var folderName = target.ArtifactPath[(target.ArtifactPath.LastIndexOfAny(['/', '\\']) + 1)..];
             var destination = Path.Combine(artifactRoot, projectId.ToString("D"), $"{buildNumber}-{target.Name}");
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            // Right before writing: neither the output folder nor this project's folder may be a link (a junction would send
+            // the output elsewhere). Their parents were checked when the build was accepted.
+            if (IsLink(artifactRoot) || IsLink(Path.GetDirectoryName(destination)!)) return new(BuildState.Rejected, "ArtifactFolderUntrusted", 0, run.Output, run.Truncated, null);
             await using var archive = await engine.GetArchiveAsync(target.Container, target.ArtifactPath, ct).ConfigureAwait(false);
             PublishedArtifacts published;
             if (archive is null) { Directory.CreateDirectory(destination); published = new(destination, 0, 0); } // no output folder: nothing to publish
@@ -75,6 +78,8 @@ public static class BuildRunner
     }
 
     private static BuildOutcome Unavailable(string reason) => new(BuildState.Unavailable, reason, null, [], false, null);
+
+    private static bool IsLink(string folder) => (File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0;
 
     // The engine's pipe wasn't the engine's (HttpClient wraps connection failures).
     private static bool IsUntrusted(Exception? e)

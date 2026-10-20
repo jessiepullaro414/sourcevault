@@ -416,6 +416,7 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
 - The list shows each build with when, who and how long. It refreshes while a build is queued or running.
 - Click a build to see its result, its **output folder** on this PC (*Output (N files)*, with **Open folder** to show it in Explorer), and its **log**. The log is stored encrypted in the vault and shown read-only here, like files; copying from it stays inside the editor.
 - **Output files are ordinary, unencrypted files** in that folder, readable by every operator. That is their purpose.
+- *could not run: the output folder, or a folder above it, could be changed by people other than administrators* means the build service refused to write there. Your administrator moves `artifactRoot` into a folder only administrators can change (one that setup creates is), then runs setup with `-Update -WithBuilds`; `-Status` shows what was found.
 - **Left out:** source maps, debug symbols and similar files are not published. The result says how many, and the end of the log lists them. Your administrator can allow a kind.
 - Common results:
   - *failed*: the build command returned an error (see the log);

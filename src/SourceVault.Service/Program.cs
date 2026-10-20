@@ -19,6 +19,14 @@ internal static class Program
                         var config = SourceVault.Build.BuildConfig.Load(SourceVault.Build.BuildConfig.DefaultPath, VaultRoot.ConfiguredVaultFolder());
                         Console.WriteLine($"artifactRoot={config.ArtifactRoot}");
                         Console.WriteLine($"targets={string.Join(",", config.Targets.Select(t => t.Name))}");
+                        // The output folder, as the build service checks it before every build. Missing: setup creates it.
+                        if (Directory.Exists(config.ArtifactRoot))
+                        {
+                            var check = ArtifactRoot.Validate(config.ArtifactRoot);
+                            Console.WriteLine($"artifactRootTrusted={(check.Passed ? "yes" : "no")}");
+                            foreach (var f in check.Findings) Console.WriteLine($"{(f.Severity == SourceVault.Windows.FindingSeverity.Error ? "error" : "warning")} {f.Code} at {f.Location}{(f.Subject is null ? "" : " " + f.Subject)}");
+                        }
+                        else Console.WriteLine("artifactRootTrusted=missing");
                         return 0;
                     }
                     catch (SourceVault.Build.BuildConfigException e) { Console.WriteLine("invalid: " + e.Message); return 4; }

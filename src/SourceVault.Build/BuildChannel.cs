@@ -122,7 +122,12 @@ public static class BuildChannel
 
     // ---- server (build service) ----------------------------------------------------------------------------------
     /// <summary>Serves one connection. <paramref name="loadConfig"/> is read per request so admin edits apply at once.</summary>
-    public static async Task ServeAsync(Stream pipe, Func<BuildConfig> loadConfig, Func<BuildTarget, IDockerEngine> engineFor, CancellationToken ct)
+    /// <param name="artifactRootTrusted">
+    /// The build service's check of the output folder and its parents (no links, nobody else can change them; internal
+    /// security review 2026-10-20). Refused with ArtifactFolderUntrusted before the vault sends anything. Null: tests only.
+    /// </param>
+    public static async Task ServeAsync(Stream pipe, Func<BuildConfig> loadConfig, Func<BuildTarget, IDockerEngine> engineFor, CancellationToken ct,
+        Func<string, bool>? artifactRootTrusted = null)
     {
         using var request = await Receive(pipe, TimeSpan.FromMinutes(1), ct).ConfigureAwait(false);
         var root = request.RootElement;
@@ -144,6 +149,7 @@ public static class BuildChannel
             || !root.GetProperty("totalBytes").TryGetInt64(out long total) || total is < 0 or > MaxTotalBytes)
         { await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; }
         if (target is null) { await Refuse(pipe, "UnknownTarget", ct).ConfigureAwait(false); return; }
+        if (artifactRootTrusted is not null && !artifactRootTrusted(config.ArtifactRoot)) { await Refuse(pipe, "ArtifactFolderUntrusted", ct).ConfigureAwait(false); return; }
         await Send(pipe, w => { w.WriteBoolean("ok", true); w.WriteBoolean("accepted", true); }, ct).ConfigureAwait(false);
         // The whole table, every name and limit, before a single byte is copied. A bad entry is remembered and the rest of
         // the table still read, so the refusal comes when the vault side is listening.
