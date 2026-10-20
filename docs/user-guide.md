@@ -129,6 +129,27 @@ Afterwards, ordinary users can no longer create *files* directly in `K:\`. They 
 
 SourceVault can send a project's saved files to an **already-running, named Docker container**, run the build command there, and copy the build's output to a folder on this PC. A separate service, **SourceVault Build** (`NT SERVICE\SourceVaultBuild`), does this; the vault service never gets Docker access.
 
+#### The easy way: guided setup sets it up
+
+Run **SourceVault Setup** (or *SourceVault Administration* from the Start menu) and choose **6 Set up Docker builds**. Or run `Setup-Builds.ps1` from the setup package in an elevated PowerShell. It asks which targets you want, Windows or Linux or both, then does everything below in order:
+1. turns on the Windows features (a restart may be needed; then choose 6 again);
+2. installs the engines;
+3. creates the build containers;
+4. sets up TLS for the Linux engine;
+5. writes `build.json`;
+6. gives the build service Docker access;
+7. applies it all and shows the status.
+
+**Downloads:**
+- **Engines:** Docker's engines and Ubuntu's WSL image. Setup looks for them in `C:\SourceVault-Downloads` and offers to download any that are missing. Each file is checked against `kit-sources.json` before use: its size, and its SHA-256 where one is pinned.
+- **Build images:** pulled by the container scripts, by their pinned digests: about 2.7 GB for Windows and 335 MB for Linux.
+
+**Running it again** skips what's already done, and keeps other targets in `build.json`, such as your own images. `-ReconnectTls` makes new Linux certificates.
+
+**One limit:** the WSL distro belongs to the account that ran setup, and the Linux target builds only while that account is signed in.
+
+The sections below are the same steps by hand.
+
 #### The supported setup: two Docker engines, two build containers
 
 The compiler is Microsoft's .NET SDK image (`mcr.microsoft.com/dotnet/sdk`), pinned by digest, in two containers:

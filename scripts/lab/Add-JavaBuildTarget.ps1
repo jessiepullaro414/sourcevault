@@ -5,7 +5,7 @@
 #      all capabilities dropped), and lists the tools it finds.
 #   3. build.json gets a "java" target using the linux target's engine and TLS settings (other targets are kept).
 #   4. Setup -Update -WithBuilds applies it (and installs the package's editor, with Build steps), then -Status.
-# Run after the Linux target works (Setup-LinuxBuildTarget.ps1). Close SourceVault editor windows first.
+# Run after the Linux target works (the package's Setup-Builds.ps1). Close SourceVault editor windows first.
 #   powershell -ExecutionPolicy Bypass -File .\Add-JavaBuildTarget.ps1 [-JdkTag 21-jdk] [-Replace]
 # -JdkTag: the eclipse-temurin tag for the JDK your project needs, e.g. 8-jdk, 11-jdk, 17-jdk, 21-jdk.
 param(
@@ -23,7 +23,7 @@ function Wsl { $out = & wsl.exe -d $Distro -u root --exec @args; if ($LASTEXITCO
 if (Get-Process -Name 'SourceVault.Editor', 'SourceVault.LabClient' -ErrorAction SilentlyContinue) { throw 'Close all SourceVault editor and lab client windows first (setup needs them closed).' }
 $config = Get-Content -LiteralPath $buildJson -Raw | ConvertFrom-Json
 $linux = @($config.targets | Where-Object name -eq 'linux')[0]
-if (!$linux) { throw 'build.json has no linux target yet: set up the Linux target first (Setup-LinuxBuildTarget.ps1).' }
+if (!$linux) { throw 'build.json has no linux target yet: set up the Linux target first (guided setup option 6, or Setup-Builds.ps1).' }
 
 Step "1. JDK image eclipse-temurin:$JdkTag"
 Wsl docker pull "eclipse-temurin:$JdkTag" | Out-Null

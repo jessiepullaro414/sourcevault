@@ -7,8 +7,8 @@
       "path": "docker-windows/docker-29.9.1.zip",
       "url": "https://download.docker.com/win/static/stable/x86_64/docker-29.9.1.zip",
       "size": 49729028,
-      "sha256": null,
-      "note": "Docker's static Windows engine and CLI. Docker publishes no checksum: trust on first use."
+      "sha256": "5d9b66509390553fd97d590ec2ff0ce10b04c2ac653fa52f2abf2f05c4c197ca",
+      "note": "Docker's static Windows engine and CLI. Docker publishes no checksum: trust on first use (recorded from the dev PC's download, 2026-10-20)."
     },
     {
       "name": "install-docker-ce",
@@ -23,8 +23,8 @@
       "path": "wsl/docker-29.9.1.tgz",
       "url": "https://download.docker.com/linux/static/stable/x86_64/docker-29.9.1.tgz",
       "size": 86364663,
-      "sha256": null,
-      "note": "Docker's static Linux engine and CLI for the WSL distro. Trust on first use."
+      "sha256": "c158ecc55adb3afb01bbd3539ed3b997d20c26dbdc418080506cc1bf5243ff57",
+      "note": "Docker's static Linux engine and CLI for the WSL distro. Trust on first use (recorded from the dev PC's download, 2026-10-20)."
     },
     {
       "name": "wsl",
