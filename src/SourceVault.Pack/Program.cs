@@ -1,12 +1,11 @@
-using System.Security.Cryptography;
-using SourceVault.Import;
 using SourceVault.Packaging;
 using SourceVault.Pack;
 
-// SourceVault Pack: on the computer where the code lives, encrypts a project folder for one vault PC.
+// SourceVault Pack (command line): on the computer where the code lives, encrypts a project folder for one vault PC.
 //   SourceVault.Pack.exe init [--out <sender file>]
 //   SourceVault.Pack.exe <folder> --to <recipient file> --out <file.svpkg> [--name "<suggested project name>"] [--exclude <folder name>]... [--dry-run] [--yes]
-// Prints paths, counts and fingerprints only, never file content. The folder is only read; nothing is deleted.
+// "SourceVault Pack.exe" is the same, in a window. Prints paths, counts and fingerprints only, never file content.
+// The folder is only read; nothing is deleted.
 try
 {
     if (args.Length >= 1 && args[0] == "init") return Commands.Init(args[1..], Console.Out);
@@ -19,8 +18,6 @@ catch (DirectoryNotFoundException) { Console.Error.WriteLine("Folder not found."
 
 namespace SourceVault.Pack
 {
-    internal sealed class PackException(string message) : Exception(message);
-
     internal static class Commands
     {
         internal const string Usage =
@@ -34,10 +31,9 @@ namespace SourceVault.Pack
             var (key, created) = SenderKey.OpenOrCreate();
             using (key)
             {
-                var sender = PublicKeyFile.Create(PublicKeyFile.SenderFormat, Computer(), key.SubjectPublicKeyInfo());
+                var sender = PackCore.SenderFile(key);
                 var path = Path.GetFullPath(outPath ?? $"SourceVault-sender-{sender.Computer}.json");
-                if (File.Exists(path)) throw new PackException($"{path} already exists; choose another file name with --out.");
-                using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write)) file.Write(sender.ToJson());
+                PackCore.WriteNew(path, sender.ToJson());
                 output.WriteLine(created ? "Created this computer's signing key in its TPM (it cannot be exported)." : "This computer already has its signing key; wrote its sender file again.");
                 output.WriteLine($"Sender file: {path}");
                 output.WriteLine($"Fingerprint: {sender.FingerprintText}");
@@ -69,13 +65,12 @@ namespace SourceVault.Pack
             }
             if (folder is null || to is null || (!dryRun && outPath is null)) throw new PackException(Usage);
 
-            var recipient = PublicKeyFile.Parse(ReadSmall(to), PublicKeyFile.RecipientFormat);
-            var plan = ImportPlan.Scan(folder, excludes);
+            var recipient = PackCore.ReadRecipient(to);
+            var plan = PackCore.Scan(folder, excludes);
             output.WriteLine($"Folder: {plan.Root}");
             output.WriteLine($"{plan.Files.Count} file(s) to pack ({plan.TotalBytes:N0} bytes); {plan.Skipped.Count} skipped:");
             foreach (var skipped in plan.Skipped) output.WriteLine($"  skipped {skipped.Path}  ({skipped.Reason})");
-            if (plan.Files.Count == 0) throw new PackException("Nothing to pack: no file in that folder is UTF-8 text the vault accepts.");
-            if (plan.Files.Count > Package.MaxFiles) throw new PackException($"Too many files: a package holds at most {Package.MaxFiles}. Exclude some folders with --exclude.");
+            if (PackCore.Problem(plan) is { } problem) throw new PackException(problem);
             output.WriteLine($"Encrypting for the vault PC \"{recipient.Computer}\", recipient fingerprint:");
             output.WriteLine($"  {recipient.FingerprintText}");
             output.WriteLine("Check that this matches the fingerprint the vault PC showed when its recipient file was exported.");
@@ -84,54 +79,19 @@ namespace SourceVault.Pack
             var target = Path.GetFullPath(outPath!);
             if (File.Exists(target)) throw new PackException($"{target} already exists; choose a new file name.");
             using var key = (openSigner ?? SenderKey.Open)();
-            var sender = PublicKeyFile.Create(PublicKeyFile.SenderFormat, Computer(), key.SubjectPublicKeyInfo());
+            var sender = PackCore.SenderFile(key);
             output.WriteLine($"Signing as \"{sender.Computer}\", sender fingerprint {sender.FingerprintText}");
             if (!yes)
             {
                 output.Write("Type YES to write the encrypted package: ");
                 if (readLine()?.Trim() != "YES") { output.WriteLine("Nothing was written."); return 1; }
             }
-
-            var files = new List<(string Path, byte[] Content)>();
-            try
-            {
-                foreach (var candidate in plan.Files)
-                {
-                    var content = File.ReadAllBytes(candidate.FullPath);
-                    files.Add((candidate.Path, content));
-                    if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(content), candidate.Sha256))
-                        throw new PackException($"{candidate.Path} changed while packing. Nothing was written; run Pack again.");
-                }
-                Guid id;
-                try
-                {
-                    using var stream = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                    id = Package.Write(stream, name ?? Path.GetFileName(plan.Root.TrimEnd('\\')), files, recipient, sender, key.SignHash);
-                    stream.Flush(true);
-                }
-                catch { try { File.Delete(target); } catch (IOException) { } throw; }
-                output.WriteLine($"Wrote {target} ({new FileInfo(target).Length:N0} bytes), package id {id:D}.");
-                output.WriteLine("It is encrypted for that vault PC only. Carry it over any way you like, then on the vault PC run:");
-                output.WriteLine($"  SourceVault.Import.exe --package \"{Path.GetFileName(target)}\" --project \"<new project name>\"");
-                output.WriteLine("Your folder was not changed.");
-                return 0;
-            }
-            finally { foreach (var (_, content) in files) CryptographicOperations.ZeroMemory(content); }
-        }
-
-        private static byte[] ReadSmall(string path)
-        {
-            var info = new FileInfo(path);
-            if (!info.Exists) throw new PackException("Recipient file not found.");
-            if (info.Length > PublicKeyFile.MaxFileBytes) throw new KeyFileException("The file is larger than 8 KiB.");
-            return File.ReadAllBytes(info.FullName);
-        }
-
-        // Key files allow letters, digits, '.', '-' and '_' in computer names.
-        internal static string Computer()
-        {
-            var clean = new string(Environment.MachineName.Where(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '-' or '_').Take(63).ToArray());
-            return clean.Length > 0 && char.IsAsciiLetterOrDigit(clean[0]) ? clean : "SOURCE-PC";
+            var (id, bytes) = PackCore.Write(plan, recipient, key, target, name);
+            output.WriteLine($"Wrote {target} ({bytes:N0} bytes), package id {id:D}.");
+            output.WriteLine("It is encrypted for that vault PC only. Carry it over any way you like, then on the vault PC run:");
+            output.WriteLine($"  SourceVault.Import.exe --package \"{Path.GetFileName(target)}\" --project \"<new project name>\"");
+            output.WriteLine("Your folder was not changed.");
+            return 0;
         }
     }
 }

@@ -287,7 +287,7 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
 
 **Once per source computer:**
 1. **Get Pack onto it.** Copy the `SourceVault-Pack` folder (in the setup package under `tools\`, or `SourceVault-Pack-<date>.zip`) to that computer. It needs a TPM 2.0 and nothing installed.
-2. **Create its signing key there:** run `pack\SourceVault.Pack.exe init`. It prints a fingerprint and writes `SourceVault-sender-<computer>.json`.
+2. **Create its signing key there.** Open `pack\SourceVaultPack.exe` (the window) and click **Set up this computer**, or run `pack\SourceVault.Pack.exe init` (the command line). Either one shows a fingerprint and saves `SourceVault-sender-<computer>.json`.
 3. **Register it here** (administrator). Compare the fingerprint with what `init` printed, then type `YES`:
    ```powershell
    powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -RegisterSender C:\path\SourceVault-sender-DEVPC.json
@@ -299,7 +299,12 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
    ```
 
 **Each time:**
-1. **Pack it, on the other computer.** Try `--dry-run` first to see what's included and skipped:
+1. **Pack it, on the other computer.** In the window:
+   - choose the recipient file and the project folder (every subfolder is included);
+   - check the **Included** and **Skipped** tabs;
+   - click **Create encrypted package**.
+
+   Or use the command line, with `--dry-run` first:
    ```powershell
    pack\SourceVault.Pack.exe C:\code\my-app --to recipient.json --out my-app.svpkg
    ```

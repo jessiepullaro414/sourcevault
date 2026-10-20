@@ -14,5 +14,5 @@
     <!-- The importer's scan rules, shared as source so both programs pick exactly the same files. -->
     <Compile Include="../SourceVault.Import/ImportPlan.cs" Link="ImportPlan.cs" />
   </ItemGroup>
-  <ItemGroup><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="SourceVault.Endpoints.Tests" /><InternalsVisibleTo Include="SourceVaultPack" /></ItemGroup>
 </Project>

@@ -39,7 +39,8 @@ Needs a second Windows computer with a TPM 2.0 (the "source computer"), and synt
 |---|---|---|
 | [ ] | After `Setup-SourceVault.ps1 -Update`: the *TPM key for package import* step says "created" (or "already exists"), and `-Status` lists `package senders registered: (none)` | admin |
 | [ ] | `SourceVault.Import.exe --export-recipient recipient.json` writes the file and prints a fingerprint | — |
-| [ ] | On the source computer: copy `tools\SourceVault-Pack`, run `pack\SourceVault.Pack.exe init`. **Record whether the TPM created the key**, then copy its sender file back | source computer |
+| [ ] | On the source computer: copy `tools\SourceVault-Pack`, open `pack\SourceVaultPack.exe` and click **Set up this computer** (or run `pack\SourceVault.Pack.exe init`). **Record whether the TPM created the key**, then copy its sender file back | source computer |
+| [ ] | The Pack window: choosing a recipient shows its computer and fingerprint; choosing a folder fills **Included** and **Skipped** (binaries, `.git`, `bin`, `obj`); **Create encrypted package** writes a package after the confirmation | source computer |
 | [ ] | `Setup-SourceVault.ps1 -RegisterSender <file>`: the fingerprint matches what `init` printed; type YES | admin |
 | [ ] | On the source computer: `SourceVault.Pack.exe <synthetic folder> --to recipient.json --out test.svpkg`. The recipient fingerprint matches the vault PC's. **Record whether the TPM signed** (RSA-PSS) | source computer |
 | [ ] | `SourceVault.Import.exe --package test.svpkg --project "Packed sample"`: imports N files, names the sender computer, and the project opens in the editor with the same files | — |

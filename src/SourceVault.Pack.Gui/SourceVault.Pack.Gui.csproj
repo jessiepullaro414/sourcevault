@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- SourceVault Pack in a window (SourceVaultPack.exe): the same PackCore as the command line, so both pick, check,
+       encrypt and sign exactly the same way. Ships beside it in SourceVault-Pack\pack\, on SourceVault-Pack\runtime. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>SourceVaultPack</AssemblyName>
+    <UseAppHost>true</UseAppHost>
+    <AppHostRelativeDotNet>..\runtime</AppHostRelativeDotNet>
+    <AppHostDotNetSearch>AppRelative</AppHostDotNetSearch>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../SourceVault.Pack/SourceVault.Pack.csproj" /></ItemGroup>
+</Project>

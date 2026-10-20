@@ -141,6 +141,7 @@ File names, sizes and contents are all inside the encrypted body. The readable h
 - `SourceVault.Import.exe --package <file.svpkg> --project "<name>"` (operator).
 - `SourceVault.Pack.exe init` (source computer, once): creates the sender key and writes `SourceVault-sender-<computer>.json`.
 - `SourceVault.Pack.exe <folder> --to <recipient file> --out <file.svpkg> [--exclude <name>]... [--dry-run]`.
+- `SourceVaultPack.exe` (owner request 2026-10-19): the same in a small WPF window, sharing `PackCore` with the command line. It sets up the computer, chooses the recipient and the folder, shows the **Included** and **Skipped** lists, and creates the package after a confirmation that repeats both fingerprints.
 
 ## Decisions as asked
 

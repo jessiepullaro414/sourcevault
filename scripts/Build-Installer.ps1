@@ -36,12 +36,13 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'artifacts\editor-publish') -Destina
 if (Test-Path -LiteralPath (Join-Path $payload 'editor\assets\dev')) { throw 'The editor build contains the development fake host.' }
 Get-ChildItem -LiteralPath (Join-Path $payload 'service') -Filter 'sourcevault.service.json' -Recurse | Remove-Item -Force # setup writes its own
 
-# 3b. SourceVault Pack for the other computer: its own folder with only the base runtime (no desktop parts).
+# 3b. SourceVault Pack for the other computer: its own folder with the base and Windows desktop runtimes (the window).
 $packTool = Join-Path $package 'tools\SourceVault-Pack'
-New-Item -ItemType Directory -Path (Join-Path $packTool 'runtime\shared\Microsoft.NETCore.App') | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $packTool 'runtime\shared\Microsoft.NETCore.App'), (Join-Path $packTool 'runtime\shared\Microsoft.WindowsDesktop.App') | Out-Null
 foreach ($file in 'dotnet.exe', 'LICENSE.txt', 'ThirdPartyNotices.txt') { Copy-Item -LiteralPath (Join-Path $sdkRoot $file) -Destination (Join-Path $packTool 'runtime') }
 Copy-Item -LiteralPath (Join-Path $sdkRoot 'host') -Destination (Join-Path $packTool 'runtime') -Recurse
 Copy-Item -LiteralPath $base.FullName -Destination (Join-Path $packTool 'runtime\shared\Microsoft.NETCore.App') -Recurse
+Copy-Item -LiteralPath $desktop -Destination (Join-Path $packTool 'runtime\shared\Microsoft.WindowsDesktop.App') -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'artifacts\pack-publish') -Destination (Join-Path $packTool 'pack') -Recurse
 Copy-Item -LiteralPath (Join-Path $repoRoot 'installer\Pack-README.txt') -Destination (Join-Path $packTool 'README.txt')
 
