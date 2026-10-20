@@ -6,8 +6,81 @@ export const $ = id => document.getElementById(id);
 // copy event is how a page supplies its own clipboard data, and Monaco's textarea handlers fill and read
 // clipboardData themselves, so they must never run. Monaco also calls the async Clipboard API directly,
 // which fires no events, so that API is removed from this page.
+//
+// In-editor clipboard (owner decision 2026-10-20): copy and cut inside SourceVault keep the text in this page's memory
+// only, and put CLIPBOARD_NOTICE on the Windows clipboard instead. Pasting the notice pastes the kept text; pasting
+// anything else brings text in from other programs. So copying inside the editor works, and nothing copied here ever
+// reaches the Windows clipboard. Drag-and-drop, the context menu and the async Clipboard API stay blocked.
+export const CLIPBOARD_NOTICE = '[Copied inside SourceVault. It can be pasted only in the SourceVault editor; it is not on the Windows clipboard.]';
+let kept = null; // { text, lines: string[] | null (one per cursor), wholeLine }
+
+/** Forgets the in-editor clipboard (on lock). */
+export function clearInternalClipboard() { kept = null; }
+
+/** What a paste inserts: the kept copy when the Windows clipboard holds the notice, else the pasted text itself. */
+export function pasteSource(clipboardText) {
+  if (clipboardText === CLIPBOARD_NOTICE) return kept;
+  return clipboardText ? { text: clipboardText, lines: null, wholeLine: false } : null;
+}
+
+/** The text a copy keeps from a Monaco editor: the selections, or the cursor's whole line when nothing is selected. */
+export function copyFromEditor(editor) {
+  const model = editor.getModel(), selections = editor.getSelections();
+  if (!model || !selections?.length) return null;
+  if (selections.every(s => s.isEmpty())) {
+    // Like Monaco and VS Code: with no selection, copy the cursor's line, and paste it as a whole line.
+    const lines = [...new Set(selections.map(s => s.startLineNumber))].sort((a, b) => a - b).map(n => model.getLineContent(n) + model.getEOL());
+    return { text: lines.join(''), lines: null, wholeLine: true };
+  }
+  const parts = [...selections].sort((a, b) => a.startLineNumber - b.startLineNumber || a.startColumn - b.startColumn).map(s => model.getValueInRange(s));
+  return { text: parts.join(model.getEOL()), lines: parts.length > 1 ? parts : null, wholeLine: false };
+}
+
+function focusedMonaco(target) {
+  const editors = globalThis.monaco?.editor?.getEditors?.() ?? [];
+  return editors.find(ed => ed.getDomNode()?.contains(target)) ?? null;
+}
+
+function isTextInput(el) {
+  return el instanceof HTMLTextAreaElement || (el instanceof HTMLInputElement && /^(text|search|url|email|tel|)$/.test(el.type));
+}
+
+function onClipboard(event) {
+  event.preventDefault(); event.stopImmediatePropagation(); // Monaco's own handlers never run
+  const target = event.target, editor = target instanceof Node ? focusedMonaco(target) : null;
+  if (event.type === 'paste') {
+    const source = pasteSource(event.clipboardData?.getData('text/plain') ?? '');
+    if (!source) return;
+    if (editor) {
+      if (editor.getOption(globalThis.monaco.editor.EditorOption.readOnly)) return;
+      editor.trigger('keyboard', 'paste', { text: source.text, pasteOnNewLine: source.wholeLine, multicursorText: source.lines });
+    } else if (isTextInput(target) && !target.readOnly && !target.disabled) {
+      const text = target instanceof HTMLInputElement ? source.text.replace(/\r?\n/g, ' ') : source.text;
+      target.setRangeText(text, target.selectionStart ?? target.value.length, target.selectionEnd ?? target.value.length, 'end');
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return;
+  }
+  // copy or cut
+  let copied = null;
+  if (editor) {
+    copied = copyFromEditor(editor);
+    if (copied && event.type === 'cut' && !editor.getOption(globalThis.monaco.editor.EditorOption.readOnly)) editor.trigger('keyboard', 'cut', null);
+  } else if (isTextInput(target) && target.selectionStart !== target.selectionEnd) {
+    copied = { text: target.value.slice(target.selectionStart, target.selectionEnd), lines: null, wholeLine: false };
+    if (event.type === 'cut' && !target.readOnly && !target.disabled) {
+      target.setRangeText('', target.selectionStart, target.selectionEnd, 'end');
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+  if (!copied) return;
+  kept = copied;
+  event.clipboardData?.setData('text/plain', CLIPBOARD_NOTICE); // the only thing that reaches the Windows clipboard
+}
+
 export function installExportBlocks() {
-  for (const name of ['copy', 'cut', 'paste', 'dragstart', 'drop', 'contextmenu'])
+  for (const name of ['copy', 'cut', 'paste']) window.addEventListener(name, onClipboard, true);
+  for (const name of ['dragstart', 'drop', 'contextmenu'])
     window.addEventListener(name, event => { event.preventDefault(); event.stopImmediatePropagation(); }, true);
   window.addEventListener('beforeinput', event => {
     if (/^(insertFromPaste|insertFromDrop|insertFromYank|deleteByCut|deleteByDrag)/.test(event.inputType)) { event.preventDefault(); event.stopImmediatePropagation(); }

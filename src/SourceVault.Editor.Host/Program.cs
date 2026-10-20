@@ -387,6 +387,7 @@ internal sealed class EditorWindow : Window
                         { w.WriteStartArray("files"); foreach (var f in added) { w.WriteStartObject(); WriteFile(w, f); w.WriteEndObject(); } w.WriteEndArray(); })
                     : BridgePolicy.BuildResponse(request.RequestId, "Cancelled", null),
                 VaultOperation.RevertFile => Respond(request, await controller.RevertFileAsync(request.ProjectId, request.FileId, request.RevisionId), (w, _) => { }),
+                VaultOperation.OpenBuildFolder => OpenBuildFolder(request, await controller.GetBuildStatusAsync(request.ProjectId, request.BuildNumber)),
                 // Display preferences only (EditorSettings); they never contain names or text and need no vault session.
                 VaultOperation.GetSettings => BridgePolicy.BuildResponse(request.RequestId, "Ok", w => { w.WriteStartObject("settings"); EditorSettings.Load(EditorSettings.FilePath).Write(w); w.WriteEndObject(); }),
                 VaultOperation.SaveSettings => SaveSettings(request),
@@ -401,6 +402,22 @@ internal sealed class EditorWindow : Window
             response = BridgePolicy.BuildResponse(request.RequestId, "InternalError", null); // never reflect details
         }
         if (!closing) webView.CoreWebView2?.PostWebMessageAsJson(response);
+    }
+
+    /// <summary>
+    /// Opens a finished build's output folder in Explorer. The folder comes from the service's build record, never from
+    /// the renderer; output files are ordinary plaintext files by design, so this shows nothing new.
+    /// </summary>
+    private static string OpenBuildFolder(VaultBridgeRequest request, VaultResult<BuildSummary> status)
+    {
+        if (!status.Ok) return BridgePolicy.BuildResponse(request.RequestId, status.Code, null);
+        var folder = status.Value!.ArtifactFolder;
+        if (folder is null || !Path.IsPathFullyQualified(folder) || folder.StartsWith(@"\\", StringComparison.Ordinal) || folder.Contains('"') || !Directory.Exists(folder))
+            return BridgePolicy.BuildResponse(request.RequestId, "NotFound", null);
+        var explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(explorer, $"\"{folder}\"") { UseShellExecute = false })?.Dispose(); }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or IOException) { return BridgePolicy.BuildResponse(request.RequestId, "Unavailable", null); }
+        return BridgePolicy.BuildResponse(request.RequestId, "Ok", _ => { });
     }
 
     // A file as the renderer sees it: no revision id (it stays in the host).

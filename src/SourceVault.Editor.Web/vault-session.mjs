@@ -450,6 +450,9 @@ export class VaultSession {
   /** A finished build's output text. It can contain source, so it is shown only in the editor, like files. */
   async openBuildLog(buildNumber) { return (await this.#call('openBuildLog', { projectId: this.project.projectId, buildNumber })).text; }
 
+  /** Opens a finished build's output folder in Explorer (the host gets the folder from the service). */
+  async openBuildFolder(buildNumber) { await this.#call('openBuildFolder', { projectId: this.project.projectId, buildNumber }); }
+
   #forget(id) {
     this.files.delete(id);
     this.openIds = this.openIds.filter(x => x !== id);

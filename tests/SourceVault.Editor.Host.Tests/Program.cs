@@ -734,6 +734,14 @@ Check("bridge: info panel, from disk, keep mine/theirs and revert carry ids only
         Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"res\",\"files\":[\"C:\\\\a.png\"]}}"));
 });
 
+Check("bridge: openBuildFolder carries a project and a build number only, never a path", () =>
+{
+    var open = Parsed(Req("openBuildFolder", $"{{\"projectId\":\"{P}\",\"buildNumber\":3}}"));
+    Assert(open.Operation == VaultOperation.OpenBuildFolder && open.BuildNumber == 3 && open.Name is null, "parsed");
+    Rejects(Vault, Req("openBuildFolder", $"{{\"projectId\":\"{P}\",\"buildNumber\":0}}"),
+        Req("openBuildFolder", $"{{\"projectId\":\"{P}\",\"buildNumber\":3,\"path\":\"C:\\x\"}}"));
+});
+
 Check("bridge: settings carry exactly eight bounded display preferences", () =>
 {
     Assert(Parsed(Req("getSettings", "{}")).Operation == VaultOperation.GetSettings, "getSettings");

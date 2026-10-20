@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace SourceVault.Editor.Host;
 
 internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock, SearchProject, GetSettings, SaveSettings,
-    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile }
+    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile, OpenBuildFolder }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
 internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0,
@@ -49,6 +49,7 @@ internal static class BridgePolicy
         ["listBuilds"] = (VaultOperation.ListBuilds, ["projectId"]),
         ["buildStatus"] = (VaultOperation.BuildStatus, ["projectId", "buildNumber"]),
         ["openBuildLog"] = (VaultOperation.OpenBuildLog, ["projectId", "buildNumber"]),
+        ["openBuildFolder"] = (VaultOperation.OpenBuildFolder, ["projectId", "buildNumber"]), // the host asks the service for the folder
         ["listFiles"] = (VaultOperation.ListFiles, ["projectId"]),
         ["openDocument"] = (VaultOperation.OpenDocument, ["projectId", "fileId"]),
         ["closeDocument"] = (VaultOperation.CloseDocument, ["projectId", "fileId"]),

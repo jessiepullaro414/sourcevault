@@ -2,7 +2,7 @@
 // names and the text of files it opens. Nothing here logs or posts document text anywhere but the host bridge.
 import { VaultSession, languageFor as languageOf, isOpenable, badgeOf, MAX_EDITOR_TEXT_BYTES } from './vault-session.mjs';
 import { resolve } from './merge.mjs';
-import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure } from './shell.mjs';
+import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure, clearInternalClipboard } from './shell.mjs';
 import { touchRecent, counterpart, isCFamily, outline } from './workbench.mjs';
 import { createWorkbench } from './workbench-ui.mjs';
 
@@ -555,7 +555,15 @@ export async function startVault(transport, metadata, onSession) {
     if (selected) {
       const line = (label, value) => { const p = document.createElement('div'); const s = document.createElement('strong'); s.textContent = label + ': '; p.append(s, value); summary.append(p); };
       line('Result', `${STATE_TEXT[selected.state] ?? selected.state}${selected.exitCode != null ? ` (exit code ${selected.exitCode})` : ''}${selected.reason ? ` — ${BUILD_REASONS[selected.reason] ?? BUILD_REASONS[selected.reason.replace(/^Artifacts.*/, 'Artifacts')] ?? selected.reason}` : ''}`);
-      if (selected.artifactFolder) { const code = document.createElement('code'); code.textContent = selected.artifactFolder; line(`Output (${selected.artifactFiles} file${selected.artifactFiles === 1 ? '' : 's'}, ${formatBytes(selected.artifactBytes)})`, code); }
+      if (selected.artifactFolder) {
+        const code = document.createElement('code'); code.textContent = selected.artifactFolder;
+        const open = document.createElement('button'); open.type = 'button'; open.className = 'link-button'; open.textContent = 'Open folder'; open.disabled = busy;
+        open.title = 'Open the output folder in Explorer (ordinary, unencrypted files)';
+        open.onclick = () => demo ? announce('Demo builds write no files. In the vault, this opens the output folder in Explorer.')
+          : act(async () => { await session.openBuildFolder(selected.buildNumber); return 'Opened the output folder in Explorer. Its files are ordinary, unencrypted files.'; });
+        const value = document.createElement('span'); value.append(code, ' ', open);
+        line(`Output (${selected.artifactFiles} file${selected.artifactFiles === 1 ? '' : 's'}, ${formatBytes(selected.artifactBytes)})`, value);
+      }
       if (selected.artifactsDropped > 0) line('Left out', `${selected.artifactsDropped} file${selected.artifactsDropped === 1 ? '' : 's'} that can reveal source (source maps, debug symbols); listed at the end of the log`);
       if (selected.logTruncated) line('Log', 'only the end of the output was kept');
     } else summary.textContent = buildsView.builds.length ? 'Choose a build to see its result and output.' : '';
@@ -1048,7 +1056,7 @@ export async function startVault(transport, metadata, onSession) {
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); showDeleted = false; merging = null; notMergeable.clear(); render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); clearInternalClipboard(); showDeleted = false; merging = null; notMergeable.clear(); render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
   wireChrome(focusedEditor, { onSave: save, isLocked: () => session.locked, skipKey: event => chordKeys.has(event) });
   // In vault mode the rail's search button searches all files (Ctrl+F still finds in the open file).
