@@ -29,7 +29,7 @@ Unchanged from v1 except for the version and operation catalog. A frame is a 4-b
 
 ## Operations
 
-Bodies are exact: every listed field must be present, nothing else is allowed, and ids are canonical UUIDs. Content travels as `contentBase64` (standard base64 of strict UTF-8, ≤ 256 KiB decoded).
+Bodies are exact: every listed field must be present, nothing else is allowed, and ids are canonical UUIDs. Content travels as `contentBase64` (standard base64 of strict UTF-8, ≤ 256 KiB decoded). Binary files and anything larger use the any-file operations at the end of this file.
 
 | Operation | Request body | Success body |
 |---|---|---|
@@ -136,7 +136,12 @@ See `docs/files-history-builds-design.md`, section 4. Every operation also takes
 - **Identity checks:** the vault service verifies the pipe owner before sending anything, and the build service checks the client token's user on every connection.
 - **Framing:** frames are the same as above (≤ 1 MiB), with one request per connection:
   - `{op: "targets"}`
-  - `{op: "build", target, projectId, buildNumber, fileCount}`, followed by `fileCount` frames of `{name, contentBase64}`.
+  - a build, version 2 (any file, streamed; both services are installed together):
+    1. `{op: "build", version: 2, target, projectId, buildNumber, fileCount, totalBytes}`, answered `{ok, accepted}` or a refusal;
+    2. file-table frames `{files: [{name, length}]}` (at most 1,000 entries each), read in full and checked (names, duplicates, 25,000 files, 1 GiB each, 8 GiB in all) before `{ok, ready}`;
+    3. data frames `{dataBase64}` (at most 512 KiB, never spanning two files), in table order, or `{abort}` when a record fails its integrity check (reason `SourceUnavailable`).
+
+    The build service streams the tar into the container as the data arrives. The copy has its own 30-minute bound (reason `CopyTimedOut`), not counted in the build's timeout.
 
   The reply is `{ok, …}`; the build reply carries `state`, `reason`, `exitCode`, `logBase64` (≤ 512 KiB), `logTruncated`, `artifactFolder`, `artifactFiles`, `artifactBytes` and `artifactsDropped`.
 - **The build service** never receives project names and never opens the vault or the TPM key.
@@ -154,7 +159,8 @@ See `docs/package-import-design.md`. Every operation also takes `capability`. Wi
 
 - **Upload rules:**
   - one upload per connection, and one across the whole service; a second gets `Unavailable`;
-  - `length` must be at least 624 bytes and at most `Package.MaxPackageBytes` (about 270 MB), otherwise `LimitExceeded`;
+  - `length` must be at least 624 bytes and at most `Package.MaxPackageBytes` (a little over 8 GiB), otherwise `LimitExceeded`;
+  - the service spools the encrypted upload into `staging\` with a running hash, checks the signature against that hash, then re-hashes the spool while streaming its files into the store (package format v2; v1 packages are still accepted);
   - parts must start exactly where the last one ended; a part is at most 512 KiB, and must not go past `length`.
 - **Finishing:**
   - `FinishPackageImport` ends the upload whatever its result. So does closing the connection.
@@ -169,10 +175,55 @@ The editor's **Search all files**. Plain text only: no regular expressions, so a
 
 | Operation | Request body | Success body |
 |---|---|---|
-| SearchProject | `capability`, `projectId`, `query`, `matchCase`, `wholeWord` | `matches[]`, `truncated`, `filesSearched` |
+| SearchProject | `capability`, `projectId`, `query`, `matchCase`, `wholeWord` | `matches[]`, `truncated`, `filesSearched`, `filesSkipped` |
 
 - **Query:** 1 to 200 characters on one line; otherwise `InvalidRequest`. `matchCase` and `wholeWord` must be JSON booleans. Whole word means the characters on both sides are not letters, digits or `_`.
-- **What is searched:** the text of every file in the project's current snapshot, line by line (a trailing CR is ignored). Unsaved edits are not in the vault; the editor searches those itself, in its drafts.
+- **What is searched:** the text of every `text` file of at most 16 MiB in the project's current snapshot, line by line (a trailing CR is ignored). Binary and larger files are counted in `filesSkipped`. Unsaved edits are not in the vault; the editor searches those itself, in its drafts.
 - **Each match:** `fileId`, `name`, `line` and `column` (1-based, UTF-16 units), `length`, `preview` (the line around the match, at most 240 characters plus a leading `…` when cut, leading spaces removed) and `previewOffset` (where the match starts in `preview`).
 - **Limits:** at most 500 matches; `truncated` is `true` when there were more. Matches are sorted by name (ignoring case), line and column.
 - **Cost:** a search decrypts every file of the project inside the service, like a build. Only matching lines leave it.
+
+## Addition: any file (approved 2026-10-19)
+
+See `docs/vault-any-file-design.md`. The vault stores files of any kind (binary, UTF-16, large text) byte-exact. Every operation also takes `capability`.
+
+**Listings.** `ListFiles`, `ListHistory` and `ListDeletedFiles` entries gain:
+- `kind`: `text` (strict UTF-8, no NUL) or `binary`;
+- `sha256`: hex SHA-256 of the plaintext, or `null` for a legacy record (text written before this change).
+
+`byteLength` can now be up to 1 GiB (a JSON integer).
+
+**Inline operations keep their shape.** `contentBase64` is still at most 256 KiB:
+- `OpenDocument` and `OpenRevision`: a binary revision is `NotText`; text over 256 KiB is `LimitExceeded` (read it with `ReadTextPart`);
+- `ApplyEdits` (the editor saving text) still takes strict UTF-8 only;
+- `CreateFile` and `ImportFiles` accept any content up to 256 KiB per file; the store decides `text` or `binary`.
+
+**Uploads in parts** (content over 256 KiB, or any file from disk):
+
+| Operation | Request body | Success body |
+|---|---|---|
+| BeginUpload | `projectId`, `fileId` (the file to replace, or `null` for a new file), `length` (0 … 1 GiB), `sha256` (hex, of the plaintext) | `uploadId`, `fileId`, `partBytes` (524,288) |
+| UploadPart | `uploadId`, `offset`, `dataBase64` (1 … 512 KiB decoded) | `received` |
+| CommitUploads | `projectId`, `expectedSnapshotId`, `files[]`: `{uploadId, name}` (1 … 256; `name` is `null` for a replacement) | `snapshotId`, `files[]`: `{fileId, revisionId, kind}` |
+| CancelUpload | `uploadId` | `{}` |
+
+- Parts arrive in order, without gaps. At the last byte the plaintext SHA-256 must equal `sha256`, otherwise `InvalidRequest` and the upload is discarded.
+- The service writes only ciphertext, into `staging\` under the vault root; it never sees an OS path.
+- `CommitUploads` is all or nothing. A named entry creates a file (a taken name is `AlreadyExists`); an unnamed one replaces the file its upload began for (`NotFound` if it is gone). A stale snapshot is `RevisionConflict`, and the staged uploads survive it.
+- Bounds per connection: one upload receiving at a time; at most 256 staged, holding at most 8 GiB. An upload with no part for 2 minutes is discarded. Closing the connection, `EndSession` or expiry discards them all.
+
+**Reading, reverting, verifying:**
+
+| Operation | Request body | Success body |
+|---|---|---|
+| ReadTextPart | `projectId`, `fileId`, `revisionId`, `offset` (a multiple of 524,288) | `length` (the whole file), `dataBase64` (that segment) |
+| RevertFile | `projectId`, `fileId`, `revisionId`, `expectedSnapshotId` | `snapshotId` |
+| VerifyProject | `projectId` | `filesVerified`, `filesFailed` |
+
+- `ReadTextPart` is only for `text` revisions of at most 1 MiB (the editor's limit): a binary revision is `NotText`, larger text `LimitExceeded`. **No operation returns binary content or text over 1 MiB to a client**; such content leaves the service only through a build.
+- `RevertFile` makes a revision from the file's own history current again (history action `reverted`). Nothing is re-encrypted or sent.
+- `VerifyProject` decrypts and checks every live file. A failure reports counts only, never names, and the project is then `Unavailable`, as after a failed startup check.
+
+**Limits** (`LimitExceeded`): 1 GiB per file, 25,000 files and 8 GiB per project, and 4 GiB of free disk kept on the vault volume.
+
+**New error code:** `NotText`: the operation needs text and the revision is binary.

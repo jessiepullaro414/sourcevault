@@ -42,11 +42,11 @@ foreach ($check in $checks) {
     & $DotnetPath $testAssembly @testArgs
     if ($LASTEXITCODE -ne 0) { throw "Tests failed: $($check.Assembly)" }
 }
-foreach ($module in 'app.mjs', 'shell.mjs', 'preview-app.mjs', 'vault-app.mjs', 'vault-session.mjs', 'merge.mjs', 'state.mjs', 'mock-service.mjs', 'workbench.mjs', 'workbench-ui.mjs', 'dev/fake-host.mjs') {
+foreach ($module in 'app.mjs', 'shell.mjs', 'preview-app.mjs', 'vault-app.mjs', 'vault-session.mjs', 'merge.mjs', 'state.mjs', 'mock-service.mjs', 'workbench.mjs', 'workbench-ui.mjs', 'demo-host.mjs') {
     & node --check (Join-Path $repoRoot "src/SourceVault.Editor.Web/$module")
     if ($LASTEXITCODE -ne 0) { throw "Editor script syntax check failed: $module" }
 }
-& node --test (Join-Path $repoRoot 'tests/editor-web/state.test.mjs') (Join-Path $repoRoot 'tests/editor-web/mock-service.test.mjs') (Join-Path $repoRoot 'tests/editor-web/vault-session.test.mjs') (Join-Path $repoRoot 'tests/editor-web/merge.test.mjs') (Join-Path $repoRoot 'tests/editor-web/network-guard.test.mjs') (Join-Path $repoRoot 'tests/editor-web/workbench.test.mjs')
+& node --test (Join-Path $repoRoot 'tests/editor-web/state.test.mjs') (Join-Path $repoRoot 'tests/editor-web/mock-service.test.mjs') (Join-Path $repoRoot 'tests/editor-web/vault-session.test.mjs') (Join-Path $repoRoot 'tests/editor-web/merge.test.mjs') (Join-Path $repoRoot 'tests/editor-web/network-guard.test.mjs') (Join-Path $repoRoot 'tests/editor-web/workbench.test.mjs') (Join-Path $repoRoot 'tests/editor-web/any-file.test.mjs')
 if ($LASTEXITCODE -ne 0) { throw 'Editor session tests failed' }
 Write-Output 'Verification passed. These synthetic tests do not validate service identities, TPM operations, or VM isolation.'
 } finally {

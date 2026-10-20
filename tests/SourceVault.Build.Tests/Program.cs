@@ -159,7 +159,7 @@ Test("build: dropped files are listed at the end of the log, and the old log buf
     var box = new FakeContainer { ArchiveOverride = _ => RevealingOutput() };
     var target = BuildConfig.Parse(Utf8(Config(LinuxTarget))).Targets[0];
     IReadOnlyList<(string, byte[])> source = [("build.sh", Utf8("#!/bin/sh\necho synthetic\n"))];
-    var outcome = Run(BuildRunner.RunAsync(target, Dest(), Guid.NewGuid(), 1, source, new FakeEngine(box), default));
+    var outcome = Run(BuildRunner.RunAsync(target, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(source), new FakeEngine(box), default));
     var log = Encoding.UTF8.GetString(outcome.Log);
     Assert(outcome.State == BuildState.Succeeded && outcome.Artifacts!.DroppedCount == 5, "succeeded with five left out");
     Assert(log.Contains("5 output file(s) were not published") && log.Contains("  app.js.map  (SourceMap)") && log.Contains("keepFileTypes"), log);
@@ -186,7 +186,7 @@ Test("build: source goes in, the command runs there, artifacts come out, folders
         return (0, "compiling…\ndone\n");
     };
     var root = Dest(); var project = Guid.NewGuid();
-    var outcome = Run(BuildRunner.RunAsync(linux, root, project, 7, Source(), new FakeEngine(box), default));
+    var outcome = Run(BuildRunner.RunAsync(linux, root, project, 7, new InMemoryBuildSource(Source()), new FakeEngine(box), default));
     Assert(outcome.State == BuildState.Succeeded && outcome.ExitCode == 0 && Encoding.UTF8.GetString(outcome.Log) == "compiling…\ndone\n", "succeeded");
     var folder = Path.Combine(root, project.ToString("D"), "7-linux");
     Assert(outcome.Artifacts!.Folder == folder && File.ReadAllText(Path.Combine(folder, "app.js")) == "compiled", "artifact published");
@@ -197,20 +197,20 @@ Test("build: source goes in, the command runs there, artifacts come out, folders
 Test("build: failures, timeouts and unsafe containers", () =>
 {
     var failing = new FakeContainer { Build = _ => (2, "error: synthetic\n") };
-    var failed = Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(failing), default));
+    var failed = Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(failing), default));
     Assert(failed.State == BuildState.Failed && failed.ExitCode == 2 && failed.Artifacts is null && !failing.Calls.Contains("get /sv/out"), "failed build publishes nothing");
     var hanging = new FakeContainer { Hang = true };
     var quick = linux with { TimeoutSeconds = 1 };
-    var timedOut = Run(BuildRunner.RunAsync(quick, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(hanging), default));
+    var timedOut = Run(BuildRunner.RunAsync(quick, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(hanging), default));
     Assert(timedOut.State == BuildState.TimedOut && hanging.Calls.Contains("restart") && hanging.Calls[^1] == "clean", "timeout restarts then cleans");
-    Assert(Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(new FakeContainer { NetworkMode = "bridge" }), default)) is { State: BuildState.Rejected, Reason: "NetworkNotDisabled" }, "network refused");
-    Assert(Run(BuildRunner.RunAsync(linux with { AllowNetwork = true }, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(new FakeContainer { NetworkMode = "bridge" }), default)).State == BuildState.Succeeded, "network allowed by config");
-    Assert(Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(new FakeContainer { Running = false }), default)) is { State: BuildState.Unavailable, Reason: "ContainerNotRunning" }, "not running");
-    Assert(Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(new FakeContainer { Os = "windows" }), default)) is { State: BuildState.Rejected, Reason: "PlatformMismatch" }, "platform");
+    Assert(Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(new FakeContainer { NetworkMode = "bridge" }), default)) is { State: BuildState.Rejected, Reason: "NetworkNotDisabled" }, "network refused");
+    Assert(Run(BuildRunner.RunAsync(linux with { AllowNetwork = true }, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(new FakeContainer { NetworkMode = "bridge" }), default)).State == BuildState.Succeeded, "network allowed by config");
+    Assert(Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(new FakeContainer { Running = false }), default)) is { State: BuildState.Unavailable, Reason: "ContainerNotRunning" }, "not running");
+    Assert(Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(new FakeContainer { Os = "windows" }), default)) is { State: BuildState.Rejected, Reason: "PlatformMismatch" }, "platform");
     var linky = new FakeContainer { ArchiveOverride = _ => Tar(("out/", TarEntryType.Directory, null), ("out/l", TarEntryType.SymbolicLink, null)) };
-    var rejected = Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(linky), default));
+    var rejected = Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(linky), default));
     Assert(rejected is { State: BuildState.Rejected, Reason: "ArtifactsNotAFileOrFolder" } && rejected.Log.Length > 0, "bad artifacts refused, log kept");
-    var none = Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, Source(), new FakeEngine(new FakeContainer()), default));
+    var none = Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(Source()), new FakeEngine(new FakeContainer()), default));
     Assert(none.State == BuildState.Succeeded && none.Artifacts!.Files == 0, "no output folder: success with no artifacts");
 });
 
@@ -269,16 +269,87 @@ Test("channel: targets and a whole build cross the pipe; bad names and unknown t
     var client = new BuildChannel.Client(async ct => { var p = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous); await p.ConnectAsync(5000, ct); return p; });
     Assert(Run(client.TargetsAsync(default)).SequenceEqual(["linux"]), "targets");
     var project = Guid.NewGuid();
-    var reply = Run(client.RunAsync("LINUX", project, 3, Source(), default));
+    var reply = Run(client.RunAsync("LINUX", project, 3, new InMemoryBuildSource(Source()), default));
     Assert(reply.State == "Succeeded" && reply.ArtifactFiles == 1 && Encoding.UTF8.GetString(reply.Log) == "ok\n", "build reply");
     Assert(File.ReadAllText(Path.Combine(root, project.ToString("D"), "3-linux", "result.txt")) == "export const x = 1;\n", "artifact from the source");
-    try { Run(client.RunAsync("nope", project, 4, Source(), default)); throw new Exception("unknown target accepted"); }
+    try { Run(client.RunAsync("nope", project, 4, new InMemoryBuildSource(Source()), default)); throw new Exception("unknown target accepted"); }
     catch (BuildServiceUnavailableException e) { Assert(e.Reason == "UnknownTarget", e.Reason); }
-    try { Run(client.RunAsync("linux", project, 5, [("../escape.sh", Utf8("x"))], default)); throw new Exception("bad name accepted"); }
+    try { Run(client.RunAsync("linux", project, 5, new InMemoryBuildSource([("../escape.sh", Utf8("x"))]), default)); throw new Exception("bad name accepted"); }
     catch (BuildServiceUnavailableException e) { Assert(e.Reason == "InvalidRequest", e.Reason); }
     stop.Cancel();
     try { using var poke = new NamedPipeClientStream(".", name); poke.Connect(200); } catch { }
     serving.Wait(3000);
+});
+
+// ---- streaming (docs/vault-any-file-design.md section 6) ----------------------------------------------------------
+List<(string, byte[])> LargeProject()
+{
+    var big = new byte[3 * 1024 * 1024 + 7]; new Random(3).NextBytes(big); big[0] = 0;
+    var files = Enumerable.Range(0, 2000).Select(i => ($"src/m{i % 20}/f{i}.c", Utf8($"int f{i};\n"))).ToList();
+    files.Add(("lib/big.bin", big)); files.Add(("empty.txt", []));
+    return files;
+}
+
+Test("build streaming: 2,000 files and a 3 MiB binary arrive byte-exact through the tar stream", () =>
+{
+    var files = LargeProject();
+    var box = new FakeContainer
+    {
+        Build = c =>
+        {
+            Assert(c.Files["/sv/src/lib/big.bin"].SequenceEqual(files.Single(f => f.Item1 == "lib/big.bin").Item2), "binary byte-exact");
+            Assert(c.Files.Count(k => k.Key.StartsWith("/sv/src/src/")) == 2000 && c.Files["/sv/src/src/m7/f1007.c"].SequenceEqual(Utf8("int f1007;\n")), "every small file");
+            Assert(c.Files["/sv/src/empty.txt"].Length == 0, "empty file");
+            return (0, "ok\n");
+        },
+    };
+    Assert(Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new InMemoryBuildSource(files), new FakeEngine(box), default)).State == BuildState.Succeeded, "built");
+});
+
+Test("build streaming: a source failing mid-copy fails the build (SourceUnavailable), runs nothing, and empties the folders", () =>
+{
+    var box = new FakeContainer();
+    var outcome = Run(BuildRunner.RunAsync(linux, Dest(), Guid.NewGuid(), 1, new FailingSource(LargeProject(), 50), new FakeEngine(box), default));
+    Assert(outcome is { State: BuildState.Failed, Reason: "SourceUnavailable" }, outcome.State + " " + outcome.Reason);
+    Assert(!box.Calls.Any(c => c.StartsWith("exec /bin/sh -c ./build")) && box.Calls[^1] == "clean" && box.Files.Count == 0, string.Join(" | ", box.Calls));
+});
+
+Test("channel streaming: a file bigger than any frame, an abort, an engine failure mid-copy, and the table limits", () =>
+{
+    var name = "sv-build-stream-" + Guid.NewGuid().ToString("N");
+    var root = Dest();
+    var config = BuildConfig.Parse(Utf8(Config(LinuxTarget, root.Replace("\\", "\\\\"))));
+    var box = new FakeContainer();
+    using var stop = new CancellationTokenSource();
+    var serving = Task.Run(async () =>
+    {
+        while (!stop.IsCancellationRequested)
+        {
+            await using var pipe = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+            try { await pipe.WaitForConnectionAsync(stop.Token); } catch (OperationCanceledException) { return; }
+            try { await BuildChannel.ServeAsync(pipe, () => config, _ => new FakeEngine(box), stop.Token); } catch { }
+        }
+    });
+    var client = new BuildChannel.Client(async ct => { var p = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous); await p.ConnectAsync(5000, ct); return p; });
+    // A deadlock (both sides writing) would hang; a bounded wait turns it into a failure instead.
+    BuildReply Within(Task<BuildReply> task) { Assert(task.Wait(TimeSpan.FromSeconds(60)), "no deadlock"); return task.Result; }
+    var files = LargeProject();
+    box.Build = c => { Assert(c.Files["/sv/src/lib/big.bin"].SequenceEqual(files.Single(f => f.Item1 == "lib/big.bin").Item2), "3 MiB file over the pipe"); return (0, "ok\n"); };
+    Assert(Within(client.RunAsync("linux", Guid.NewGuid(), 1, new InMemoryBuildSource(files), default)).State == "Succeeded", "large build over the pipe");
+    var aborted = Within(client.RunAsync("linux", Guid.NewGuid(), 2, new FailingSource(files, 40), default));
+    Assert(aborted is { State: "Failed", Reason: "SourceUnavailable" }, aborted.State + " " + aborted.Reason);
+    box.PutFails = true;
+    var engineFailed = Within(client.RunAsync("linux", Guid.NewGuid(), 3, new InMemoryBuildSource(files), default)); // the service drains the rest
+    Assert(engineFailed is { State: "Unavailable", Reason: "EngineFailed" }, engineFailed.State + " " + engineFailed.Reason);
+    box.PutFails = false;
+    foreach (var bad in new[] { new InMemoryBuildSource([("a.c", Utf8("1")), ("A.C", Utf8("2"))]), new InMemoryBuildSource(Enumerable.Range(0, BuildChannel.MaxFiles + 1).Select(i => ($"f{i}", Array.Empty<byte>())).ToList()) })
+    {
+        try { Within(client.RunAsync("linux", Guid.NewGuid(), 4, bad, default)); throw new Exception("bad table accepted"); }
+        catch (AggregateException e) when (e.InnerException is BuildServiceUnavailableException { Reason: "InvalidRequest" }) { }
+    }
+    stop.Cancel();
+    try { using var poke = new NamedPipeClientStream(".", name); poke.Connect(200); } catch { }
+    serving.Wait(TimeSpan.FromSeconds(5));
 });
 
 Console.WriteLine($"Build tests: {passed} passed; synthetic workspace retained at {workspace}");

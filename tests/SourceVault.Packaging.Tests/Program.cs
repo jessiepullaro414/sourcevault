@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using SourceVault.Packaging;
 
-// Package format v1 and key files (docs/package-import-design.md). Synthetic content and ephemeral software RSA keys
+// Package formats v1 and v2 and key files (docs/package-import-design.md, docs/vault-any-file-design.md section 5.3). Synthetic content and ephemeral software RSA keys
 // confined to this test assembly; production uses the vault PC's TPM import key and the source computer's TPM sender key.
 int passed = 0;
 void Assert(bool value, string what) { if (!value) throw new Exception("Assertion failed: " + what); }
@@ -168,7 +168,7 @@ Test("package: contents that break the vault's rules are refused even when corre
         ["over 256 KiB"] = One("big.txt", Utf8(new string('a', 256 * 1024 + 1))),
         ["wrong hash"] = One("ok.txt", Utf8("fine\n"), new byte[32]),
         ["trailing bytes"] = One("ok.txt", Utf8("fine\n"), tail: w => w.Write((byte)0)),
-        ["unknown version"] = Body(w => { w.Write((ushort)2); w.Write((ushort)0); w.Write((uint)0); }),
+        ["unknown version"] = Body(w => { w.Write((ushort)3); w.Write((ushort)0); w.Write((uint)0); }),
         ["no files"] = Body(w => { w.Write((ushort)1); w.Write((ushort)0); w.Write((uint)0); }),
         ["duplicate by case"] = Body(w => { w.Write((ushort)1); w.Write((ushort)0); w.Write((uint)2); File(w, "a.txt", Utf8("1")); File(w, "A.TXT", Utf8("2")); w.Write(Utf8("1")); w.Write(Utf8("2")); }),
         ["content cut short"] = Body(w => { w.Write((ushort)1); w.Write((ushort)0); w.Write((uint)1); File(w, "a.txt", Utf8("12345")); w.Write(Utf8("12")); }),
@@ -177,6 +177,61 @@ Test("package: contents that break the vault's rules are refused even when corre
     foreach (var (what, body) in rejected) Throws<PackageRejectedException>(() => Read(PackRaw(body)), what);
     Throws<ArgumentException>(() => Pack([("../x", Utf8("x"))]), "the writer refuses bad names too");
     Throws<ArgumentException>(() => Pack([("a.txt", Utf8("1")), ("A.txt", Utf8("2"))]), "the writer refuses case duplicates");
+});
+
+
+// ---- version 2 (any file, streamed) ---------------------------------------------------------------------------------
+Test("package v2: binary, UTF-16 and over-256 KiB files round trip; v2 still enforces names and duplicates", () =>
+{
+    var big = new byte[3 * 1024 * 1024 + 11]; new Random(5).NextBytes(big); // several chunks, crossing chunk boundaries
+    var files = new List<(string, byte[])> { ("res/icon.ico", [0, 0, 1, 0, 0xFF]), ("res/app.rc", Encoding.Unicode.GetBytes("﻿IDS 1\r\n")), ("lib/big.bin", big), ("empty", []) };
+    using var contents = Read(Pack(files));
+    Assert(contents.Files.Count == 4 && contents.Files.Zip(files).All(z => z.First.Path == z.Second.Item1 && z.First.Content.SequenceEqual(z.Second.Item2)), "byte-exact");
+    Assert(BinaryPrimitives.ReadUInt16LittleEndian(Pack(files).AsSpan(8)) == 2, "writers write version 2");
+    byte[] V2(Action<BinaryWriter> write) { using var m = new MemoryStream(); using (var w = new BinaryWriter(m)) write(w); return m.ToArray(); }
+    void Entry(BinaryWriter w, string path, byte[] content) { var b = Utf8(path); w.Write((ushort)b.Length); w.Write(b); w.Write((uint)content.Length); w.Write(SHA256.HashData(content)); }
+    Throws<PackageRejectedException>(() => Read(PackRaw(V2(w => { w.Write((ushort)2); w.Write((ushort)0); w.Write((uint)1); Entry(w, "../x", [1]); w.Write((byte)1); }))), "v2 traversal");
+    Throws<PackageRejectedException>(() => Read(PackRaw(V2(w => { w.Write((ushort)2); w.Write((ushort)0); w.Write((uint)2); Entry(w, "a", [1]); Entry(w, "A", [2]); w.Write((byte)1); w.Write((byte)2); }))), "v2 duplicate");
+    Throws<PackageRejectedException>(() => Read(PackRaw(V2(w => { w.Write((ushort)2); w.Write((ushort)0); w.Write((uint)1); Entry(w, "a", [1]); w.Write((byte)9); }))), "v2 wrong hash");
+});
+
+Test("package v2: streamed from files on disk; a file changed after the scan stops the writer", () =>
+{
+    var folder = Path.Combine(Path.GetTempPath(), "sv-pack-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(folder);
+    try
+    {
+        var a = Path.Combine(folder, "a.bin"); var b = Path.Combine(folder, "b.bin");
+        var aBytes = new byte[1536 * 1024]; new Random(1).NextBytes(aBytes); File.WriteAllBytes(a, aBytes);
+        File.WriteAllBytes(b, Utf8("second\n"));
+        PackageFile Of(string path, string name) => new(name, new FileInfo(path).Length, SHA256.HashData(File.ReadAllBytes(path)), () => File.OpenRead(path));
+        var planned = new[] { Of(a, "a.bin"), Of(b, "dir/b.bin") };
+        using (var output = new MemoryStream())
+        {
+            Package.Write(output, "Streamed", planned, recipient, sender, Sign);
+            using var contents = Read(output.ToArray());
+            Assert(contents.Files[0].Content.SequenceEqual(aBytes) && contents.Files[1].Path == "dir/b.bin", "streamed round trip");
+        }
+        File.WriteAllBytes(b, Utf8("changed\n")); // same length, different bytes
+        Throws<PackageSourceChangedException>(() => Package.Write(new MemoryStream(), "Streamed", planned, recipient, sender, Sign), "changed file");
+    }
+    finally { Directory.Delete(folder, recursive: true); }
+});
+
+Test("package spool: the signature is checked against the hash taken on arrival; a spool changed afterwards is refused while streaming", () =>
+{
+    var files = Enumerable.Range(0, 3).Select(i => ($"f{i}.bin", Enumerable.Repeat((byte)i, 700 * 1024).ToArray())).ToList(); // 3 chunks
+    var package = Pack(files);
+    var signed = SHA256.HashData(package.AsSpan(0, package.Length - Package.SignatureBytes));
+    // A wrong arrival hash: refused before anything is decrypted.
+    int unwraps = 0;
+    Throws<PackageRejectedException>(() => Package.Open(new MemoryStream(package), new byte[32], recipient.Fingerprint, Registered, w => { unwraps++; return Unwrap(w); }), "wrong arrival hash");
+    Assert(unwraps == 0, "no unwrap before the signature");
+    // Changed after the signature check (the last chunk's ciphertext): refused while streaming.
+    var bytes = package.ToArray(); var spool = new MemoryStream(bytes); // shares the array, so a change below is a change to the spool
+    using var reader = Package.Open(spool, signed, recipient.Fingerprint, Registered, Unwrap);
+    Assert(reader.Files.Count == 3 && reader.Version == 2, "table read");
+    bytes[package.Length - Package.SignatureBytes - 20] ^= 1;
+    Throws<PackageRejectedException>(() => reader.ReadContents((_, _) => { }), "changed spool");
 });
 
 Console.WriteLine($"Packaging tests: {passed} passed.");

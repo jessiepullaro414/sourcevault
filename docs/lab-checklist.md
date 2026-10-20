@@ -32,7 +32,25 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | `Setup-SourceVault.ps1 -Status` reports everything OK | admin |
 | [ ] | **Editor features (new):** in the installed editor with a synthetic C++ project, on a real keyboard: Ctrl+P, Ctrl+E, Ctrl+Shift+F (a result in an unsaved file too), Ctrl+Shift+O and Alt+O on a `.cpp`, **Ctrl+\\** (split) and **Ctrl+,** (settings; the browser check could not send these two), Ctrl+K Ctrl+S opens the list without saving, Ctrl+K D then **Revert to saved** and Ctrl+Z, Ctrl+Alt+S, Ctrl+K Z | — |
 | [ ] | **Settings file (new):** after saving settings, `%LOCALAPPDATA%\SourceVault\editor-settings.json` holds only the eight display fields; the canary marker is not in it. Replace it with `{}`, then with 5 KiB of text: the editor starts with defaults | — |
+| [ ] | **Demo (new):** `Build-EditorDemo.ps1`, copy the zip to a PC **without** SourceVault, unzip, run *Start SourceVault Demo*: the window is red and titled *DEMO (not encrypted)*, the demo controls work, and a screenshot captures it. Close it: `%LOCALAPPDATA%\SourceVault\profiles\demo` is empty | a second PC (or this one) |
 | [ ] | **Close warning (new):** with an unsaved edit, closing the window asks *Close anyway?*; **No** keeps it open with the edit; with nothing unsaved it closes without asking | — |
+
+## Any-file vault (no sign-out or reboot; synthetic files only)
+
+Generate the files; never use real source or downloaded binaries. Start from a vault backup you can restore, because **the upgrade is one-way**: after the first change to a project, an older version refuses the vault.
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | **Upgrade:** with the new version installed over a vault holding older projects, open one, save a file: it still opens, and `-Status` is OK after a service restart | admin (restart) |
+| [ ] | **Import any file:** `SourceVault.Import.exe` on a generated folder with a random 300 MB `.lib`, a UTF-16 `.rc`, an `.ico` and 2,000 small text files: dry run lists them, the import ends "all N match the originals (SHA-256) and decrypted cleanly in the service" | — |
+| [ ] | **Editor, info panel:** the `.ico` and `.lib` show *binary* with size and SHA-256 (compare with `Get-FileHash`); a 700 KiB text file opens and saves; a 2 MiB log shows *large* | — |
+| [ ] | **From disk:** **+ Add from disk** (several files) and **Replace from disk…** with the native dialog; History lists both versions; **Revert to this version** brings the first back (same SHA-256). A file locked by another program is refused with "could not read", and the session stays unlocked | — |
+| [ ] | **Keep mine / theirs:** replace a file with the lab client (or a second editor) after opening its details here, then **Replace from disk…**: the choice appears; try both | — |
+| [ ] | **Search:** "N files skipped (binary or too large)" with binaries in the project | — |
+| [ ] | **Read-time check (C4):** stop the service, flip one bit in a *file* record (not the manifest) of a synthetic project with `scripts/lab/Test-VaultTamper.ps1`-style care, start it: it starts (startup checks existence and size); opening that file is refused (*Unavailable*), and an import's `VerifyProject` would report it. Restore the record | admin; service restart |
+| [ ] | **Benchmark:** 25,000 generated files and several GiB: List, Open, Commit, a build, a search and `VerifyProject`, times recorded in `revision-store.md` | — |
+| [ ] | **Builds:** a real Docker copy of a large synthetic project to both targets; the `cpp-hello` sample with a synthetic UTF-16 `.rc` and binary `.ico` arrives byte-identical | Docker |
+| [ ] | **Pack v2:** Pack on the source computer with a 300 MB binary, import here; a package from the previous Pack is still accepted | second PC |
 
 ## Encrypted import from another computer (no sign-out or reboot)
 

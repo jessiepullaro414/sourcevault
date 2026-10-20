@@ -83,7 +83,6 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
     {
         var slot = slots.GetOrAdd(queued.Target, _ => new SemaphoreSlim(1, 1));
         await slot.WaitAsync().ConfigureAwait(false);
-        var files = new List<(string Name, byte[] Content)>();
         BuildRecord finished;
         byte[] log = [];
         try
@@ -91,8 +90,9 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
             active[(projectId, queued.Number)] = queued with { State = "running" };
             var store = catalog.OpenProject(projectId);
             var snapshot = store.List();
-            store.ReadSnapshot(snapshot.SnapshotId, (file, content) => files.Add((file.LogicalName, content.ToArray())));
-            var reply = await service.RunAsync(queued.Target, projectId, queued.Number, files, CancellationToken.None).ConfigureAwait(false);
+            // Streamed, a segment at a time (any-file design section 6): the project is never all in memory.
+            using var reader = store.OpenSnapshot(snapshot.SnapshotId);
+            var reply = await service.RunAsync(queued.Target, projectId, queued.Number, new StoreBuildSource(reader), CancellationToken.None).ConfigureAwait(false);
             log = reply.Log;
             var state = reply.State switch
             {
@@ -103,7 +103,7 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
         }
         catch (BuildServiceUnavailableException e) { finished = queued with { State = "unavailable", Reason = e.Reason, FinishedAt = time.GetUtcNow() }; }
         catch (Exception e) when (e is not OutOfMemoryException) { finished = queued with { State = "unavailable", Reason = "VaultError", FinishedAt = time.GetUtcNow() }; }
-        finally { BuildRunner.Zero(files); slot.Release(); }
+        finally { slot.Release(); }
         try { finished = Store(projectId, finished, log); }
         catch (Exception e) when (e is not OutOfMemoryException) { } // e.g. the project was deleted meanwhile: the record stays in memory
         finally { CryptographicOperations.ZeroMemory(log); }
@@ -192,5 +192,36 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
             Str(e, "artifactFolder"), e.GetProperty("artifactFiles").GetInt32(), e.GetProperty("artifactBytes").GetInt64(), true,
             e.GetProperty("logTruncated").GetBoolean(),
             e.TryGetProperty("artifactsDropped", out var dropped) ? dropped.GetInt32() : 0)).ToList(); // absent in records stored before 2026-10-18
+    }
+}
+
+/// <summary>
+/// The vault side of a build copy: a snapshot's files read segment by segment. A record that fails its check makes
+/// the copy abort (the build fails with SourceUnavailable); a segment buffer is valid until the next call.
+/// </summary>
+internal sealed class StoreBuildSource(RevisionStore.SnapshotReader reader) : IBuildSource
+{
+    private readonly IReadOnlyList<StoreFile> files = reader.Files;
+    private IEnumerator<ArraySegment<byte>>? current;
+    private int index = -1;
+    public IReadOnlyList<BuildFile> Files { get; } = reader.Files.Select(f => new BuildFile(f.LogicalName, f.ByteLength)).ToList();
+
+    public ValueTask<ReadOnlyMemory<byte>> NextAsync(CancellationToken ct)
+    {
+        try
+        {
+            while (true)
+            {
+                if (current is not null && current.MoveNext()) return ValueTask.FromResult<ReadOnlyMemory<byte>>(current.Current);
+                current?.Dispose(); current = null;
+                if (++index >= files.Count) return ValueTask.FromResult(ReadOnlyMemory<byte>.Empty);
+                current = reader.Read(files[index]).GetEnumerator();
+            }
+        }
+        catch (Exception e) when (e is InvalidDataException or CryptographicException or IOException or UnauthorizedAccessException)
+        {
+            current?.Dispose(); current = null;
+            throw new BuildSourceException("SourceUnavailable");
+        }
     }
 }

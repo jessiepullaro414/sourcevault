@@ -23,6 +23,8 @@ Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-de
 - **Offline deployment drive (2026-10-19):** `Build-DeploymentKit.ps1` and `Deploy-SourceVault.ps1`, with pinned sources and images fetched without Docker ([deployment-kit-design.md](deployment-kit-design.md)). Its lab run is in the checklist.
 
 - **Editor features (2026-10-19):** Go to file, recently opened files, Search all files (protocol v2 `SearchProject`), outlines for C#, C and C++, header/source switching, editor settings, Save all, Compare with saved, format, split editor, status-bar details, the shortcut list and focus mode, plus a warning before closing with unsaved edits ([editor-host.md](editor-host.md)). Reviewed in the browser against the fake host; the real-keyboard and installed-editor checks are in the lab checklist.
+- **Demo mode (2026-10-19):** `SourceVault.Editor.exe --demo` runs the whole vault editor on a simulated, unencrypted vault, shown in red, with no service; `Build-EditorDemo.ps1` makes a portable folder and zip ([editor-host.md](editor-host.md)).
+- **Any-file vault (2026-10-19):** binary, UTF-16 and large files up to 1 GiB, 25,000 files and 8 GiB per project: record format `SVR2` with a per-project key, manifest schema 4, uploads in parts, streamed builds (build pipe v2), the importer and Pack on package format v2, and the editor's info panel, add/replace from disk, revert and keep mine/theirs ([vault-any-file-design.md](vault-any-file-design.md)). In process only; its lab rows are in the checklist. Upgrading a vault is one-way.
 
 Still open:
 

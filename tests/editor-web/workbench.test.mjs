@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { touchRecent, fuzzyMatch, rankFiles, highlightRuns, searchText, withDrafts, groupMatches, validQuery, counterpart, isCFamily, outline,
   DEFAULT_SETTINGS, validSettings, SHORTCUTS, MAX_SEARCH_MATCHES } from '../../src/SourceVault.Editor.Web/workbench.mjs';
 import { VaultSession, VaultError, languageFor } from '../../src/SourceVault.Editor.Web/vault-session.mjs';
-import { FakeVaultHost } from '../../src/SourceVault.Editor.Web/dev/fake-host.mjs';
+import { DemoVaultHost } from '../../src/SourceVault.Editor.Web/demo-host.mjs';
 
 const rejectsWith = (promise, code) => assert.rejects(promise, e => e instanceof VaultError && e.code === code);
 const flat = (nodes, depth = 0) => nodes.flatMap(s => [`${'  '.repeat(depth)}${s.kind} ${s.name}`, ...flat(s.children, depth + 1)]);
@@ -109,7 +109,7 @@ test('settings: defaults, validation and the fake host round trip; they work whi
   for (const bad of [{ ...DEFAULT_SETTINGS, theme: 'neon' }, { ...DEFAULT_SETTINGS, fontSize: 40 }, { ...DEFAULT_SETTINGS, tabSize: 3 }, { ...DEFAULT_SETTINGS, wordWrap: 'yes' },
     { ...DEFAULT_SETTINGS, recentFiles: ['a.cpp'] }, (({ minimap, ...rest }) => rest)(DEFAULT_SETTINGS), null, []])
     assert.equal(validSettings(bad), false, JSON.stringify(bad));
-  const host = new FakeVaultHost();
+  const host = new DemoVaultHost();
   const session = new VaultSession(host.transport, { timeoutMs: 300 });
   assert.deepEqual(await session.getSettings(), { ...DEFAULT_SETTINGS }, 'readable before unlocking');
   await session.saveSettings({ ...DEFAULT_SETTINGS, theme: 'light', fontSize: 16 });
@@ -120,12 +120,12 @@ test('settings: defaults, validation and the fake host round trip; they work whi
 });
 
 test('search all files: the service searches saved files, unsaved drafts are searched in the editor', async () => {
-  const host = new FakeVaultHost();
+  const host = new DemoVaultHost();
   const session = new VaultSession(host.transport, { timeoutMs: 500 });
   await session.unlock();
   await session.selectProject(host.projectIdByName('Synthetic C++ demo'));
   const saved = await session.search('gadget');
-  assert.ok(saved.matches.length > 5 && !saved.truncated && saved.filesSearched === 4);
+  assert.ok(saved.matches.length > 5 && !saved.truncated && saved.filesSearched === 5 && saved.filesSkipped === 1, "the binary icon is skipped");
   assert.deepEqual([...new Set(saved.matches.map(m => m.name))], ['CMakeLists.txt', 'include/gadget.h', 'src/gadget.cpp', 'src/main.cpp']);
   const main = [...session.files.values()].find(f => f.path === 'src/main.cpp');
   await session.open(main.id);
@@ -139,4 +139,16 @@ test('search all files: the service searches saved files, unsaved drafts are sea
   await rejectsWith(session.search('two\nlines'), 'InvalidRequest');
   await session.lock();
   await rejectsWith(session.search('gadget'), 'Locked');
+});
+
+test('demo mode: only app.mjs loads the demo vault, and only when the host (or a development browser) asks for it', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const web = new URL('../../src/SourceVault.Editor.Web/', import.meta.url);
+  for (const name of ['vault-app.mjs', 'vault-session.mjs', 'workbench-ui.mjs', 'shell.mjs', 'preview-app.mjs'])
+    assert.ok(!(await readFile(new URL(name, web), 'utf8')).includes('demo-host'), `${name} must not load the demo vault`);
+  const app = await readFile(new URL('app.mjs', web), 'utf8');
+  assert.match(app, /metadata\?\.mode === 'demo'\) return \{ kind: 'demo'/, 'the native host chooses demo mode');
+  assert.match(app, /if \(metadata\?\.mode === 'vault'\)/, 'vault mode is checked first and never falls into the demo');
+  const css = await readFile(new URL('app.css', web), 'utf8');
+  assert.match(css, /body\.mode-demo\{[^}]*--accent:#ff6b6b/, 'demo mode is red');
 });

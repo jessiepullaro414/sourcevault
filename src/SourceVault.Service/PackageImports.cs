@@ -18,13 +18,16 @@ internal sealed class PackageImports(IKeyProtector importKey, byte[] importPubli
 
     internal PublicKeyFile Recipient { get; } = PublicKeyFile.Create(PublicKeyFile.RecipientFormat, computer, importPublicKey);
 
-    /// <summary>Only one package upload/import at a time, so the service holds at most one package in memory.</summary>
+    /// <summary>Only one package upload/import at a time across the service (one spool on disk).</summary>
     internal bool TryEnter() => gate.Wait(0);
     internal void Exit() => gate.Release();
 
-    /// <summary>Checks, verifies and decrypts a package addressed to this PC. The caller disposes the result.</summary>
-    internal PackageContents Open(ReadOnlySpan<byte> package) =>
-        Package.Read(package, Recipient.Fingerprint, Sender, wrapped => importKey.UnwrapKey(wrapped));
+    /// <summary>
+    /// Checks a package spooled to disk (the signature against <paramref name="signedHash"/>, taken as it arrived) and
+    /// opens it for streaming. Nothing is decrypted before the signature checks out. The caller disposes the reader.
+    /// </summary>
+    internal PackageReader Open(Stream spool, byte[] signedHash) =>
+        Package.Open(spool, signedHash, Recipient.Fingerprint, Sender, wrapped => importKey.UnwrapKey(wrapped));
 
     /// <summary>The registered sender with this fingerprint, or null. A file that is malformed or doesn't match its name counts as unregistered.</summary>
     internal RSA? Sender(byte[] fingerprint) => RegisteredSender(fingerprint)?.ToRsa();

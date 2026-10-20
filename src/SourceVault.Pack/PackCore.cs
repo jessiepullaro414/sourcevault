@@ -26,9 +26,8 @@ internal static class PackCore
 
     /// <summary>Why a plan can't be packed, or null when it can.</summary>
     internal static string? Problem(ImportPlan plan) =>
-        plan.Files.Count == 0 ? "Nothing to pack: no file in that folder is UTF-8 text the vault accepts."
-        : plan.Files.Count > Package.MaxFiles ? $"Too many files: a package holds at most {Package.MaxFiles}. Exclude some folders."
-        : null;
+        plan.Files.Count == 0 ? "Nothing to pack: that folder has no file the vault can take."
+        : plan.LimitProblem; // over 25,000 files or 8 GiB
 
     /// <summary>The project name suggested to the vault PC: the folder's name.</summary>
     internal static string SuggestedName(ImportPlan plan) => Path.GetFileName(plan.Root.TrimEnd('\\'));
@@ -46,8 +45,9 @@ internal static class PackCore
     }
 
     /// <summary>
-    /// Re-reads every planned file (it must be unchanged since the scan), encrypts the set for <paramref name="recipient"/>,
-    /// signs it and writes a new package file. Nothing is left behind on failure. Returns the package id and size.
+    /// Streams every planned file (each must be unchanged since the scan) into a package for <paramref name="recipient"/>
+    /// (format version 2: any file, one 1 MiB chunk in memory), signs it and writes a new package file. Nothing is left
+    /// behind on failure. Returns the package id and size.
     /// </summary>
     internal static (Guid Id, long Bytes) Write(ImportPlan plan, PublicKeyFile recipient, IPackageSigner signer, string target, string? name = null)
     {
@@ -55,27 +55,23 @@ internal static class PackCore
         target = Path.GetFullPath(target);
         if (File.Exists(target)) throw new PackException($"{target} already exists; choose a new file name.");
         var sender = SenderFile(signer);
-        var files = new List<(string Path, byte[] Content)>();
+        var files = plan.Files.Select(c => new PackageFile(c.Path, c.Length, c.Sha256,
+            () => new FileStream(c.FullPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan))).ToList();
+        Guid id;
         try
         {
-            foreach (var candidate in plan.Files)
-            {
-                var content = File.ReadAllBytes(candidate.FullPath);
-                files.Add((candidate.Path, content));
-                if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(content), candidate.Sha256))
-                    throw new PackException($"{candidate.Path} changed since the folder was scanned. Nothing was written; scan again.");
-            }
-            Guid id;
-            try
-            {
-                using var stream = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                id = Package.Write(stream, name ?? SuggestedName(plan), files, recipient, sender, signer.SignHash);
-                stream.Flush(true);
-            }
-            catch { try { File.Delete(target); } catch (IOException) { } throw; }
-            return (id, new FileInfo(target).Length);
+            using var stream = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            id = Package.Write(stream, name ?? SuggestedName(plan), files, recipient, sender, signer.SignHash);
+            stream.Flush(true);
         }
-        finally { foreach (var (_, content) in files) CryptographicOperations.ZeroMemory(content); }
+        catch (Exception e)
+        {
+            try { File.Delete(target); } catch (IOException) { }
+            if (e is PackageSourceChangedException changed) throw new PackException($"{changed.Path} changed since the folder was scanned. Nothing was written; scan again.");
+            if (e is IOException or UnauthorizedAccessException && e is not PackException) throw new PackException("A file could not be read while packing. Nothing was written; scan again.");
+            throw;
+        }
+        return (id, new FileInfo(target).Length);
     }
 
     // Key files allow letters, digits, '.', '-' and '_' in computer names.

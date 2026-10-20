@@ -7,19 +7,31 @@ namespace SourceVault.Client;
 public enum LockReason { User, Closed, Expired }
 
 public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount);
-public sealed record FileSummary(Guid FileId, string Name, Guid RevisionId, int ByteLength);
+/// <summary>A live file. <c>Kind</c> is "text" or "binary"; <c>Sha256</c> (hex) is null for a legacy text record.</summary>
+public sealed record FileSummary(Guid FileId, string Name, Guid RevisionId, long ByteLength, string Kind = "text", string? Sha256 = null)
+{
+    /// <summary>Whether the editor can show it: text of at most 1 MiB. Other files get the info panel.</summary>
+    public bool Openable => Kind == "text" && ByteLength <= EditorVaultController.MaxEditorTextBytes;
+}
 public sealed record OpenedDocument(FileSummary File, string Text);
-public sealed record RevisionSummary(Guid RevisionId, DateTimeOffset? SavedAt, string? SavedBy, int ByteLength, string Action, string Name);
+/// <summary>An info-panel file: its listing and its last save (when, who).</summary>
+public sealed record FileDetails(FileSummary File, DateTimeOffset? SavedAt, string? SavedBy);
+public sealed record RevisionSummary(Guid RevisionId, DateTimeOffset? SavedAt, string? SavedBy, long ByteLength, string Action, string Name, string Kind = "text", string? Sha256 = null);
 public sealed record HistoryListing(IReadOnlyList<RevisionSummary> Revisions, bool More);
-public sealed record DeletedSummary(Guid FileId, string Name, int ByteLength, DateTimeOffset DeletedAt, string? DeletedBy);
-/// <summary>Inputs for a three-way merge: the text the editor's copy is based on, and the current text and revision.</summary>
-public sealed record MergeSources(string BaseText, string TheirsText, Guid TheirsRevision);
+public sealed record DeletedSummary(Guid FileId, string Name, long ByteLength, DateTimeOffset DeletedAt, string? DeletedBy, string Kind = "text");
+/// <summary>
+/// Inputs for a three-way merge: the text the editor's copy is based on, and the current text and revision. Not
+/// <c>Mergeable</c> (texts null) when either side is binary or over 1 MiB: the editor then offers keep mine / keep theirs.
+/// </summary>
+public sealed record MergeSources(string? BaseText, string? TheirsText, Guid TheirsRevision, bool Mergeable = true);
+/// <summary>A file the host read from disk (chosen in its own dialog). The renderer never sees the path or the bytes.</summary>
+public sealed record DiskFile(string Name, long Length, Func<Stream> Open);
 public sealed record BuildSummary(int Number, string Target, string State, string? Reason, int? ExitCode, string? RequestedBy, DateTimeOffset RequestedAt,
     DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated, int ArtifactsDropped = 0);
 
 /// <summary>One "Search all files" hit: 1-based line and column (UTF-16), the match length, a short preview of the line and where the match starts in it.</summary>
 public sealed record SearchMatch(Guid FileId, string Name, int Line, int Column, int Length, string Preview, int PreviewOffset);
-public sealed record SearchResult(IReadOnlyList<SearchMatch> Matches, bool Truncated, int FilesSearched);
+public sealed record SearchResult(IReadOnlyList<SearchMatch> Matches, bool Truncated, int FilesSearched, int FilesSkipped = 0);
 
 /// <summary>Outcome of a controller call: a protocol code, or <c>Conflict</c> / <c>Locked</c> / <c>NotOpen</c>.</summary>
 public sealed record VaultResult<T>(string Code, T? Value)
@@ -38,11 +50,23 @@ public sealed record VaultResult<T>(string Code, T? Value)
 /// </summary>
 public sealed class EditorVaultController : IDisposable
 {
+    /// <summary>Text the editor opens and saves (docs/vault-any-file-design.md section 4).</summary>
+    public const int MaxEditorTextBytes = 1024 * 1024;
+    /// <summary>Up to this size text goes inline (OpenDocument, ApplyEdits); larger goes in parts.</summary>
+    internal const int InlineBytes = SourceVault.Contracts.ProtocolLimits.MaxDocumentBytes;
+    internal const int PartBytes = 512 * 1024;
+    /// <summary>The service's per-file limit; checked here before reading a file from disk.</summary>
+    public const long MaxFileBytes = 1L << 30;
+    /// <summary>Files in one "Add files from disk" (one CommitUploads).</summary>
+    public const int MaxAddFiles = 256;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly Func<CancellationToken, Task<VaultClient>> connect;
     private readonly SemaphoreSlim gate = new(1, 1);
     // (project, file) -> revision the editor's copy is based on. Ids only; kept across locks for the unlock re-check.
     private readonly Dictionary<(Guid, Guid), Guid> opened = [];
+    // (project, file) -> a staged replacement from disk that conflicted, kept for "keep mine". The service discards it
+    // when the connection or session ends, or after 2 idle minutes.
+    private readonly Dictionary<(Guid, Guid), Guid> pending = [];
     private VaultClient? client;
 
     public EditorVaultController(Func<CancellationToken, Task<VaultClient>> connect) => this.connect = connect;
@@ -146,7 +170,7 @@ public sealed class EditorVaultController : IDisposable
             if (file is null) return "NotFound";
             return opened.TryGetValue((projectId, fileId), out var basedOn) && file.RevisionId != basedOn ? "Conflict" : null;
         }, w => w.WriteString("fileId", fileId.ToString("D")), _ => true, ct).ConfigureAwait(false);
-        if (result.Ok) opened.Remove((projectId, fileId));
+        if (result.Ok) { opened.Remove((projectId, fileId)); await DiscardPendingAsync(projectId, fileId, ct).ConfigureAwait(false); }
         return result;
     });
 
@@ -159,9 +183,13 @@ public sealed class EditorVaultController : IDisposable
             Guid.Parse(e.GetProperty("revisionId").GetString()!),
             e.GetProperty("savedAt").ValueKind == JsonValueKind.Null ? null : DateTimeOffset.Parse(e.GetProperty("savedAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
             e.GetProperty("savedBy").ValueKind == JsonValueKind.Null ? null : e.GetProperty("savedBy").GetString(),
-            e.GetProperty("byteLength").GetInt32(), e.GetProperty("action").GetString()!, e.GetProperty("name").GetString()!)).ToList(),
+            e.GetProperty("byteLength").GetInt64(), e.GetProperty("action").GetString()!, e.GetProperty("name").GetString()!, KindOf(e), Sha256Of(e))).ToList(),
             r.Body.GetProperty("more").GetBoolean()));
     });
+
+    // "kind" and "sha256" are absent from an older service, whose files are all text.
+    private static string KindOf(JsonElement e) => e.TryGetProperty("kind", out var k) && k.GetString() == "binary" ? "binary" : "text";
+    private static string? Sha256Of(JsonElement e) => e.TryGetProperty("sha256", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString() : null;
 
     /// <summary>The text of one revision from a file's history.</summary>
     public Task<VaultResult<string>> OpenRevisionAsync(Guid projectId, Guid fileId, Guid revisionId, CancellationToken ct = default) => Guarded(() =>
@@ -173,10 +201,45 @@ public sealed class EditorVaultController : IDisposable
         {
             w.WriteString("projectId", projectId.ToString("D")); w.WriteString("fileId", fileId.ToString("D")); w.WriteString("revisionId", revisionId.ToString("D"));
         }, null, ct).ConfigureAwait(false);
+        if (r.Code == "LimitExceeded") return await ReadTextPartsAsync(projectId, fileId, revisionId, ct).ConfigureAwait(false); // over 256 KiB
         if (!r.Ok) return Fail<string>(r.Code);
         var bytes = r.Body.GetProperty("contentBase64").GetBytesFromBase64();
         try { return new("Ok", StrictUtf8.GetString(bytes)); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+
+    // Text of 256 KiB to 1 MiB, one 512 KiB segment per request (ReadTextPart). Binary is NotText; larger, LimitExceeded.
+    private async Task<VaultResult<string>> ReadTextPartsAsync(Guid projectId, Guid fileId, Guid revisionId, CancellationToken ct)
+    {
+        byte[]? all = null;
+        try
+        {
+            long offset = 0;
+            do
+            {
+                var r = await client!.CallAsync("ReadTextPart", w =>
+                {
+                    w.WriteString("projectId", projectId.ToString("D")); w.WriteString("fileId", fileId.ToString("D"));
+                    w.WriteString("revisionId", revisionId.ToString("D")); w.WriteNumber("offset", offset);
+                }, null, ct).ConfigureAwait(false);
+                if (!r.Ok) return Fail<string>(r.Code);
+                long length = r.Body.GetProperty("length").GetInt64();
+                if (length > MaxEditorTextBytes || (all is not null && length != all.Length)) return Fail<string>("LimitExceeded");
+                all ??= new byte[length];
+                var part = r.Body.GetProperty("dataBase64").GetBytesFromBase64();
+                try
+                {
+                    if (part.Length == 0 && length > 0 || offset + part.Length > length) return Fail<string>("Unavailable");
+                    part.CopyTo(all, offset);
+                    offset += part.Length;
+                }
+                finally { CryptographicOperations.ZeroMemory(part); }
+            }
+            while (offset < all.Length);
+            return new("Ok", StrictUtf8.GetString(all));
+        }
+        catch (DecoderFallbackException) { return Fail<string>("NotText"); }
+        finally { if (all is not null) CryptographicOperations.ZeroMemory(all); }
     }
 
     /// <summary>Plain-text search across the project's saved files, done by the service (at most 500 matches).</summary>
@@ -191,7 +254,8 @@ public sealed class EditorVaultController : IDisposable
         return new("Ok", new SearchResult(r.Body.GetProperty("matches").EnumerateArray().Select(e => new SearchMatch(
             Guid.Parse(e.GetProperty("fileId").GetString()!), e.GetProperty("name").GetString()!, e.GetProperty("line").GetInt32(),
             e.GetProperty("column").GetInt32(), e.GetProperty("length").GetInt32(), e.GetProperty("preview").GetString()!, e.GetProperty("previewOffset").GetInt32())).ToList(),
-            r.Body.GetProperty("truncated").GetBoolean(), r.Body.GetProperty("filesSearched").GetInt32()));
+            r.Body.GetProperty("truncated").GetBoolean(), r.Body.GetProperty("filesSearched").GetInt32(),
+            r.Body.TryGetProperty("filesSkipped", out var skipped) ? skipped.GetInt32() : 0)); // binary or over 16 MiB
     });
 
     public Task<VaultResult<IReadOnlyList<DeletedSummary>>> ListDeletedAsync(Guid projectId, CancellationToken ct = default) => Guarded(async () =>
@@ -199,9 +263,9 @@ public sealed class EditorVaultController : IDisposable
         var r = await client!.CallAsync("ListDeletedFiles", w => w.WriteString("projectId", projectId.ToString("D")), null, ct).ConfigureAwait(false);
         if (!r.Ok) return Fail<IReadOnlyList<DeletedSummary>>(r.Code);
         return new("Ok", r.Body.GetProperty("files").EnumerateArray().Select(e => new DeletedSummary(
-            Guid.Parse(e.GetProperty("fileId").GetString()!), e.GetProperty("name").GetString()!, e.GetProperty("byteLength").GetInt32(),
+            Guid.Parse(e.GetProperty("fileId").GetString()!), e.GetProperty("name").GetString()!, e.GetProperty("byteLength").GetInt64(),
             DateTimeOffset.Parse(e.GetProperty("deletedAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
-            e.GetProperty("deletedBy").ValueKind == JsonValueKind.Null ? null : e.GetProperty("deletedBy").GetString())).ToList());
+            e.GetProperty("deletedBy").ValueKind == JsonValueKind.Null ? null : e.GetProperty("deletedBy").GetString(), KindOf(e))).ToList());
     });
 
     /// <summary>Restores a deleted file under <paramref name="name"/> (its old name or a new one).</summary>
@@ -219,7 +283,11 @@ public sealed class EditorVaultController : IDisposable
         if (!list.Ok) return Fail<MergeSources>(list.Code);
         var file = list.Value!.Files.FirstOrDefault(f => f.FileId == fileId);
         if (file is null) return Fail<MergeSources>("NotFound");
+        // Binary or over 1 MiB on either side: no text merge, only keep mine (save over theirs) or keep theirs.
+        var notMergeable = new VaultResult<MergeSources>("Ok", new MergeSources(null, null, file.RevisionId, Mergeable: false));
+        if (!file.Openable) return notMergeable;
         var baseText = await OpenRevisionCoreAsync(projectId, fileId, basedOn, ct).ConfigureAwait(false);
+        if (baseText.Code is "NotText" or "LimitExceeded") return notMergeable;
         if (!baseText.Ok) return Fail<MergeSources>(baseText.Code);
         var theirs = await OpenRevisionCoreAsync(projectId, fileId, file.RevisionId, ct).ConfigureAwait(false);
         if (!theirs.Ok) return Fail<MergeSources>(theirs.Code);
@@ -317,6 +385,16 @@ public sealed class EditorVaultController : IDisposable
             if (!list.Ok) return Fail<OpenedDocument>(list.Code);
             var file = list.Value!.Files.FirstOrDefault(f => f.FileId == fileId);
             if (file is null) return Fail<OpenedDocument>("NotFound");
+            if (file.Kind != "text") return Fail<OpenedDocument>("NotText");
+            if (file.ByteLength > MaxEditorTextBytes) return Fail<OpenedDocument>("LimitExceeded");
+            if (file.ByteLength > InlineBytes)
+            {
+                // The revision id pins the content, so no snapshot check is needed between the parts.
+                var text = await ReadTextPartsAsync(projectId, fileId, file.RevisionId, ct).ConfigureAwait(false);
+                if (!text.Ok) return Fail<OpenedDocument>(text.Code);
+                opened[(projectId, fileId)] = file.RevisionId;
+                return new("Ok", new OpenedDocument(file, text.Value!));
+            }
             var r = await client!.CallAsync("OpenDocument", w =>
             {
                 w.WriteString("projectId", projectId.ToString("D")); w.WriteString("fileId", fileId.ToString("D"));
@@ -349,6 +427,20 @@ public sealed class EditorVaultController : IDisposable
         if (bytes is null) return Fail<FileSummary>(code);
         try
         {
+            if (bytes.Length > InlineBytes)
+            {
+                // Over 256 KiB: upload in parts, then commit it as a replacement if this file is still at basedOn.
+                var check = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+                if (!check.Ok) return Fail<FileSummary>(check.Code);
+                var current = check.Value!.Files.FirstOrDefault(f => f.FileId == fileId);
+                if (current is null) return Fail<FileSummary>("NotFound");
+                if (current.RevisionId != basedOn) return Fail<FileSummary>("Conflict");
+                var upload = await UploadAsync(projectId, fileId, bytes.Length, SHA256.HashData(bytes), () => new MemoryStream(bytes, writable: false), ct).ConfigureAwait(false);
+                if (!upload.Ok) return Fail<FileSummary>(upload.Code);
+                var saved = await CommitReplacementAsync(projectId, fileId, upload.Value!, basedOn, ct).ConfigureAwait(false);
+                if (!saved.Ok) await CancelUploadAsync(upload.Value!.Id, ct).ConfigureAwait(false);
+                return saved;
+            }
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
@@ -366,7 +458,7 @@ public sealed class EditorVaultController : IDisposable
                 if (!r.Ok) return Fail<FileSummary>(r.Code);
                 var revision = Guid.Parse(r.Body.GetProperty("revisionId").GetString()!);
                 opened[(projectId, fileId)] = revision;
-                return new("Ok", file with { RevisionId = revision, ByteLength = bytes.Length });
+                return new("Ok", file with { RevisionId = revision, ByteLength = bytes.Length, Kind = "text", Sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)) });
             }
             return Fail<FileSummary>("RevisionConflict");
         }
@@ -380,6 +472,13 @@ public sealed class EditorVaultController : IDisposable
         if (bytes is null) return Fail<FileSummary>(code);
         try
         {
+            if (bytes.Length > InlineBytes)
+            {
+                var added = await AddCoreAsync(projectId, [(name, new DiskFile(name, bytes.Length, () => new MemoryStream(bytes, writable: false)))], ct).ConfigureAwait(false);
+                if (!added.Ok) return Fail<FileSummary>(added.Code);
+                opened[(projectId, added.Value![0].FileId)] = added.Value[0].RevisionId;
+                return new("Ok", added.Value[0]);
+            }
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
@@ -401,11 +500,278 @@ public sealed class EditorVaultController : IDisposable
         finally { CryptographicOperations.ZeroMemory(bytes); }
     });
 
-    /// <summary>Forgets an opened document (tab closed): it is no longer saved or re-checked.</summary>
+    // ---- files the editor doesn't show (binary, or text over 1 MiB), and files from disk -----------------------------
+
+    /// <summary>
+    /// The info panel's file: its listing and its last save. Like opening a document, this records the revision the
+    /// panel shows, so a replacement or revert is a <c>Conflict</c> if someone else changed the file meanwhile.
+    /// </summary>
+    public Task<VaultResult<FileDetails>> FileInfoAsync(Guid projectId, Guid fileId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+        if (!list.Ok) return Fail<FileDetails>(list.Code);
+        var file = list.Value!.Files.FirstOrDefault(f => f.FileId == fileId);
+        if (file is null) return Fail<FileDetails>("NotFound");
+        var history = await client!.CallAsync("ListHistory", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteString("fileId", fileId.ToString("D")); w.WriteNumber("page", 0); }, null, ct).ConfigureAwait(false);
+        if (!history.Ok) return Fail<FileDetails>(history.Code);
+        DateTimeOffset? savedAt = null; string? savedBy = null;
+        foreach (var last in history.Body.GetProperty("revisions").EnumerateArray().Take(1))
+        {
+            if (last.GetProperty("savedAt").ValueKind == JsonValueKind.String) savedAt = DateTimeOffset.Parse(last.GetProperty("savedAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture);
+            if (last.GetProperty("savedBy").ValueKind == JsonValueKind.String) savedBy = last.GetProperty("savedBy").GetString();
+        }
+        opened[(projectId, fileId)] = file.RevisionId;
+        return new("Ok", new FileDetails(file, savedAt, savedBy));
+    });
+
+    /// <summary>
+    /// Replaces a file's content with a file the host read from disk. <c>Conflict</c>: someone else changed it since
+    /// the editor showed it; the upload stays staged for <see cref="KeepMineAsync"/> (or <see cref="KeepTheirsAsync"/>).
+    /// </summary>
+    public Task<VaultResult<FileSummary>> ReplaceFromDiskAsync(Guid projectId, Guid fileId, DiskFile source, CancellationToken ct = default) => Guarded(async () =>
+    {
+        if (source.Length > MaxFileBytes) return Fail<FileSummary>("LimitExceeded");
+        await DiscardPendingAsync(projectId, fileId, ct).ConfigureAwait(false);
+        Guid? basedOn = opened.TryGetValue((projectId, fileId), out var b) ? b : null;
+        var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+        if (!list.Ok) return Fail<FileSummary>(list.Code);
+        if (list.Value!.Files.All(f => f.FileId != fileId)) return Fail<FileSummary>("NotFound");
+        var upload = await UploadFromDiskAsync(projectId, fileId, source, ct).ConfigureAwait(false);
+        if (!upload.Ok) return Fail<FileSummary>(upload.Code);
+        var saved = await CommitReplacementAsync(projectId, fileId, upload.Value!, basedOn, ct).ConfigureAwait(false);
+        if (saved.Code == "Conflict") pending[(projectId, fileId)] = upload.Value!.Id;
+        else if (!saved.Ok) await CancelUploadAsync(upload.Value!.Id, ct).ConfigureAwait(false);
+        return saved;
+    });
+
+    /// <summary>After a replacement conflicted: commits the staged upload over their version (theirs stays in history).</summary>
+    public Task<VaultResult<FileSummary>> KeepMineAsync(Guid projectId, Guid fileId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        if (!pending.Remove((projectId, fileId), out var uploadId)) return Fail<FileSummary>("UploadExpired");
+        var saved = await CommitReplacementAsync(projectId, fileId, new Upload(uploadId, null, null), null, ct).ConfigureAwait(false);
+        if (!saved.Ok) await CancelUploadAsync(uploadId, ct).ConfigureAwait(false);
+        return saved;
+    });
+
+    /// <summary>After a replacement conflicted: discards the staged upload and takes their version as the one shown.</summary>
+    public Task<VaultResult<FileSummary>> KeepTheirsAsync(Guid projectId, Guid fileId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        await DiscardPendingAsync(projectId, fileId, ct).ConfigureAwait(false);
+        var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+        if (!list.Ok) return Fail<FileSummary>(list.Code);
+        var file = list.Value!.Files.FirstOrDefault(f => f.FileId == fileId);
+        if (file is null) return Fail<FileSummary>("NotFound");
+        opened[(projectId, fileId)] = file.RevisionId;
+        return new("Ok", file);
+    });
+
+    /// <summary>
+    /// Adds files the host read from disk under <paramref name="folder"/> ("" for the project root), all in one commit.
+    /// A taken name is <c>AlreadyExists</c> and nothing is added.
+    /// </summary>
+    public Task<VaultResult<IReadOnlyList<FileSummary>>> AddFromDiskAsync(Guid projectId, string folder, IReadOnlyList<DiskFile> files, CancellationToken ct = default) => Guarded(async () =>
+    {
+        if (files.Count is 0 or > MaxAddFiles || files.Any(f => f.Length > MaxFileBytes)) return Fail<IReadOnlyList<FileSummary>>("LimitExceeded");
+        var named = files.Select(f => (folder.Length == 0 ? f.Name : folder + "/" + f.Name, f)).ToList();
+        var added = await AddCoreAsync(projectId, named, ct).ConfigureAwait(false);
+        return added.Ok ? new VaultResult<IReadOnlyList<FileSummary>>("Ok", added.Value) : Fail<IReadOnlyList<FileSummary>>(added.Code);
+    });
+
+    /// <summary>
+    /// Makes a revision from the file's history current again (nothing is re-encrypted or sent here). <c>Conflict</c>:
+    /// the editor shows this file and someone else changed it since.
+    /// </summary>
+    public Task<VaultResult<bool>> RevertFileAsync(Guid projectId, Guid fileId, Guid revisionId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var result = await ProjectChangeAsync(projectId, "RevertFile", files =>
+        {
+            var file = files.FirstOrDefault(f => f.FileId == fileId);
+            if (file is null) return "NotFound";
+            return opened.TryGetValue((projectId, fileId), out var basedOn) && file.RevisionId != basedOn ? "Conflict" : null;
+        }, w => { w.WriteString("fileId", fileId.ToString("D")); w.WriteString("revisionId", revisionId.ToString("D")); }, _ => true, ct).ConfigureAwait(false);
+        if (result.Ok && opened.ContainsKey((projectId, fileId))) opened[(projectId, fileId)] = revisionId; // the file now points at that record
+        return result;
+    });
+
+    /// <summary>Forgets an opened document (tab closed) or info panel: it is no longer saved or re-checked.</summary>
     public void Close(Guid projectId, Guid fileId)
     {
         gate.Wait();
-        try { opened.Remove((projectId, fileId)); } finally { gate.Release(); }
+        try { opened.Remove((projectId, fileId)); pending.Remove((projectId, fileId)); } finally { gate.Release(); } // the service discards a staged upload after 2 idle minutes
+    }
+
+    private sealed record Upload(Guid Id, long? Length, string? Sha256);
+
+    // A file read failure on disk, kept apart from pipe failures (IOException), which lock the session.
+    private sealed class DiskReadException : Exception;
+
+    private async Task<VaultResult<Upload>> UploadFromDiskAsync(Guid projectId, Guid? fileId, DiskFile source, CancellationToken ct)
+    {
+        byte[] sha256;
+        try { sha256 = await Task.Run(() => HashDisk(source), ct).ConfigureAwait(false); }
+        catch (DiskReadException) { return Fail<Upload>("FileUnreadable"); }
+        return await UploadAsync(projectId, fileId, source.Length, sha256, source.Open, ct).ConfigureAwait(false);
+    }
+
+    // First pass over the file: its SHA-256, which the service checks against the bytes of the second pass.
+    private static byte[] HashDisk(DiskFile source)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[PartBytes];
+        try
+        {
+            using var stream = OpenDisk(source.Open);
+            long total = 0;
+            int n;
+            while ((n = ReadDisk(stream, buffer, buffer.Length)) > 0) { hash.AppendData(buffer, 0, n); total += n; }
+            if (total != source.Length) throw new DiskReadException(); // changed since it was chosen
+            return hash.GetHashAndReset();
+        }
+        finally { CryptographicOperations.ZeroMemory(buffer); }
+    }
+
+    private static Stream OpenDisk(Func<Stream> open)
+    {
+        try { return open(); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { throw new DiskReadException(); }
+    }
+
+    // Reads up to count bytes (fewer only at the end of the file).
+    private static int ReadDisk(Stream stream, byte[] buffer, int count)
+    {
+        try
+        {
+            int total = 0, n;
+            while (total < count && (n = stream.Read(buffer, total, count - total)) > 0) total += n;
+            return total;
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new DiskReadException(); }
+    }
+
+    // BeginUpload and its parts. The service checks the SHA-256 at the last byte; a file changed meanwhile is SourceChanged.
+    private async Task<VaultResult<Upload>> UploadAsync(Guid projectId, Guid? fileId, long length, byte[] sha256, Func<Stream> open, CancellationToken ct)
+    {
+        var hex = Convert.ToHexStringLower(sha256);
+        var begun = await client!.CallAsync("BeginUpload", w =>
+        {
+            w.WriteString("projectId", projectId.ToString("D"));
+            if (fileId is { } id) w.WriteString("fileId", id.ToString("D")); else w.WriteNull("fileId");
+            w.WriteNumber("length", length); w.WriteString("sha256", hex);
+        }, null, ct).ConfigureAwait(false);
+        if (!begun.Ok) return Fail<Upload>(begun.Code);
+        var uploadId = Guid.Parse(begun.Body.GetProperty("uploadId").GetString()!);
+        int partBytes = Math.Clamp(begun.Body.GetProperty("partBytes").GetInt32(), 1, PartBytes);
+        if (length == 0) return new("Ok", new Upload(uploadId, length, hex));
+        var buffer = new byte[partBytes];
+        try
+        {
+            using var stream = OpenDisk(open);
+            long offset = 0;
+            while (offset < length)
+            {
+                int n = ReadDisk(stream, buffer, (int)Math.Min(partBytes, length - offset));
+                if (n == 0) { await CancelUploadAsync(uploadId, ct).ConfigureAwait(false); return Fail<Upload>("SourceChanged"); } // shorter than before
+                long at = offset;
+                var sent = await client!.CallAsync("UploadPart", w =>
+                {
+                    w.WriteString("uploadId", uploadId.ToString("D")); w.WriteNumber("offset", at); w.WriteBase64String("dataBase64", buffer.AsSpan(0, n));
+                }, null, ct).ConfigureAwait(false);
+                if (!sent.Ok)
+                {
+                    await CancelUploadAsync(uploadId, ct).ConfigureAwait(false);
+                    return Fail<Upload>(sent.Code == "InvalidRequest" && at + n == length ? "SourceChanged" : sent.Code);
+                }
+                offset += n;
+            }
+            return new("Ok", new Upload(uploadId, length, hex));
+        }
+        catch (DiskReadException)
+        {
+            await CancelUploadAsync(uploadId, ct).ConfigureAwait(false);
+            return Fail<Upload>("FileUnreadable");
+        }
+        finally { CryptographicOperations.ZeroMemory(buffer); }
+    }
+
+    // Commits a staged replacement if the file is still at basedOn (null: whatever is current); retries a racing commit.
+    private async Task<VaultResult<FileSummary>> CommitReplacementAsync(Guid projectId, Guid fileId, Upload upload, Guid? basedOn, CancellationToken ct)
+    {
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+            if (!list.Ok) return Fail<FileSummary>(list.Code);
+            var file = list.Value!.Files.FirstOrDefault(f => f.FileId == fileId);
+            if (file is null) return Fail<FileSummary>("NotFound");
+            if (basedOn is { } b && file.RevisionId != b) return Fail<FileSummary>("Conflict");
+            if (BeforeCommit is not null) await BeforeCommit().ConfigureAwait(false);
+            var r = await CommitUploadsAsync(projectId, list.Value.SnapshotId, [(upload.Id, null)], ct).ConfigureAwait(false);
+            if (r.Code == "RevisionConflict") continue; // the staged upload survives a conflict
+            if (!r.Ok) return Fail<FileSummary>(r.Code == "InvalidRequest" ? "UploadExpired" : r.Code);
+            var (_, revision, kind) = r.Value![0];
+            if (opened.ContainsKey((projectId, fileId))) opened[(projectId, fileId)] = revision;
+            var after = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false); // size and hash as stored
+            return new("Ok", after.Ok && after.Value!.Files.FirstOrDefault(f => f.FileId == fileId) is { } now && now.RevisionId == revision
+                ? now : file with { RevisionId = revision, Kind = kind, ByteLength = upload.Length ?? file.ByteLength, Sha256 = upload.Sha256 });
+        }
+        return Fail<FileSummary>("RevisionConflict");
+    }
+
+    // Uploads every file, then commits them as new files in one snapshot. Any failure discards all the uploads.
+    private async Task<VaultResult<List<FileSummary>>> AddCoreAsync(Guid projectId, IReadOnlyList<(string Name, DiskFile File)> files, CancellationToken ct)
+    {
+        var uploads = new List<Upload>();
+        try
+        {
+            foreach (var (_, file) in files)
+            {
+                var upload = await UploadFromDiskAsync(projectId, null, file, ct).ConfigureAwait(false);
+                if (!upload.Ok) return Fail<List<FileSummary>>(upload.Code);
+                uploads.Add(upload.Value!);
+            }
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                var list = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+                if (!list.Ok) return Fail<List<FileSummary>>(list.Code);
+                var r = await CommitUploadsAsync(projectId, list.Value!.SnapshotId, uploads.Select((u, i) => (u.Id, (string?)files[i].Name)).ToList(), ct).ConfigureAwait(false);
+                if (r.Code == "RevisionConflict") continue;
+                if (!r.Ok) return Fail<List<FileSummary>>(r.Code);
+                var added = r.Value!.Select((c, i) => new FileSummary(c.FileId, files[i].Name, c.RevisionId, uploads[i].Length!.Value, c.Kind, uploads[i].Sha256)).ToList();
+                uploads.Clear(); // committed: nothing to discard
+                return new("Ok", added);
+            }
+            return Fail<List<FileSummary>>("RevisionConflict");
+        }
+        finally
+        {
+            foreach (var upload in uploads) await CancelUploadAsync(upload.Id, ct).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<VaultResult<List<(Guid FileId, Guid RevisionId, string Kind)>>> CommitUploadsAsync(Guid projectId, Guid snapshotId, IReadOnlyList<(Guid UploadId, string? Name)> entries, CancellationToken ct)
+    {
+        var r = await client!.CallAsync("CommitUploads", w =>
+        {
+            w.WriteString("projectId", projectId.ToString("D")); w.WriteString("expectedSnapshotId", snapshotId.ToString("D"));
+            w.WriteStartArray("files");
+            foreach (var (uploadId, name) in entries)
+            {
+                w.WriteStartObject(); w.WriteString("uploadId", uploadId.ToString("D"));
+                if (name is null) w.WriteNull("name"); else w.WriteString("name", name);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+        }, null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<List<(Guid, Guid, string)>>(r.Code);
+        return new("Ok", r.Body.GetProperty("files").EnumerateArray().Select(f => (Guid.Parse(f.GetProperty("fileId").GetString()!),
+            Guid.Parse(f.GetProperty("revisionId").GetString()!), KindOf(f))).ToList());
+    }
+
+    private async Task CancelUploadAsync(Guid uploadId, CancellationToken ct) =>
+        await client!.CallAsync("CancelUpload", w => w.WriteString("uploadId", uploadId.ToString("D")), null, ct).ConfigureAwait(false); // already gone is fine
+
+    private async Task DiscardPendingAsync(Guid projectId, Guid fileId, CancellationToken ct)
+    {
+        if (pending.Remove((projectId, fileId), out var uploadId)) await CancelUploadAsync(uploadId, ct).ConfigureAwait(false);
     }
 
     private sealed record FileListing(Guid SnapshotId, IReadOnlyList<FileSummary> Files);
@@ -416,7 +782,7 @@ public sealed class EditorVaultController : IDisposable
         if (!r.Ok) { await NoteSessionCode(r.Code).ConfigureAwait(false); return Fail<FileListing>(r.Code); }
         return new("Ok", new(Guid.Parse(r.Body.GetProperty("snapshotId").GetString()!), r.Body.GetProperty("files").EnumerateArray()
             .Select(f => new FileSummary(Guid.Parse(f.GetProperty("fileId").GetString()!), f.GetProperty("name").GetString()!,
-                Guid.Parse(f.GetProperty("revisionId").GetString()!), f.GetProperty("byteLength").GetInt32())).ToList()));
+                Guid.Parse(f.GetProperty("revisionId").GetString()!), f.GetProperty("byteLength").GetInt64(), KindOf(f), Sha256Of(f))).ToList()));
     }
 
     // Serializes calls, refuses work while locked, and turns session loss into a lock with a reason.
@@ -449,6 +815,7 @@ public sealed class EditorVaultController : IDisposable
     {
         var current = client;
         client = null;
+        pending.Clear(); // the service discards a connection's uploads when it ends
         bool wasUnlocked = !IsLocked;
         IsLocked = true;
         if (current is not null)
@@ -479,7 +846,7 @@ public sealed class EditorVaultController : IDisposable
         byte[] bytes;
         try { bytes = StrictUtf8.GetBytes(text); }
         catch (EncoderFallbackException) { code = "InvalidRequest"; return null; }
-        if (bytes.Length > SourceVault.Contracts.ProtocolLimits.MaxDocumentBytes) { CryptographicOperations.ZeroMemory(bytes); code = "LimitExceeded"; return null; }
+        if (bytes.Length > MaxEditorTextBytes) { CryptographicOperations.ZeroMemory(bytes); code = "LimitExceeded"; return null; }
         return bytes;
     }
 

@@ -1,6 +1,6 @@
 // Vault mode UI (docs/editor-vault-design.md). The host owns the service connection; this page sees project/file ids,
 // names and the text of files it opens. Nothing here logs or posts document text anywhere but the host bridge.
-import { VaultSession, languageFor as languageOf } from './vault-session.mjs';
+import { VaultSession, languageFor as languageOf, isOpenable, badgeOf, MAX_EDITOR_TEXT_BYTES } from './vault-session.mjs';
 import { resolve } from './merge.mjs';
 import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure } from './shell.mjs';
 import { touchRecent, counterpart, isCFamily, outline } from './workbench.mjs';
@@ -23,7 +23,7 @@ const LOCK_SCREENS = {
   expired: ['SESSION EXPIRED', 'Your vault session expired', 'Sessions end after 5 idle minutes or 30 minutes in total. ' + KEPT],
   closed: ['DISCONNECTED', 'The vault connection closed', KEPT],
 };
-const ACTIONS = { created: 'Created', edited: 'Saved', imported: 'Imported', restored: 'Restored', 'before-history': 'Version when history began' };
+const ACTIONS = { created: 'Created', edited: 'Saved', imported: 'Imported', restored: 'Restored', reverted: 'Reverted', 'before-history': 'Version when history began' };
 const STATE_TEXT = { queued: 'queued', running: 'running', succeeded: 'succeeded', failed: 'failed', timedOut: 'timed out', rejected: 'refused', unavailable: 'could not run' };
 const BUILD_REASONS = {
   ContainerNotRunning: 'the build container is not running', ContainerNotFound: 'the build container does not exist',
@@ -33,12 +33,19 @@ const BUILD_REASONS = {
   TimedOut: 'the build ran longer than allowed and was stopped', Artifacts: 'the output was refused (links, unsafe names, or too large)',
   NotRunning: 'the SourceVault build service is not running', ConfigInvalid: 'the build configuration is invalid; ask your administrator',
   UnknownTarget: 'that build target no longer exists', VaultError: 'the vault could not read the project',
+  SourceUnavailable: 'a file in the vault failed its integrity check while it was copied; nothing was built from it',
+  CopyTimedOut: 'copying the project into the container took longer than 30 minutes',
 };
 const duration = (from, to) => { const s = Math.max(0, (new Date(to) - new Date(from)) / 1000); return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`; };
-const formatBytes = n => n < 1024 ? `${n} bytes` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
+const formatBytes = n => n < 1024 ? `${n} bytes` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MiB` : `${(n / 1073741824).toFixed(2)} GiB`;
 const FAILURES = {
   NotFound: 'That item no longer exists in the vault.',
-  LimitExceeded: 'Files are limited to 256 KiB.',
+  LimitExceeded: 'Over a vault limit: the editor opens and saves text up to 1 MiB; files can be up to 1 GiB, 25,000 files and 8 GiB per project, and the vault keeps 4 GiB of disk free.',
+  NotText: 'That version is binary, so the editor cannot show it.',
+  NotOpenable: 'The editor shows only text up to 1 MiB.',
+  UploadExpired: 'The file you chose is no longer held by the service (it keeps it for 2 minutes). Choose it again.',
+  SourceChanged: 'The file on disk changed while it was being read. Nothing was changed in the vault; try again.',
+  FileUnreadable: 'The editor could not read that file from disk. Nothing was changed in the vault.',
   InvalidRequest: 'The vault rejected that name or content.',
   AlreadyExists: 'That name is already taken (names are not case-sensitive).',
   UnsavedChanges: 'Save or reload the edited files first.',
@@ -61,6 +68,8 @@ export async function startVault(transport, metadata, onSession) {
   let merging = null; // the open merge view: { id, path, segments, conflicts, choices, theirsRevisionId }
   let showDeleted = false, deletedFiles = [], restoring = null; // the deleted-files view; restoring: { fileId, value } when the old path is taken
   let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
+  let info = null; // the info panel of a file the editor doesn't show (binary, or text over 1 MiB): { id, details }
+  const notMergeable = new Map(); // fileId -> their revision, when a conflict can't be merged as text (keep mine / keep theirs)
   // Split editor: two Monaco editors share the models. `focused` is the side that has the keyboard; session.activeId
   // is always the focused side's file and paneIds[other] the file on the other side.
   let editor2 = null, split = false, focused = 0, paneIds = [null, null];
@@ -71,8 +80,10 @@ export async function startVault(transport, metadata, onSession) {
   const active = () => (session.activeId ? session.files.get(session.activeId) : null);
   const focusedEditor = () => (split && focused === 1 ? editor2 : editor);
 
-  document.title = 'SourceVault — Vault editor';
+  const demo = !!metadata.demo; // demo mode: the in-page demo vault, nothing encrypted (shown in red)
+  document.title = demo ? 'SourceVault — DEMO (not encrypted)' : 'SourceVault — Vault editor';
   document.body.classList.add('mode-vault');
+  document.body.classList.toggle('mode-demo', demo);
   relabel(metadata);
 
   async function act(work, after) {
@@ -96,31 +107,38 @@ export async function startVault(transport, metadata, onSession) {
     const [eyebrow, title, detail] = LOCK_SCREENS[session.lockReason] ?? LOCK_SCREENS.closed;
     $('locked-view').hidden = !locked;
     $('locked-eyebrow').textContent = eyebrow; $('locked-title').textContent = title;
-    $('locked-detail').textContent = unlockError ?? detail;
+    $('locked-detail').textContent = unlockError ?? (demo ? `${detail} ${DEMO_NOTE}` : detail);
     $('unlock').disabled = busy;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
-    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging || !!buildsView || !!comparing;
+    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging || !!buildsView || !!comparing || !!(info && session.files.has(info.id));
     if (session.project?.projectId !== recentProject) { recent = []; recentProject = session.project?.projectId ?? null; }
     if (session.activeId && session.activeId !== lastActive) recent = touchRecent(recent, session.activeId);
     lastActive = session.activeId;
     $('workspace-name').textContent = $('breadcrumb-root').textContent = session.project?.name ?? 'No project';
     $('project-heading').textContent = (session.project?.name ?? 'No project').toUpperCase();
-    $('new-file').disabled = $('switch-project').disabled = $('deleted-files').disabled = $('builds').disabled = locked || busy || !hasProject;
+    $('new-file').disabled = $('add-files').disabled = $('switch-project').disabled = $('deleted-files').disabled = $('builds').disabled = locked || busy || !hasProject;
     $('lock').disabled = locked || busy;
 
     $('tabs').replaceChildren(); $('source-files').replaceChildren(); $('root-files').replaceChildren();
     if (hasProject) {
       for (const file of [...session.files.values()].sort((a, b) => a.path.localeCompare(b.path))) {
         const button = document.createElement('button');
-        button.className = `file-button${file.id === session.activeId ? ' active' : ''}`;
+        const shownInfo = !!info && info.id === file.id && !f;
+        button.className = `file-button${file.id === session.activeId || shownInfo ? ' active' : ''}`;
         button.disabled = locked || busy; button.title = file.path;
         const icon = document.createElement('span'); icon.className = 'file-type'; icon.textContent = typeIcon(file.language);
         const label = document.createElement('span'); label.textContent = file.path;
         button.append(icon, label);
+        const badge = badgeOf(file);
+        if (badge && !file.loaded) {
+          const tag = document.createElement('span'); tag.className = 'file-badge'; tag.textContent = badge;
+          tag.title = `${badge === 'binary' ? 'Binary file' : 'Text over 1 MiB'}, ${formatBytes(file.byteLength)}: shown as file details, not in the editor`;
+          button.append(tag);
+        }
         if (file.conflict) { const mark = document.createElement('span'); mark.className = 'file-conflict'; mark.textContent = '!'; mark.setAttribute('aria-label', 'Changed by someone else'); button.append(mark); }
         else if (session.dirty(file.id)) { const dot = document.createElement('span'); dot.className = 'file-dirty'; dot.setAttribute('aria-label', 'Unsaved changes'); button.append(dot); }
-        button.onclick = () => act(async () => { await session.open(file.id); });
+        button.onclick = () => openFile(file.id);
         const more = document.createElement('button'); more.className = 'file-more'; more.textContent = '⋯'; more.disabled = locked || busy;
         more.title = `Actions for ${file.path}`; more.setAttribute('aria-label', `Rename, move or delete ${file.path}`);
         more.setAttribute('aria-expanded', String(fileMenu?.id === file.id));
@@ -142,7 +160,7 @@ export async function startVault(transport, metadata, onSession) {
       }
     }
     $('breadcrumb-file').textContent = f ? f.path : 'No file selected';
-    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : 'Saved in vault';
+    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : demo ? 'Saved in the demo vault · not encrypted' : 'Saved in vault';
     $('conflict-banner').hidden = locked || !f || !f.conflict || keepEditing.has(f.id);
     $('save').disabled = !editor || locked || busy || !f || !session.dirty(f.id);
     const unsaved = locked ? 0 : session.dirtyIds.length;
@@ -153,7 +171,13 @@ export async function startVault(transport, metadata, onSession) {
     $('files-detail').textContent = hasProject ? `${session.files.size} in project` : '—';
     $('language-detail').textContent = $('language-status').textContent = f ? languageLabel(f.language) : '—';
     document.body.classList.toggle('locked', locked);
-    renderHistory(); renderDeleted(); renderMerge(); renderBuilds(); renderCompare(); updateStatusDetails();
+    renderHistory(); renderDeleted(); renderMerge(); renderBuilds(); renderCompare(); renderInfo(); updateStatusDetails();
+    const choice = !!f && notMergeable.has(f.id);
+    $('conflict-text').textContent = choice
+      ? 'Someone else changed this file, and one of the versions is binary or over 1 MiB, so they can\u2019t be merged as text. Keep mine saves your text over theirs; keep theirs discards your edits. The other version stays in History either way.'
+      : 'Someone else changed this file since you opened it. Saving will not overwrite their version.';
+    for (const id of ['conflict-merge', 'conflict-reload', 'conflict-keep']) $(id).hidden = choice;
+    for (const id of ['conflict-mine', 'conflict-theirs']) { $(id).hidden = !choice; $(id).disabled = busy; }
     $('editor-shell').classList.toggle('split', split);
     $('editor-2').hidden = !split;
     $('editor').classList.toggle('focused', split && focused === 0); $('editor-2').classList.toggle('focused', split && focused === 1);
@@ -172,8 +196,8 @@ export async function startVault(transport, metadata, onSession) {
     } else $('cursor-position').textContent = $('indent-status').textContent = $('eol-status').textContent = '';
     const bytes = f?.loaded ? utf8Length(f.text) : null;
     $('size-status').textContent = bytes == null ? '' : formatBytes(bytes);
-    $('size-status').classList.toggle('near-limit', bytes != null && bytes > 0.9 * 256 * 1024);
-    $('size-status').title = bytes != null && bytes > 0.9 * 256 * 1024 ? 'Close to the 256 KiB limit for one file' : 'Files can be up to 256 KiB';
+    $('size-status').classList.toggle('near-limit', bytes != null && bytes > 0.9 * MAX_EDITOR_TEXT_BYTES);
+    $('size-status').title = bytes != null && bytes > 0.9 * MAX_EDITOR_TEXT_BYTES ? 'Close to the 1 MiB limit for text the editor opens and saves' : 'The editor opens and saves text up to 1 MiB';
   }
 
   function renderPicker() {
@@ -229,7 +253,11 @@ export async function startVault(transport, metadata, onSession) {
         const actions = document.createElement('div'); actions.className = 'file-menu';
         actions.append(button('History', () => openHistory(file.id, file.path, file.language)));
         actions.append(button('Rename / move', () => { fileMenu = { id: file.id, mode: 'rename' }; render(); }));
+        const replace = button('Replace from disk…', () => replaceFile(file.id));
+        replace.disabled = busy || session.dirty(file.id) || !!file.deleted;
+        actions.append(replace);
         if (folder) actions.append(button(`Rename folder ${folder}/`, () => { fileMenu = { id: file.id, mode: 'folder' }; render(); }));
+        if (folder) actions.append(button(`Add files from disk to ${folder}/`, () => addFiles(folder)));
         actions.append(button('Delete', () => { fileMenu = { id: file.id, mode: 'delete' }; render(); }, 'danger-text'));
         panel.append(actions);
         break;
@@ -252,7 +280,7 @@ export async function startVault(transport, metadata, onSession) {
         const text = document.createElement('p');
         text.textContent = file.deleted ? `Discard your unsaved version of ${file.path}? Someone else already deleted it.` : session.dirty(file.id) ? `Save or reload ${file.path} before deleting it.` : `Delete ${file.path}? It can be restored later from Deleted files, with its history.`;
         const actions = document.createElement('div'); actions.className = 'delete-actions';
-        const confirm = button('Delete file', () => act(async () => { await session.deleteFile(file.id); dropModel(file.id); fileMenu = null; return `Deleted ${file.path}.`; }), 'danger');
+        const confirm = button('Delete file', () => act(async () => { await session.deleteFile(file.id); dropModel(file.id); fileMenu = null; if (info?.id === file.id) info = null; return `Deleted ${file.path}.`; }), 'danger');
         confirm.disabled = busy || (!file.deleted && session.dirty(file.id));
         actions.append(confirm, button('Cancel', close));
         panel.classList.add('file-panel-danger'); panel.append(text, actions);
@@ -265,9 +293,11 @@ export async function startVault(transport, metadata, onSession) {
   function openHistory(fileId, path, language, deleted = false) {
     act(async () => {
       const first = await session.listHistory(fileId, 0);
-      const latestText = first.revisions.length ? await session.openRevision(fileId, first.revisions[0].revisionId) : '';
+      // Binary or over 1 MiB: nothing to compare with, so versions are listed without a diff.
+      const latest = first.revisions[0];
+      const latestText = !latest ? '' : isOpenable(latest) ? await session.openRevision(fileId, latest.revisionId) : null;
       closeHistory(); closeCompare();
-      history = { fileId, path, language, deleted, revisions: first.revisions, more: first.more, page: 0, selected: null, latestText };
+      history = { fileId, path, language, deleted, revisions: first.revisions, more: first.more, page: 0, selected: null, latestText, confirmRevert: false };
       fileMenu = null; showDeleted = false;
     }, () => renderHistory());
   }
@@ -278,6 +308,15 @@ export async function startVault(transport, metadata, onSession) {
     history = null;
   }
   function selectRevision(revision) {
+    history.confirmRevert = false;
+    if (!isOpenable(revision) || history.latestText == null) {
+      // No diff: a binary or large version, or a current version that is.
+      diffEditor?.setModel(null);
+      for (const model of history.models ?? []) model.dispose();
+      history.models = []; history.selected = revision.revisionId; history.comparable = false;
+      renderHistory();
+      return;
+    }
     act(async () => {
       const text = await session.openRevision(history.fileId, revision.revisionId);
       diffEditor ??= createDiffEditor($('history-diff'), 'Selected version (left) compared with the current saved version (right)');
@@ -288,7 +327,7 @@ export async function startVault(transport, metadata, onSession) {
       const modified = monaco.editor.createModel(history.latestText, 'plaintext');
       history.models = [original, modified];
       diffEditor.setModel({ original, modified });
-      history.selected = revision.revisionId;
+      history.selected = revision.revisionId; history.comparable = true;
     }, () => renderHistory());
   }
   function renderHistory() {
@@ -296,25 +335,53 @@ export async function startVault(transport, metadata, onSession) {
     $('history-view').hidden = !open;
     if (!open) return;
     $('history-title').textContent = history.path + (history.deleted ? ' (deleted)' : '');
-    $('history-caption').textContent = history.selected
-      ? 'Left: the selected version. Right: the current saved version. Read-only.'
-      : 'Choose a version to compare it with the current saved version.';
+    const chosen = history.revisions.find(r => r.revisionId === history.selected);
+    $('history-caption').textContent = !history.selected
+      ? (history.latestText == null ? 'Binary and large versions are listed with their size and SHA-256; they are not shown here.' : 'Choose a version to compare it with the current saved version.')
+      : history.comparable ? 'Left: the selected version. Right: the current saved version. Read-only.' : 'This version can’t be compared here. Revert makes it the current version again.';
+    $('history-diff').hidden = !!history.selected && !history.comparable;
+    $('history-detail').hidden = !history.selected || !!history.comparable;
+    if (chosen && !history.comparable) {
+      $('history-detail').textContent = [
+        `${chosen.kind === 'binary' ? 'Binary' : 'Text'}, ${formatBytes(chosen.byteLength)} (${chosen.byteLength.toLocaleString()} bytes).`,
+        chosen.sha256 ? `SHA-256 ${chosen.sha256}.` : null,
+        !isOpenable(chosen) ? (chosen.kind === 'binary' ? 'Binary versions are not shown or downloaded.' : 'Text over 1 MiB is not opened in the editor.') : 'The current version is binary or over 1 MiB, so there is nothing to compare it with.',
+      ].filter(Boolean).join(' ');
+    }
     const list = $('history-list'); list.replaceChildren();
     for (const revision of history.revisions) {
       const item = document.createElement('li');
       const button = document.createElement('button'); button.className = `history-item${revision.revisionId === history.selected ? ' active' : ''}`; button.disabled = busy;
       const when = document.createElement('strong'); when.textContent = revision.savedAt ? new Date(revision.savedAt).toLocaleString() : 'Before history began';
       const detail = document.createElement('span');
-      detail.textContent = [ACTIONS[revision.action] ?? revision.action, revision.savedBy, `${revision.byteLength.toLocaleString()} bytes`, revision.name !== history.path ? `as ${revision.name}` : null].filter(Boolean).join(' · ');
+      detail.textContent = [ACTIONS[revision.action] ?? revision.action, revision.savedBy, `${revision.byteLength.toLocaleString()} bytes`, badgeOf(revision),
+        revision.sha256 && !isOpenable(revision) ? `SHA-256 ${revision.sha256.slice(0, 12)}…` : null, revision.name !== history.path ? `as ${revision.name}` : null].filter(Boolean).join(' · ');
       button.append(when, detail);
       button.onclick = () => selectRevision(revision);
       item.append(button); list.append(item);
     }
     $('history-more').hidden = !history.more;
     const file = session.files.get(history.fileId);
+    // Text: restore puts the old text in the editor. Anything else: revert makes the old version current (with a confirmation).
+    const textRestore = !history.selected || (!!history.comparable && !!file && isOpenable(file));
+    $('history-restore').hidden = !textRestore; $('history-revert').hidden = textRestore;
     $('history-restore').disabled = busy || !history.selected || history.deleted || !file;
     $('history-restore').title = history.deleted ? 'Restore the deleted file first (Deleted files).' : 'Put this version into the editor as unsaved edits';
+    $('history-revert').disabled = busy || history.deleted || !file || (chosen && chosen.revisionId === history.revisions[0]?.revisionId);
+    $('history-revert').textContent = history.confirmRevert ? 'Yes, make it current' : 'Revert to this version';
+    $('history-revert').title = history.deleted ? 'Restore the deleted file first (Deleted files).' : 'Make this version the current one again. The current version stays in history.';
   }
+  $('history-revert').onclick = () => {
+    if (!history?.selected) return;
+    if (!history.confirmRevert) { history.confirmRevert = true; renderHistory(); announce('Make this version current again? The version it replaces stays in history. Choose again to confirm.'); return; }
+    const { fileId, selected, path } = history;
+    act(async () => {
+      await session.revertFile(fileId, selected);
+      closeHistory();
+      if (info?.id === fileId) info.details = await session.info(fileId);
+      return `Reverted ${path} to the chosen version. The version it replaced is still in its history.`;
+    });
+  };
   $('history-close').onclick = () => { closeHistory(); render(); };
   $('history-more').onclick = () => act(async () => {
     const next = await session.listHistory(history.fileId, history.page + 1);
@@ -337,6 +404,10 @@ export async function startVault(transport, metadata, onSession) {
     if (!f || session.locked) return;
     act(async () => {
       const result = await session.prepareMerge(f.id);
+      if (!result.mergeable) {
+        notMergeable.set(f.id, result.theirsRevisionId);
+        return 'These versions can\u2019t be merged as text (binary or over 1 MiB). Choose keep mine or keep theirs.';
+      }
       if (result.conflicts === 0) {
         session.applyMerge(f.id, resolve(result.segments, []), result.theirsRevisionId);
         keepEditing.delete(f.id);
@@ -381,6 +452,26 @@ export async function startVault(transport, metadata, onSession) {
     }
   }
   $('conflict-merge').onclick = startMerge;
+  $('conflict-mine').onclick = () => {
+    const f = active();
+    if (!f || !notMergeable.has(f.id) || session.locked) return;
+    act(async () => {
+      session.applyMerge(f.id, f.text, notMergeable.get(f.id)); // saved on top of their version, if it is still current
+      notMergeable.delete(f.id); keepEditing.delete(f.id);
+      await session.save(f.id);
+      return `Saved your version of ${f.path} over theirs. Theirs is in History.`;
+    });
+  };
+  $('conflict-theirs').onclick = () => {
+    const f = active();
+    if (!f || !notMergeable.has(f.id) || session.locked) return;
+    let shown = true;
+    act(async () => {
+      shown = await session.reload(f.id);
+      notMergeable.delete(f.id); keepEditing.delete(f.id);
+      return shown ? `Took their version of ${f.path}; your edits were discarded.` : `Took their version of ${f.path}; your edits were discarded. It is binary or over 1 MiB, so its details are shown.`;
+    }, () => { if (!shown) openInfo(f.id); });
+  };
   $('merge-cancel').onclick = () => { merging = null; render(); announce('Merge cancelled. Your edits are unchanged.'); };
   $('merge-apply').onclick = () => {
     if (!merging || merging.choices.some(c => !c)) return;
@@ -437,7 +528,9 @@ export async function startVault(transport, metadata, onSession) {
     $('builds-view').hidden = !open;
     if (!open) return;
     $('builds-title').textContent = `Builds of ${session.project.name}`;
-    $('builds-caption').textContent = buildsView.note ?? 'Builds use the saved files in the vault (not unsaved edits). Output files go to the folder your administrator set; the build log stays encrypted here.';
+    $('builds-caption').textContent = buildsView.note ?? (demo
+      ? 'Demo builds are simulated: nothing is compiled, no container runs and no output files are written. The log below is made up.'
+      : 'Builds use the saved files in the vault (not unsaved edits). Output files go to the folder your administrator set; the build log stays encrypted here.');
     const select = $('build-target');
     if (select.options.length !== buildsView.targets.length) {
       select.replaceChildren(...buildsView.targets.map(t => { const o = document.createElement('option'); o.value = o.textContent = t; return o; }));
@@ -491,7 +584,7 @@ export async function startVault(transport, metadata, onSession) {
       const row = document.createElement('div'); row.className = 'project-row';
       const info = document.createElement('div'); info.className = 'project-option deleted-option';
       const name = document.createElement('strong'); name.textContent = file.name;
-      const when = document.createElement('span'); when.textContent = `deleted ${new Date(file.deletedAt).toLocaleString()}${file.deletedBy ? ` by ${file.deletedBy}` : ''}`;
+      const when = document.createElement('span'); when.textContent = `${file.kind === 'binary' ? 'binary · ' : ''}deleted ${new Date(file.deletedAt).toLocaleString()}${file.deletedBy ? ` by ${file.deletedBy}` : ''}`;
       info.append(name, when);
       const historyButton = document.createElement('button'); historyButton.className = 'project-delete'; historyButton.textContent = 'History'; historyButton.disabled = busy;
       historyButton.onclick = () => openHistory(file.fileId, file.name, languageOf(file.name), true);
@@ -573,8 +666,11 @@ export async function startVault(transport, metadata, onSession) {
   }
 
   // ---- Monaco models: one per opened file; hidden (not disposed) while locked ------------------------------------
+  // Models of files the session unloaded (their version became binary or over 1 MiB).
+  function dropStaleModels() { for (const id of [...models.keys()]) if (!session.files.get(id)?.loaded) dropModel(id); }
   function syncModel() {
     if (!editor) return;
+    dropStaleModels();
     for (const id of session.openIds) {
       const file = session.files.get(id);
       if (!file?.loaded) continue;
@@ -616,6 +712,7 @@ export async function startVault(transport, metadata, onSession) {
     editor?.setModel(null); editor2?.setModel(null);
     for (const id of [...models.keys()]) dropModel(id);
     split = false; focused = 0; paneIds = [null, null];
+    info = null; notMergeable.clear();
     closeCompare(); wb.onLock();
   }
 
@@ -624,29 +721,111 @@ export async function startVault(transport, metadata, onSession) {
     act(async () => {
       try { var changed = await session.unlock(); unlockError = null; }
       catch (e) { unlockError = UNLOCK_FAILURES[e?.code] ?? `Could not connect to the vault (${e?.code ?? 'InternalError'}).`; return 'Still locked.'; }
-      for (const id of changed) keepEditing.delete(id);
-      return changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : 'Connected to the vault.';
+      for (const id of changed) { keepEditing.delete(id); notMergeable.delete(id); }
+      if (info) { try { info.details = await session.info(info.id); } catch (e) { if (e?.code !== 'NotFound') throw e; info = null; } }
+      return changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : demo ? 'Demo vault ready (simulated, not encrypted).' : 'Connected to the vault.';
     }, () => { wb.renderSearch(); if (!session.locked && !session.project) $('new-project-name').focus(); });
   }
   function save() {
     const f = active();
     if (!f || session.locked || !session.dirty(f.id)) return;
     if (f.deleted) { act(async () => { await session.saveAsNew(f.id); dropModel(f.id); return `${f.path} was deleted by someone else; saved your version as a new file.`; }); return; }
-    act(async () => (await session.save(f.id)) ? `Saved ${f.path} to the vault as a new encrypted revision.` : 'No unsaved edits.');
+    act(async () => (await session.save(f.id)) ? (demo ? `Saved ${f.path} to the demo vault (in memory, not encrypted).` : `Saved ${f.path} to the vault as a new encrypted revision.`) : 'No unsaved edits.');
   }
   // ---- workbench: open and reveal, compare with saved, save all, split, focus mode, header/source --------------
   const available = () => !!editor && !session.locked && !!session.project && !picking;
   /** Opens a file on the focused side; `match` ({ line, column, length }) selects a search result in it. */
   function openFile(id, match) {
     if (!session.files.has(id)) { announce('That file is no longer in the project.'); return; }
+    const file = session.files.get(id);
+    if (!file.loaded && !isOpenable(file)) { openInfo(id); return; }
     closeHistory(); closeBuilds(); closeCompare(); showDeleted = false; fileMenu = null;
-    act(async () => { await session.open(id); }, () => {
+    act(async () => { await closeInfo(); await session.open(id); }, () => {
       const ed = focusedEditor();
       if (!match || !ed?.getModel()) return;
       const range = new monaco.Range(match.line, match.column, match.line, match.column + match.length);
       ed.setSelection(range); ed.revealRangeInCenterIfOutsideViewport(range); ed.focus();
     });
   }
+  // ---- info panel: files the editor doesn't show (binary, or text over 1 MiB) --------------------------------------
+  // Name, kind, size, last change and SHA-256; rename, delete, history, replace from disk. Never the content.
+  function openInfo(id) {
+    closeHistory(); closeBuilds(); closeCompare(); showDeleted = false; merging = null; fileMenu = null;
+    act(async () => {
+      if (info?.id !== id) await closeInfo();
+      info = { id, details: await session.info(id) };
+      session.activeId = null; // the editor shows nothing while the panel is open
+    });
+  }
+  async function closeInfo() {
+    const was = info;
+    info = null;
+    if (was && !session.locked) await session.closeInfo(was.id);
+  }
+  function renderInfo() {
+    const file = info && session.files.get(info.id);
+    if (info && !file && !busy) info = null; // deleted
+    const open = !!file && !session.locked && !picking && !!session.project && !history && !showDeleted && !merging && !buildsView && !comparing && !active();
+    $('info-view').hidden = !open;
+    if (!open) return;
+    const d = info.details, badge = badgeOf(file);
+    $('info-eyebrow').textContent = badge === 'binary' ? 'BINARY FILE' : badge === 'large' ? 'LARGE TEXT FILE' : 'FILE';
+    $('info-title').textContent = file.path;
+    $('info-caption').textContent = (badge === 'binary'
+      ? `Binary files are stored${demo ? '' : ' encrypted'}, versioned and included in builds. The editor never shows or downloads them.`
+      : badge === 'large' ? `Text over 1 MiB is stored${demo ? '' : ' encrypted'}, versioned, searched and included in builds, but not opened in the editor.`
+      : 'This file opens in the editor.') + (demo ? ' Demo: “from disk” makes up a file; nothing is read from this computer.' : '');
+    const list = $('info-details'); list.replaceChildren();
+    const row = (label, value) => { const dt = document.createElement('dt'); dt.textContent = label; const dd = document.createElement('dd'); dd.append(value); list.append(dt, dd); };
+    row('Kind', file.kind === 'binary' ? 'Binary' : 'Text');
+    row('Size', `${formatBytes(file.byteLength)} (${file.byteLength.toLocaleString()} bytes)`);
+    row('Last change', [d?.savedAt ? new Date(d.savedAt).toLocaleString() : 'Before history began', d?.savedBy].filter(Boolean).join(' · '));
+    const hash = document.createElement('code'); hash.textContent = file.sha256 ?? 'not recorded (saved before any-file storage)';
+    row('SHA-256', hash);
+    $('info-conflict').hidden = !file.pending;
+    for (const id of ['info-replace', 'info-history', 'info-rename', 'info-delete', 'info-close']) $(id).disabled = busy || file.pending;
+    for (const id of ['info-mine', 'info-theirs']) $(id).disabled = busy;
+  }
+  function replaceFile(id) {
+    const file = session.files.get(id);
+    if (!file) return;
+    if (session.dirty(id)) { announce(`Save or reload ${file.path} before replacing it.`); return; }
+    act(async () => {
+      try {
+        if (!(await session.replaceFromDisk(id))) return 'Nothing was chosen. The file is unchanged.';
+      } catch (e) {
+        if (e?.code === 'Conflict' && !session.locked) {
+          // The choice is made in the info panel (an open text file's tab stays open behind it).
+          fileMenu = null; info = { id, details: info?.id === id ? info.details : null }; session.activeId = null;
+          return `Someone else changed ${file.path} meanwhile. Choose keep mine or keep theirs.`;
+        }
+        throw e;
+      }
+      fileMenu = null;
+      dropStaleModels();
+      if (info?.id === id || !file.loaded) info = { id, details: await session.info(id) };
+      return demo ? `Replaced ${file.path} with a made-up demo file (${formatBytes(file.byteLength)}). Nothing was read from this computer.` : `Replaced ${file.path} with the chosen file (${formatBytes(file.byteLength)}), encrypted as a new revision.`;
+    });
+  }
+  function addFiles(folder) {
+    act(async () => {
+      const names = await session.addFromDisk(folder);
+      fileMenu = null;
+      if (!names.length) return 'Nothing was chosen.';
+      const where = folder ? ` to ${folder}/` : '';
+      return demo ? `Added ${names.length} made-up demo file${names.length === 1 ? '' : 's'}${where}: ${names.join(', ')}.`
+        : `Added ${names.length} file${names.length === 1 ? '' : 's'}${where}, encrypted in the vault: ${names.slice(0, 5).join(', ')}${names.length > 5 ? '…' : ''}.`;
+    });
+  }
+  $('add-files').onclick = () => addFiles('');
+  $('info-replace').onclick = () => info && replaceFile(info.id);
+  $('info-history').onclick = () => { const file = info && session.files.get(info.id); if (file) openHistory(file.id, file.path, file.language); };
+  $('info-rename').onclick = () => { if (info) { fileMenu = { id: info.id, mode: 'rename' }; render(); } };
+  $('info-delete').onclick = () => { if (info) { fileMenu = { id: info.id, mode: 'delete' }; render(); } };
+  $('info-close').onclick = () => act(async () => { await closeInfo(); });
+  $('info-mine').onclick = () => { const id = info?.id; if (id) act(async () => { await session.keepMine(id); dropStaleModels(); info = { id, details: await session.info(id) }; return 'Kept your file. Their version is in History.'; }); };
+  $('info-theirs').onclick = () => { const id = info?.id; if (id) act(async () => { await session.keepTheirs(id); info = { id, details: await session.info(id) }; return 'Kept their version. Your file was discarded.'; }); };
+
   function goToLine(n) {
     const ed = focusedEditor(), model = ed?.getModel();
     if (!model) { announce('Open a file first.'); return; }
@@ -726,7 +905,7 @@ export async function startVault(transport, metadata, onSession) {
     if (!split) {
       if (!session.activeId) { announce('Open a file first.'); return; }
       if (!editor2) {
-        editor2 = createEditor('Vault source editor, right side. Saved changes become encrypted revisions in the vault.', $('editor-2'));
+        editor2 = createEditor(demo ? 'Demo editor, right side. Nothing is encrypted.' : 'Vault source editor, right side. Saved changes become encrypted revisions in the vault.', $('editor-2'));
         wireEditor(editor2, 1);
       }
       split = true; $('editor-2').hidden = false;
@@ -771,7 +950,7 @@ export async function startVault(transport, metadata, onSession) {
     if (sidebar === 'search') wb.renderSearch();
   }
 
-  const THEMES = { dark: 'sourcevault', light: 'vs', highContrast: 'hc-black' };
+  const THEMES = { dark: demo ? 'sourcevault-demo' : 'sourcevault', light: 'vs', highContrast: 'hc-black' };
   function applySettings(s, retab) {
     if (!editor) return;
     monaco.editor.setTheme(THEMES[s.theme] ?? 'sourcevault');
@@ -840,11 +1019,19 @@ export async function startVault(transport, metadata, onSession) {
   $('unlock').onclick = unlock;
   $('lock').onclick = () => act(async () => { await session.lock(); return 'Locked. The service session ended; unsaved edits are kept in this editor.'; });
   $('save').onclick = save;
-  $('conflict-reload').onclick = () => { const f = active(); if (f) act(async () => { await session.reload(f.id); keepEditing.delete(f.id); return `Reloaded ${f.path}: your unsaved edits were discarded.`; }); };
+  $('conflict-reload').onclick = () => {
+    const f = active();
+    if (!f) return;
+    let shown = true;
+    act(async () => {
+      shown = await session.reload(f.id); keepEditing.delete(f.id);
+      return shown ? `Reloaded ${f.path}: your unsaved edits were discarded.` : `Reloaded ${f.path}: your unsaved edits were discarded. Their version is binary or over 1 MiB, so its details are shown.`;
+    }, () => { if (!shown) openInfo(f.id); });
+  };
   $('conflict-keep').onclick = () => { const f = active(); if (f) { keepEditing.add(f.id); render(); announce('Keeping your edits. Saving will still conflict; reload to take their version.'); } };
   $('switch-project').onclick = () => {
     if (session.dirtyIds.length) { announce(FAILURES.UnsavedChanges); return; }
-    act(async () => { await session.refreshProjects(); closeHistory(); closeBuilds(); showDeleted = false; merging = null; picking = true; });
+    act(async () => { await session.refreshProjects(); await closeInfo(); closeHistory(); closeBuilds(); showDeleted = false; merging = null; picking = true; });
   };
   $('new-file').onclick = () => { $('new-file-form').hidden = false; $('new-file-name').value = ''; $('new-file-name').focus(); };
   $('new-file-form').onsubmit = event => {
@@ -861,7 +1048,7 @@ export async function startVault(transport, metadata, onSession) {
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); showDeleted = false; merging = null; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); showDeleted = false; merging = null; notMergeable.clear(); render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
   wireChrome(focusedEditor, { onSave: save, isLocked: () => session.locked, skipKey: event => chordKeys.has(event) });
   // In vault mode the rail's search button searches all files (Ctrl+F still finds in the open file).
@@ -874,7 +1061,7 @@ export async function startVault(transport, metadata, onSession) {
   try {
     await loadMonaco();
     registerOutlines();
-    editor = createEditor('Vault source editor. Saved changes become encrypted revisions in the vault.');
+    editor = createEditor(demo ? 'Demo editor. Nothing is encrypted.' : 'Vault source editor. Saved changes become encrypted revisions in the vault.');
     wireEditor(editor, 0);
     await wb.loadSettings(); // display preferences: available before unlocking
     $('loading').hidden = true;
@@ -904,32 +1091,41 @@ function registerOutlines() {
     monaco.languages.registerDocumentSymbolProvider(language, { displayName: 'SourceVault outline', provideDocumentSymbols: model => outline(language, model.getValue()).map(toSymbol) });
 }
 
+const DEMO_NOTE = 'DEMO: nothing here is encrypted and no vault is connected. Use made-up code only.';
+
 function relabel(metadata) {
-  const fake = !!metadata.fake;
-  $('mode-badge').textContent = fake ? 'Vault · fake host' : 'Vault';
+  const demo = !!metadata.demo;
+  $('mode-badge').textContent = demo ? 'DEMO · NOT ENCRYPTED' : 'Vault';
+  $('demo-banner').hidden = $('demo-status').hidden = !demo;
   $('vault-explorer-actions').hidden = false;
   $('settings-button').hidden = $('shortcuts-button').hidden = false;
   $('find').title = 'Search all files (Ctrl+Shift+F). Ctrl+F finds in the open file.'; $('find').setAttribute('aria-label', 'Search all files');
   $('new-file-name').placeholder = 'src/name.cpp';
   $('folder-row').hidden = true;
-  $('explorer-note-label').textContent = fake ? 'FAKE HOST' : 'VAULT';
-  $('explorer-note-text').textContent = fake
-    ? 'Browser review only. Nothing is encrypted and no service is connected.'
+  $('explorer-note-label').textContent = demo ? 'DEMO · NOT ENCRYPTED' : 'VAULT';
+  $('explorer-note-text').textContent = demo
+    ? 'Demo projects live only in this window’s memory and are gone when it closes. Nothing is encrypted; what you type can be left on this computer or captured on screen.'
     : 'Encrypted at rest by the SourceVault service. Text is decrypted only for files you open.';
   $('save-label').textContent = 'Save';
-  $('save').title = 'Save to the vault as a new encrypted revision (Ctrl+S)';
+  $('save').title = demo ? 'Save to the demo vault: in memory, NOT encrypted (Ctrl+S)' : 'Save to the vault as a new encrypted revision (Ctrl+S)';
   $('no-file-title').textContent = 'Choose a file';
   $('no-file-detail').textContent = 'Open a file from the explorer, or create one with + New file.';
   $('unlock-label').textContent = 'Unlock vault';
-  $('session-title').textContent = fake ? 'Fake host' : 'SourceVault service';
-  $('session-subtitle').textContent = fake ? 'Browser review · no encryption' : 'TPM-protected key · operator session';
-  $('source-detail').textContent = fake ? 'Fake host' : 'Vault';
-  $('capture-detail').textContent = metadata.captureExclusion ? 'Excluded (best effort)' : 'Allowed';
+  $('session-title').textContent = demo ? 'Demo vault (simulated)' : 'SourceVault service';
+  $('session-subtitle').textContent = demo ? 'No service · no TPM key · no encryption' : 'TPM-protected key · operator session';
+  $('source-detail').textContent = demo ? 'Demo, in memory' : 'Vault';
+  $('capture-detail').textContent = metadata.captureExclusion ? 'Excluded (best effort)' : demo ? 'Allowed (demo)' : 'Allowed';
   $('revision-label').textContent = 'SAVED THIS SESSION';
-  $('revision-copy').textContent = 'Each save is a new immutable revision in the vault.';
-  $('memory-text').textContent = fake ? 'Not encrypted' : 'Encrypted at rest';
-  $('boundary-title').textContent = 'Vault editor';
-  $('boundary-text').textContent = 'Text of open files lives in this editor’s memory. Screen-capture exclusion is best effort. Builds are not connected.';
+  $('revision-copy').textContent = demo ? 'Each save is a new revision in the demo vault, in memory and not encrypted.' : 'Each save is a new immutable revision in the vault.';
+  $('memory-text').textContent = demo ? 'NOT ENCRYPTED' : 'Encrypted at rest';
+  $('boundary-title').textContent = demo ? 'Demo: spillage can happen' : 'Vault editor';
+  $('boundary-text').textContent = demo
+    ? 'Nothing typed here is protected. It stays in memory, can reach the page file or crash data, and this window can be screen-captured and shared. Do not type real source code.'
+    : 'Text of open files lives in this editor’s memory. Screen-capture exclusion is best effort. Builds are not connected.';
+  if (demo) {
+    document.querySelector('#settings-dialog .dialog-note').textContent = 'Demo: these choices are kept only until the editor closes. Only display choices, never file names or text.';
+    $('project-picker').querySelector('.eyebrow').textContent = 'DEMO PROJECTS · NOT ENCRYPTED';
+  }
   $('reset').hidden = true;
-  $('activity-message').textContent = 'Vault mode.';
+  $('activity-message').textContent = demo ? 'Demo mode. Nothing is encrypted.' : 'Vault mode.';
 }

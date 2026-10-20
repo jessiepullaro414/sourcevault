@@ -16,9 +16,44 @@ internal sealed class ConnectionState
     internal bool Closed; // terminal: expired, ended, revoked or rejected
     internal uint WindowsSession;
     internal string? Actor; // the operator's account name, recorded in encrypted file history
-    internal byte[]? Upload; // a package being uploaded (ciphertext), at most one per connection
-    internal int UploadReceived;
+    // A package being uploaded, at most one per connection: spooled to staging\ as it arrives (ciphertext), hashed on the way.
+    internal FileStream? PackageSpool;
+    internal string? PackageFolder;
+    internal IncrementalHash? PackageHash;
+    internal long PackageLength, UploadReceived;
     internal Action? OnClose; // releases an upload's service-wide slot when the connection closes
+    // File uploads in parts (docs/vault-any-file-design.md section 3.2): ciphertext in this connection's staging folder.
+    internal readonly Dictionary<Guid, FileUpload> FileUploads = new();
+    internal string? StagingFolder;
+
+    /// <summary>Discards every file upload of this connection and its staging folder (close, end or expiry).</summary>
+    internal void DiscardUploads()
+    {
+        lock (FileUploads)
+        {
+            foreach (var upload in FileUploads.Values) upload.Discard();
+            FileUploads.Clear();
+            if (StagingFolder is { } folder) try { Directory.Delete(folder, recursive: true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            StagingFolder = null;
+        }
+    }
+}
+
+/// <summary>One file upload: receiving (parts still arriving) or staged (complete, waiting for CommitUploads).</summary>
+internal sealed class FileUpload(Guid projectId, StoreUpload receiving, long lastActivity)
+{
+    internal Guid ProjectId { get; } = projectId;
+    internal StoreUpload? Receiving { get; private set; } = receiving;
+    internal StagedFile? Staged { get; private set; }
+    internal long LastActivity { get; set; } = lastActivity;
+    internal long Length => Receiving?.Length ?? Staged!.Length;
+    internal void Complete() { Staged = Receiving!.Complete(); Receiving.Dispose(); Receiving = null; }
+    internal void Discard()
+    {
+        Receiving?.Dispose(); Receiving = null; // deletes its unfinished staging file
+        if (Staged is { } staged) try { File.Delete(staged.Path); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        Staged = null;
+    }
 }
 
 internal readonly record struct ProtocolResponse(ArrayBufferWriter<byte> Buffer, bool Close);
@@ -38,6 +73,8 @@ internal sealed class VaultProtocol
     private readonly TimeProvider clock;
     // Projects created or verified in this process. Only the service creates projects, so this is authoritative.
     private readonly ConcurrentDictionary<Guid, bool> projects = new();
+    // Projects that failed VerifyProject: Unavailable until the service restarts and an administrator has looked.
+    private readonly ConcurrentDictionary<Guid, bool> failed = new();
 
     internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null, PackageImports? packages = null)
     {
@@ -98,6 +135,13 @@ internal sealed class VaultProtocol
                 "RestoreFile" => RestoreFile(request, state),
                 "ApplyEdits" => ApplyEdits(request, state),
                 "SearchProject" => SearchProject(request),
+                "BeginUpload" => BeginUpload(request, state, now),
+                "UploadPart" => UploadPart(request, state, now),
+                "CommitUploads" => CommitUploads(request, state, now),
+                "CancelUpload" => CancelUpload(request, state),
+                "ReadTextPart" => ReadTextPart(request),
+                "RevertFile" => RevertFile(request, state),
+                "VerifyProject" => VerifyProject(request),
                 "GetImportRecipient" or "BeginPackageImport" or "PackageImportPart" or "FinishPackageImport" when packages is null => Error(request, "Unavailable"),
                 "GetImportRecipient" => GetImportRecipient(request, packages!),
                 "BeginPackageImport" => BeginPackageImport(request, state, packages!),
@@ -115,6 +159,8 @@ internal sealed class VaultProtocol
         catch (RevisionConflictException) { return Error(request, "RevisionConflict"); }
         catch (KeyNotFoundException) { return Error(request, "NotFound"); }
         catch (NameExistsException) { return Error(request, "AlreadyExists"); }
+        catch (StoreLimitException) { return Error(request, "LimitExceeded"); } // count, size or free space (any-file design)
+        catch (NotTextException) { return Error(request, "NotText"); }
         catch (RequestException e) { return Error(request, e.Code); }
         catch (SourceVault.Build.BuildServiceUnavailableException) { return Error(request, "Unavailable"); }
         // Input is validated before the store is called, so anything the store or catalog rejects here is an
@@ -265,6 +311,7 @@ internal sealed class VaultProtocol
                 w.WriteNumber("byteLength", r.ByteLength);
                 w.WriteString("action", r.Action);
                 w.WriteString("name", r.Name);
+                WriteKind(w, r.Kind, r.Sha256);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
@@ -278,6 +325,7 @@ internal sealed class VaultProtocol
         Require(request.Body, "capability", "projectId", "fileId", "revisionId");
         var store = Project(request.Body);
         var revisionId = Id(request.Body, "revisionId");
+        InlineText(store.Revision(Id(request.Body, "fileId"), revisionId));
         var content = store.OpenRevision(Id(request.Body, "fileId"), revisionId);
         try
         {
@@ -303,6 +351,7 @@ internal sealed class VaultProtocol
                 w.WriteString("fileId", d.FileId.ToString("D"));
                 w.WriteString("name", d.LogicalName);
                 w.WriteNumber("byteLength", d.ByteLength);
+                WriteKind(w, d.Kind, d.Sha256);
                 w.WriteString("deletedAt", d.DeletedAt.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", System.Globalization.CultureInfo.InvariantCulture));
                 if (d.DeletedBy is { } by) w.WriteString("deletedBy", by); else w.WriteNull("deletedBy");
                 w.WriteEndObject();
@@ -407,10 +456,17 @@ internal sealed class VaultProtocol
                 w.WriteString("name", f.LogicalName);
                 w.WriteString("revisionId", f.RevisionId.ToString("D"));
                 w.WriteNumber("byteLength", f.ByteLength);
+                WriteKind(w, f.Kind, f.Sha256);
                 w.WriteEndObject();
             }
             w.WriteEndArray();
-        });
+        }, capacity: 16384 + snapshot.Files.Count * 600);
+    }
+
+    private static void WriteKind(Utf8JsonWriter w, FileKind kind, byte[]? sha256)
+    {
+        w.WriteString("kind", kind == FileKind.Text ? "text" : "binary");
+        if (sha256 is null) w.WriteNull("sha256"); else w.WriteString("sha256", Convert.ToHexStringLower(sha256));
     }
 
     private ProtocolResponse OpenDocument(ParsedRequest request)
@@ -421,7 +477,9 @@ internal sealed class VaultProtocol
         var expected = Id(request.Body, "expectedSnapshotId");
         var snapshot = store.List();
         if (snapshot.SnapshotId != expected) throw new RevisionConflictException();
-        var revision = (snapshot.Files.SingleOrDefault(f => f.FileId == fileId) ?? throw new KeyNotFoundException()).RevisionId;
+        var entry = snapshot.Files.SingleOrDefault(f => f.FileId == fileId) ?? throw new KeyNotFoundException();
+        InlineText(entry);
+        var revision = entry.RevisionId;
         var content = store.Open(expected, fileId); // re-checks the snapshot under the lock: a racing commit conflicts
         try
         {
@@ -444,7 +502,7 @@ internal sealed class VaultProtocol
         var name = Text(request.Body, "name");
         if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest");
         var expected = Id(request.Body, "expectedSnapshotId");
-        var content = Content(request.Body);
+        var content = Content(request.Body, textOnly: false); // any bytes; the store decides text or binary
         try
         {
             var current = store.List();
@@ -485,7 +543,7 @@ internal sealed class VaultProtocol
                 Require(file, "name", "contentBase64");
                 var name = Text(file, "name");
                 if (!RevisionStore.IsValidLogicalName(name)) throw new RequestException("InvalidRequest");
-                documents.Add((name, Content(file)));
+                documents.Add((name, Content(file, textOnly: false)));
             }
             if (documents.Select(d => d.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != documents.Count) throw new RequestException("InvalidRequest");
             var current = store.List();
@@ -506,6 +564,7 @@ internal sealed class VaultProtocol
     // ---- encrypted packages from another computer (docs/package-import-design.md) ---------------------------------
 
     internal const int MaxPackagePartBytes = 512 * 1024;
+    internal const int PackageCommitFiles = 1024; // staged records per commit of a package import
 
     /// <summary>This PC's recipient file (the import key's public half): public, for SourceVault Pack on the other computer.</summary>
     private ProtocolResponse GetImportRecipient(ParsedRequest request, PackageImports packages)
@@ -520,19 +579,37 @@ internal sealed class VaultProtocol
         });
     }
 
-    /// <summary>Starts an upload of <c>length</c> bytes. One per connection, and one at a time across the service.</summary>
+    /// <summary>
+    /// Starts an upload of <c>length</c> bytes, spooled to this connection's folder in staging\ (the package is ciphertext)
+    /// and hashed as it arrives. One per connection, and one at a time across the service.
+    /// </summary>
     private ProtocolResponse BeginPackageImport(ParsedRequest request, ConnectionState state, PackageImports packages)
     {
         Require(request.Body, "capability", "length");
         var value = request.Body.GetProperty("length");
-        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out long length) || length < Package.HeaderBytes + Package.SignatureBytes || state.Upload is not null)
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out long length) || length < Package.HeaderBytes + Package.SignatureBytes || state.PackageSpool is not null)
             throw new RequestException("InvalidRequest");
         if (length > Package.MaxPackageBytes) throw new RequestException("LimitExceeded");
         if (!packages.TryEnter()) throw new RequestException("Unavailable"); // another package import is running
-        state.Upload = new byte[length];
-        state.UploadReceived = 0;
         int released = 0; // the connection closing (another thread) and FinishPackageImport may both release it
-        state.OnClose = () => { if (Interlocked.Exchange(ref released, 1) == 1) return; state.Upload = null; packages.Exit(); };
+        state.OnClose = () =>
+        {
+            if (Interlocked.Exchange(ref released, 1) == 1) return;
+            state.PackageSpool?.Dispose(); state.PackageSpool = null; // DeleteOnClose
+            state.PackageHash?.Dispose(); state.PackageHash = null;
+            if (state.PackageFolder is { } folder) try { Directory.Delete(folder, recursive: true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            state.PackageFolder = null;
+            packages.Exit();
+        };
+        try
+        {
+            state.PackageFolder = catalog.CreateStagingFolder();
+            state.PackageSpool = new FileStream(Path.Combine(state.PackageFolder, "package.svpkg"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 81920, FileOptions.DeleteOnClose);
+            state.PackageHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            state.PackageLength = length;
+            state.UploadReceived = 0;
+        }
+        catch { state.OnClose(); state.OnClose = null; throw; }
         return Ok(request, _ => { });
     }
 
@@ -540,13 +617,16 @@ internal sealed class VaultProtocol
     private ProtocolResponse PackageImportPart(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "offset", "dataBase64");
-        var upload = state.Upload ?? throw new RequestException("InvalidRequest");
+        var spool = state.PackageSpool ?? throw new RequestException("InvalidRequest");
         var offset = request.Body.GetProperty("offset");
         if (offset.ValueKind != JsonValueKind.Number || !offset.TryGetInt64(out long at) || at != state.UploadReceived) throw new RequestException("InvalidRequest");
         var data = request.Body.GetProperty("dataBase64");
         if (data.ValueKind != JsonValueKind.String || !data.TryGetBytesFromBase64(out var bytes) || bytes.Length == 0) throw new RequestException("InvalidRequest");
-        if (bytes.Length > MaxPackagePartBytes || state.UploadReceived + bytes.Length > upload.Length) throw new RequestException("LimitExceeded");
-        bytes.CopyTo(upload, state.UploadReceived);
+        if (bytes.Length > MaxPackagePartBytes || state.UploadReceived + bytes.Length > state.PackageLength) throw new RequestException("LimitExceeded");
+        spool.Write(bytes);
+        // The signature covers everything before its own 256 bytes: hash exactly that, as it arrives.
+        long signedEnd = state.PackageLength - Package.SignatureBytes;
+        if (state.UploadReceived < signedEnd) state.PackageHash!.AppendData(bytes, 0, (int)Math.Min(bytes.Length, signedEnd - state.UploadReceived));
         state.UploadReceived += bytes.Length;
         return Ok(request, w => w.WriteNumber("received", state.UploadReceived));
     }
@@ -561,39 +641,56 @@ internal sealed class VaultProtocol
         try
         {
             Require(request.Body, "capability", "projectName");
-            var upload = state.Upload;
-            if (upload is null || state.UploadReceived != upload.Length) throw new RequestException("InvalidRequest");
+            var spool = state.PackageSpool;
+            if (spool is null || state.UploadReceived != state.PackageLength) throw new RequestException("InvalidRequest");
             var name = Text(request.Body, "projectName");
             try { ProjectCatalog.ValidateProjectName(name); } catch (ArgumentException) { throw new RequestException("InvalidRequest"); }
-            PackageContents contents;
-            try { contents = packages.Open(upload); }
+            spool.Flush(true);
+            PackageReader reader;
+            try { reader = packages.Open(spool, state.PackageHash!.GetHashAndReset()); }
             catch (PackageRejectedException) { throw new RequestException("PackageRejected"); }
             catch (UnknownSenderException) { throw new RequestException("UnknownSender"); }
-            using (contents)
+            using (reader)
             {
-                var sender = packages.RegisteredSender(contents.SenderFingerprint)?.Computer ?? throw new RequestException("UnknownSender");
+                var sender = packages.RegisteredSender(reader.SenderFingerprint)?.Computer ?? throw new RequestException("UnknownSender");
                 var created = catalog.CreateProject(name); // a taken name is AlreadyExists, before anything is written
                 projects[created.ProjectId] = true;
-                StoreSnapshot next;
+                StoreSnapshot next = created.Snapshot;
+                var staged = new List<(string Path, StagedFile File)>();
+                var folder = catalog.CreateStagingFolder();
                 try
                 {
                     var store = catalog.OpenProject(created.ProjectId);
-                    next = store.CommitChanges(created.Snapshot.SnapshotId,
-                        contents.Files.Select(f => (StoreChange)new StoreChange.Write(f.Path, f.Content, "imported")).ToList(), state.Actor);
+                    // Each file streams from the package straight into a staged SVR2 record (one chunk in memory), then the
+                    // records are committed in batches, with the history action "imported".
+                    using (var session = store.BeginImport(folder))
+                    {
+                        StoreUpload? current = null;
+                        try
+                        {
+                            reader.ReadContents(
+                                (entry, piece) => { current ??= session.Begin(entry.Length, entry.Sha256); current.Write(piece); },
+                                entry => { current ??= session.Begin(entry.Length, entry.Sha256); staged.Add((entry.Path, current.Complete())); current.Dispose(); current = null; });
+                        }
+                        finally { current?.Dispose(); }
+                    }
+                    foreach (var batch in staged.Chunk(PackageCommitFiles))
+                        next = store.CommitChanges(next.SnapshotId, batch.Select(s => (StoreChange)new StoreChange.Stage(s.File, s.Path, "imported")).ToList(), state.Actor);
                 }
                 catch (Exception e) when (e is not OutOfMemoryException)
                 {
-                    // All or nothing: remove the empty project again. A file/folder path clash inside the package is the package's fault.
+                    // All or nothing: remove the new project again. A path clash or bad content inside the package is the package's fault.
                     try { catalog.DeleteProject(created.ProjectId, name); projects.TryRemove(created.ProjectId, out _); } catch (Exception cleanup) when (cleanup is not OutOfMemoryException) { }
-                    if (e is NameExistsException) throw new RequestException("PackageRejected");
+                    if (e is NameExistsException or PackageRejectedException) throw new RequestException("PackageRejected");
                     throw;
                 }
+                finally { try { Directory.Delete(folder, recursive: true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } }
                 return Ok(request, w =>
                 {
                     w.WriteString("projectId", created.ProjectId.ToString("D"));
                     w.WriteString("snapshotId", next.SnapshotId.ToString("D"));
-                    w.WriteNumber("imported", contents.Files.Count);
-                    w.WriteString("packageId", contents.PackageId.ToString("D"));
+                    w.WriteNumber("imported", staged.Count);
+                    w.WriteString("packageId", reader.PackageId.ToString("D"));
                     w.WriteString("sender", sender);
                 });
             }
@@ -603,7 +700,7 @@ internal sealed class VaultProtocol
 
     // ---- searching a project (the editor's "Search all files") ---------------------------------------------------
 
-    internal const int MaxSearchMatches = 500, MaxSearchQueryChars = 200, MaxSearchPreviewChars = 240;
+    internal const int MaxSearchMatches = 500, MaxSearchQueryChars = 200, MaxSearchPreviewChars = 240, MaxSearchFileBytes = 16 * 1024 * 1024;
 
     /// <summary>
     /// Plain-text search over every file of the project's current snapshot (no regular expressions). Returns up to 500
@@ -621,7 +718,10 @@ internal sealed class VaultProtocol
         var found = new List<(Guid FileId, string Name, int Line, int Column, string Preview, int PreviewOffset)>();
         bool truncated = false; int searched = 0;
         var snapshot = store.List();
-        store.ReadSnapshot(snapshot.SnapshotId, (file, content) =>
+        // Text only, and at most 16 MiB per file in memory; the rest are counted as skipped.
+        static bool Searchable(StoreFile f) => f.Kind == FileKind.Text && f.ByteLength <= MaxSearchFileBytes;
+        int skipped = snapshot.Files.Count(f => !Searchable(f));
+        store.ReadSnapshot(snapshot.SnapshotId, Searchable, (file, content) =>
         {
             searched++;
             if (truncated) return;
@@ -655,6 +755,7 @@ internal sealed class VaultProtocol
             w.WriteEndArray();
             w.WriteBoolean("truncated", truncated);
             w.WriteNumber("filesSearched", searched);
+            w.WriteNumber("filesSkipped", skipped);
         });
 
         static bool IsWordChar(string s, int i) => i >= 0 && i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '_');
@@ -669,13 +770,199 @@ internal sealed class VaultProtocol
         }
     }
 
+    // ---- any file: uploads in parts, text in parts, revert, verify (docs/vault-any-file-design.md section 3) --------
+
+    internal const int UploadPartBytes = SegmentedRecord.SegmentLength;
+    internal const int MaxStagedUploads = 256, MaxCommitUploads = 256;
+    internal const long MaxStagedBytes = 8L << 30;
+    internal static readonly TimeSpan UploadIdle = TimeSpan.FromMinutes(2);
+
+    /// <summary>Begins an upload: a new file (fileId null) or the next revision of fileId. One receiving per connection.</summary>
+    private ProtocolResponse BeginUpload(ParsedRequest request, ConnectionState state, long now)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "length", "sha256");
+        var projectId = Id(request.Body, "projectId");
+        var store = Project(request.Body);
+        var fileValue = request.Body.GetProperty("fileId");
+        Guid? fileId = fileValue.ValueKind == JsonValueKind.Null ? null : Id(request.Body, "fileId");
+        var lengthValue = request.Body.GetProperty("length");
+        if (lengthValue.ValueKind != JsonValueKind.Number || !lengthValue.TryGetInt64(out long length) || length < 0) throw new RequestException("InvalidRequest");
+        if (length > RevisionStore.MaximumFileBytes) throw new RequestException("LimitExceeded");
+        var sha256 = Sha256(request.Body, "sha256");
+        lock (state.FileUploads)
+        {
+            DiscardIdle(state, now);
+            if (state.FileUploads.Values.Any(u => u.Receiving is not null)) throw new RequestException("InvalidRequest");
+            if (state.FileUploads.Count >= MaxStagedUploads || state.FileUploads.Values.Sum(u => u.Length) + length > MaxStagedBytes) throw new RequestException("LimitExceeded");
+            state.StagingFolder ??= catalog.CreateStagingFolder();
+            var upload = store.BeginUpload(state.StagingFolder, fileId, length, sha256);
+            var slot = new FileUpload(projectId, upload, now);
+            try { if (length == 0) slot.Complete(); }
+            catch (InvalidDataException) { slot.Discard(); throw new RequestException("InvalidRequest"); }
+            var uploadId = Guid.NewGuid();
+            state.FileUploads[uploadId] = slot;
+            return Ok(request, w =>
+            {
+                w.WriteString("uploadId", uploadId.ToString("D"));
+                w.WriteString("fileId", upload.FileId.ToString("D"));
+                w.WriteNumber("partBytes", UploadPartBytes);
+            });
+        }
+    }
+
+    /// <summary>The next part, in order and without gaps. After the last byte the plaintext SHA-256 must match.</summary>
+    private ProtocolResponse UploadPart(ParsedRequest request, ConnectionState state, long now)
+    {
+        Require(request.Body, "capability", "uploadId", "offset", "dataBase64");
+        var uploadId = Id(request.Body, "uploadId");
+        lock (state.FileUploads)
+        {
+            DiscardIdle(state, now);
+            if (!state.FileUploads.TryGetValue(uploadId, out var slot) || slot.Receiving is not { } upload) throw new RequestException("InvalidRequest");
+            var offset = request.Body.GetProperty("offset");
+            if (offset.ValueKind != JsonValueKind.Number || !offset.TryGetInt64(out long at) || at != upload.Received) throw new RequestException("InvalidRequest");
+            var data = request.Body.GetProperty("dataBase64");
+            if (data.ValueKind != JsonValueKind.String || !data.TryGetBytesFromBase64(out var bytes) || bytes.Length == 0) throw new RequestException("InvalidRequest");
+            try
+            {
+                if (bytes.Length > UploadPartBytes || upload.Received + bytes.Length > upload.Length) throw new RequestException("LimitExceeded");
+                upload.Write(bytes);
+            }
+            finally { CryptographicOperations.ZeroMemory(bytes); }
+            slot.LastActivity = now;
+            long received = upload.Received;
+            if (received == upload.Length)
+            {
+                try { slot.Complete(); }
+                catch (InvalidDataException) { slot.Discard(); state.FileUploads.Remove(uploadId); throw new RequestException("InvalidRequest"); } // wrong SHA-256
+            }
+            return Ok(request, w => w.WriteNumber("received", received));
+        }
+    }
+
+    /// <summary>
+    /// Commits staged uploads in one snapshot, all or nothing: an entry with a name creates a file (create-only), one
+    /// without replaces the file its upload began for. A conflict keeps the staged uploads, so "keep mine" needs no
+    /// second upload.
+    /// </summary>
+    private ProtocolResponse CommitUploads(ParsedRequest request, ConnectionState state, long now)
+    {
+        Require(request.Body, "capability", "projectId", "expectedSnapshotId", "files");
+        var projectId = Id(request.Body, "projectId");
+        var store = Project(request.Body);
+        var expected = Id(request.Body, "expectedSnapshotId");
+        var files = request.Body.GetProperty("files");
+        if (files.ValueKind != JsonValueKind.Array || files.GetArrayLength() == 0) throw new RequestException("InvalidRequest");
+        if (files.GetArrayLength() > MaxCommitUploads) throw new RequestException("LimitExceeded");
+        lock (state.FileUploads)
+        {
+            DiscardIdle(state, now);
+            var ids = new List<Guid>();
+            var changes = new List<StoreChange>();
+            foreach (var item in files.EnumerateArray())
+            {
+                Require(item, "uploadId", "name");
+                var uploadId = Id(item, "uploadId");
+                if (ids.Contains(uploadId) || !state.FileUploads.TryGetValue(uploadId, out var slot) || slot.Staged is not { } staged || slot.ProjectId != projectId)
+                    throw new RequestException("InvalidRequest");
+                var nameValue = item.GetProperty("name");
+                string? name = nameValue.ValueKind == JsonValueKind.Null ? null : Text(item, "name");
+                if ((name is null) == staged.NewFile || (name is not null && !RevisionStore.IsValidLogicalName(name))) throw new RequestException("InvalidRequest");
+                ids.Add(uploadId);
+                changes.Add(new StoreChange.Stage(staged, name));
+            }
+            var next = store.CommitChanges(expected, changes, state.Actor); // a conflict throws before anything moves
+            var results = ids.Select(id => state.FileUploads[id].Staged!).ToList();
+            foreach (var id in ids) state.FileUploads.Remove(id); // their records are in the project now
+            return Ok(request, w =>
+            {
+                w.WriteString("snapshotId", next.SnapshotId.ToString("D"));
+                w.WriteStartArray("files");
+                foreach (var staged in results)
+                {
+                    w.WriteStartObject();
+                    w.WriteString("fileId", staged.FileId.ToString("D")); w.WriteString("revisionId", staged.RevisionId.ToString("D"));
+                    w.WriteString("kind", staged.Kind == FileKind.Text ? "text" : "binary");
+                    w.WriteEndObject();
+                }
+                w.WriteEndArray();
+            });
+        }
+    }
+
+    private ProtocolResponse CancelUpload(ParsedRequest request, ConnectionState state)
+    {
+        Require(request.Body, "capability", "uploadId");
+        var uploadId = Id(request.Body, "uploadId");
+        lock (state.FileUploads)
+        {
+            if (!state.FileUploads.Remove(uploadId, out var slot)) throw new RequestException("InvalidRequest");
+            slot.Discard();
+        }
+        return Ok(request, _ => { });
+    }
+
+    // An upload with no part for 2 minutes is discarded (staged ones wait for CommitUploads, but not forever).
+    private void DiscardIdle(ConnectionState state, long now)
+    {
+        foreach (var (id, slot) in state.FileUploads.ToList())
+            if (clock.GetElapsedTime(slot.LastActivity, now) >= UploadIdle) { slot.Discard(); state.FileUploads.Remove(id); }
+    }
+
+    /// <summary>One 512 KiB part of a text revision of at most 1 MiB (the editor's limit). Binary is NotText.</summary>
+    private ProtocolResponse ReadTextPart(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "revisionId", "offset");
+        var store = Project(request.Body);
+        var offsetValue = request.Body.GetProperty("offset");
+        if (offsetValue.ValueKind != JsonValueKind.Number || !offsetValue.TryGetInt64(out long offset) || offset < 0 || offset % UploadPartBytes != 0) throw new RequestException("InvalidRequest");
+        (long Length, byte[] Data) part;
+        try { part = store.ReadTextPart(Id(request.Body, "fileId"), Id(request.Body, "revisionId"), offset); }
+        catch (ArgumentOutOfRangeException) { throw new RequestException("InvalidRequest"); }
+        try
+        {
+            return Ok(request, w =>
+            {
+                w.WriteNumber("length", part.Length);
+                w.WriteBase64String("dataBase64", part.Data);
+            }, capacity: 16384 + (part.Data.Length + 2) / 3 * 4); // pre-sized so the buffer never reallocates (see OpenDocument)
+        }
+        finally { CryptographicOperations.ZeroMemory(part.Data); }
+    }
+
+    /// <summary>Makes a revision from the file's own history current again; nothing is re-encrypted or sent.</summary>
+    private ProtocolResponse RevertFile(ParsedRequest request, ConnectionState state)
+    {
+        Require(request.Body, "capability", "projectId", "fileId", "revisionId", "expectedSnapshotId");
+        var store = Project(request.Body);
+        return Changed(request, store, Id(request.Body, "expectedSnapshotId"), [new StoreChange.Revert(Id(request.Body, "fileId"), Id(request.Body, "revisionId"))], null, state);
+    }
+
+    /// <summary>Decrypts and checks every live file. A failure reports counts only, and the project is then Unavailable.</summary>
+    private ProtocolResponse VerifyProject(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId");
+        var id = Id(request.Body, "projectId");
+        var (verified, failedFiles) = Project(request.Body).VerifyProject();
+        if (failedFiles > 0) failed[id] = true;
+        return Ok(request, w => { w.WriteNumber("filesVerified", verified); w.WriteNumber("filesFailed", failedFiles); });
+    }
+
+    private static byte[] Sha256(JsonElement body, string name)
+    {
+        var value = body.GetProperty(name);
+        var text = value.ValueKind == JsonValueKind.String ? value.GetString()! : null;
+        if (text is null || text.Length != 64 || text.Any(c => c is not ((>= '0' and <= '9') or (>= 'a' and <= 'f')))) throw new RequestException("InvalidRequest");
+        return Convert.FromHexString(text);
+    }
+
     private ProtocolResponse ApplyEdits(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "projectId", "fileId", "expectedSnapshotId", "contentBase64");
         var store = Project(request.Body);
         var fileId = Id(request.Body, "fileId");
         var expected = Id(request.Body, "expectedSnapshotId");
-        var content = Content(request.Body);
+        var content = Content(request.Body, textOnly: true); // the editor saving text
         try
         {
             var current = store.List();
@@ -696,11 +983,13 @@ internal sealed class VaultProtocol
     {
         var id = Id(body, "projectId");
         if (!projects.ContainsKey(id)) throw new KeyNotFoundException();
+        if (failed.ContainsKey(id)) throw new RequestException("Unavailable");
         return catalog.OpenProject(id);
     }
 
     private static void End(ConnectionState state)
     {
+        state.DiscardUploads();
         if (state.Capability is not null) CryptographicOperations.ZeroMemory(state.Capability);
         state.Capability = null;
         state.Closed = true;
@@ -716,13 +1005,20 @@ internal sealed class VaultProtocol
         return valid;
     }
 
-    private static byte[] Content(JsonElement body)
+    private static byte[] Content(JsonElement body, bool textOnly)
     {
         var value = body.GetProperty("contentBase64");
         if (value.ValueKind != JsonValueKind.String || !value.TryGetBytesFromBase64(out var bytes)) throw new RequestException("InvalidRequest");
         if (bytes.Length > ProtocolLimits.MaxDocumentBytes) { CryptographicOperations.ZeroMemory(bytes); throw new RequestException("LimitExceeded"); }
-        if (!RevisionStore.IsValidContent(bytes)) { CryptographicOperations.ZeroMemory(bytes); throw new RequestException("InvalidRequest"); }
+        if (textOnly && !RevisionStore.IsValidContent(bytes)) { CryptographicOperations.ZeroMemory(bytes); throw new RequestException("InvalidRequest"); }
         return bytes;
+    }
+
+    // Inline opens return text of at most 256 KiB; binary is NotText, larger text is read in parts (ReadTextPart).
+    private static void InlineText(StoreFile file)
+    {
+        if (file.Kind != FileKind.Text) throw new NotTextException();
+        if (file.ByteLength > ProtocolLimits.MaxDocumentBytes) throw new RequestException("LimitExceeded");
     }
 
     private static string Text(JsonElement body, string name)

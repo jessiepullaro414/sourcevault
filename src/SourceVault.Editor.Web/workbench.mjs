@@ -154,7 +154,7 @@ export function withDrafts(result, drafts, query, options) {
   }
   matches.sort((a, b) => compareNames(a.name, b.name) || a.line - b.line || a.column - b.column);
   if (matches.length > MAX_SEARCH_MATCHES) truncated = true;
-  return { matches: matches.slice(0, MAX_SEARCH_MATCHES), truncated, filesSearched: result.filesSearched ?? 0, drafts: drafts.length };
+  return { matches: matches.slice(0, MAX_SEARCH_MATCHES), truncated, filesSearched: result.filesSearched ?? 0, filesSkipped: result.filesSkipped ?? 0, drafts: drafts.length };
 }
 
 /** Matches grouped by file, in order: [{ fileId, name, matches }]. */

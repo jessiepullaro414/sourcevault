@@ -43,3 +43,15 @@ $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH = 'false'
 ```
 
 Check each command's exit code before proceeding. This test executable takes no arguments and creates no vault files.
+
+## SVR2: segmented records (2026-10-19)
+
+`SourceVault.Storage.SegmentedRecord` adds the record format of [vault-any-file-design.md](vault-any-file-design.md) section 2.2, which the coordinator reviewed. Writers now write only `SVR2`; readers accept `SVR1` and `SVR2`.
+
+- **Layout:** a 68-byte prefix (magic, kind, wrap mode, project/file/revision ids, plaintext length, segment size 524,288), the wrapped data key, then 512 KiB AES-256-GCM segments, each with its own 16-byte tag. Segment *i* uses nonce 0⁴ ‖ *i* and AAD SHA-256(prefix ‖ wrapped key) ‖ *i* ‖ last-segment flag, so truncation, reordering, splicing and a dropped last segment are refused. An empty plaintext is one empty segment.
+- **Wrap modes:** 1 = the TPM key (RSA-OAEP-SHA256), for manifests and `ProjectKey` records; 2 = the project key (AES-256-GCM with a random nonce; AAD = prefix ‖ key id), for document and history records.
+- **Limits:** 1 GiB per document, 32 MiB per manifest. The exact size is checked before any unwrap.
+- **Streaming:** `SegmentedRecordWriter` and `SegmentedRecordReader` hold one segment at a time. A reader's output is provisional until the end of the stream, where the caller checks the manifest's SHA-256 of the whole record.
+- **Kept from SVR1:** a fresh random data key per record, the caller's expected context, zeroing of keys and failed plaintext in `finally`, generic exceptions. Content may be any bytes; `text` or `binary` is decided by the store.
+
+Tests: `tests/SourceVault.Storage.Tests` (76 checks in all; the SVR2 ones cover round trips across segment boundaries, empty and exact-multiple plaintexts, streaming, fresh keys and nonces, tampering anywhere, truncation, extension, reordering and splicing, wrong key, context and kind, the limits, and a disposed project key).

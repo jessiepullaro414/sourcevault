@@ -75,12 +75,33 @@ Test("folder paths: nested names commit and reopen; a file and a folder cannot s
 });
 
 
-Test("reject document limits and non UTF8", () =>
+Test("any file: binary, UTF-16 and large content are stored exactly, with kind and hash; limits refuse before writing", () =>
 {
     var f = Fixture(); var s = f.Store.Initialize();
-    Reject<ArgumentException>(() => f.Store.Commit(s.SnapshotId, "x", new byte[262145]));
-    Reject<InvalidDataException>(() => f.Store.Commit(s.SnapshotId, "x", new byte[] { 0xff }));
-    var next = f.Store.Commit(s.SnapshotId, "empty", []); Assert(f.Store.Open(next.SnapshotId, next.Files[0].FileId).Length == 0);
+    var binary = new byte[] { 0x89, 0x50, 0x4e, 0x47, 0x00, 0xff };
+    var utf16 = Encoding.Unicode.GetBytes("﻿IDS_SYNTHETIC \"x\"\r\n");
+    var large = new byte[600 * 1024]; new Random(5).NextBytes(large); // two SVR2 segments
+    s = f.Store.CommitMany(s.SnapshotId, [("res/icon.png", binary), ("res/app.rc", utf16), ("lib/big.bin", large), ("empty", []), ("bom.txt", [0xef, 0xbb, 0xbf, 0x41])]);
+    var by = s.Files.ToDictionary(x => x.LogicalName);
+    Assert(by["res/icon.png"].Kind == FileKind.Binary && by["res/app.rc"].Kind == FileKind.Binary && by["lib/big.bin"].Kind == FileKind.Binary);
+    Assert(by["empty"].Kind == FileKind.Text && by["bom.txt"].Kind == FileKind.Text && by["lib/big.bin"].ByteLength == large.Length);
+    Assert(by["res/app.rc"].Sha256!.AsSpan().SequenceEqual(SHA256.HashData(utf16)));
+    var reopened = new RevisionStore(f.Path, f.Project, key);
+    Assert(reopened.Open(s.SnapshotId, by["res/icon.png"].FileId).SequenceEqual(binary));
+    Assert(reopened.Open(s.SnapshotId, by["res/app.rc"].FileId).SequenceEqual(utf16));
+    Assert(reopened.Open(s.SnapshotId, by["lib/big.bin"].FileId).SequenceEqual(large));
+    Assert(reopened.List().Files.Single(x => x.LogicalName == "res/app.rc").Kind == FileKind.Binary); // the kind is in the manifest
+    Assert(RevisionStore.KindOf("a\0b"u8) == FileKind.Binary && RevisionStore.KindOf([0xc3]) == FileKind.Binary && RevisionStore.KindOf("λ"u8) == FileKind.Text);
+    // Limits, each refused before any record is written.
+    int records = Directory.GetFiles(f.Path, "*.svr").Length;
+    f.Store.FileLimit = s.Files.Count;
+    Reject<StoreLimitException>(() => f.Store.Commit(s.SnapshotId, "one-more", Text("x")));
+    f.Store.FileLimit = RevisionStore.MaximumFiles; f.Store.ProjectByteLimit = large.Length + 100;
+    Reject<StoreLimitException>(() => f.Store.Commit(s.SnapshotId, "lib/more.bin", new byte[200]));
+    f.Store.ProjectByteLimit = RevisionStore.MaximumProjectBytes; f.Store.FreeSpaceReserve = long.MaxValue / 2;
+    Reject<StoreLimitException>(() => f.Store.Commit(s.SnapshotId, "x", Text("x")));
+    f.Store.FreeSpaceReserve = 0;
+    Assert(Directory.GetFiles(f.Path, "*.svr").Length == records && f.Store.List().SnapshotId == s.SnapshotId);
 });
 
 foreach (var stage in Enum.GetValues<CommitStage>())
@@ -170,7 +191,9 @@ Test("fail closed damaged state " + kind, () =>
     else if (kind == "project") { Reject<CryptographicException>(() => new RevisionStore(f.Path, Guid.NewGuid(), key).List()); return; }
     else if (kind == "length") File.WriteAllBytes(blob, new byte[262491]);
     else { var bytes = File.ReadAllBytes(blob); bytes[^1] ^= 1; File.WriteAllBytes(blob, bytes); }
-    Reject<Exception>(() => f.Store.List());
+    // Decision C4: a same-size change to a content record is caught when it is read, before any content is used.
+    if (kind == "document") { Assert(f.Store.List().SnapshotId == b.SnapshotId); Reject<Exception>(() => f.Store.Open(b.SnapshotId, b.Files[0].FileId)); }
+    else Reject<Exception>(() => f.Store.List());
 });
 
 const string goodEntry = "{\"fileId\":\"0f3a5c1e-7d2b-4c9a-8e6f-1a2b3c4d5e6f\",\"name\":\"a.cs\",\"revisionId\":\"9b8c7d6e-5f4a-4b3c-9d2e-1f0a9b8c7d6e\",\"byteLength\":0,\"recordSha256\":\"HASH\"}";
@@ -204,12 +227,21 @@ Test("manifest duplicate names and identifiers rejected", () =>
     Reject<InvalidDataException>(() => f.Store.List());
 });
 
-Test("manifest file count bound", () =>
+Test("manifest file count bound (25,000) and schema/format downgrades rejected", () =>
 {
     var f = Fixture(); var s = f.Store.Initialize();
-    var manifest = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, snapshotId = s.SnapshotId, files = Enumerable.Range(0, 1025).Select(i => new { fileId = Guid.NewGuid(), name = "synthetic" + i, revisionId = Guid.NewGuid(), byteLength = 0, recordSha256 = new string('a', 64) }) });
-    File.WriteAllBytes(Path.Combine(f.Path, s.SnapshotId + ".svr"), RecordCodec.Encrypt(new(f.Project, Guid.Empty, s.SnapshotId, RecordKind.Manifest), manifest, key));
+    object Entry4(int i) => new { fileId = Guid.NewGuid(), name = "synthetic" + i, revisionId = Guid.NewGuid(), byteLength = 0, recordSha256 = new string('a', 64),
+        historyRecordId = (string?)null, historyRecordSha256 = (string?)null, kind = "text", sha256 = new string('b', 64) };
+    byte[] Schema4(int count) => JsonSerializer.SerializeToUtf8Bytes(new { version = 4, snapshotId = s.SnapshotId, projectKeyId = Guid.NewGuid(), projectKeySha256 = new string('c', 64),
+        files = Enumerable.Range(0, count).Select(Entry4), deleted = Array.Empty<object>() });
+    void Put(byte[] record) => File.WriteAllBytes(Path.Combine(f.Path, s.SnapshotId + ".svr"), record);
+    var context = new RecordContext(f.Project, Guid.Empty, s.SnapshotId, RecordKind.Manifest);
+    Put(SegmentedRecord.Encrypt(context, Schema4(RevisionStore.MaximumFiles + 1), key));
     Reject<InvalidDataException>(() => f.Store.List());
+    Put(RecordCodec.Encrypt(context, Schema4(0), key)); // schema 4 in the old format: a downgrade or forgery
+    Reject<InvalidDataException>(() => f.Store.List());
+    Put(SegmentedRecord.Encrypt(context, JsonSerializer.SerializeToUtf8Bytes(new { version = 3, snapshotId = s.SnapshotId, files = Array.Empty<object>(), deleted = Array.Empty<object>() }), key));
+    Reject<InvalidDataException>(() => f.Store.List()); // schema 3 in the new format
 });
 
 // Unwrap budget: each unwrap is a ~45 ms TPM operation on real hardware, so the counts are the performance contract.
@@ -223,30 +255,30 @@ using var counting = new CountingProtector();
 }
 int Unwraps(Action action) { counting.Unwraps = 0; action(); return counting.Unwraps; }
 
-Test("unwrap budget: cold list 1, warm list 0, open 1, cold edit 1 (history), warm edit 0, bulk read N", () =>
+Test("unwrap budget (project key): cold list 1, warm list 0, open 1, every edit 1, bulk read 1 for any number of files", () =>
 {
     var p = Populated(8);
     var cold = new RevisionStore(p.Path, p.Project, counting);
     Assert(Unwraps(() => cold.List()) == 1);
     Assert(Unwraps(() => cold.List()) == 0);
-    Assert(Unwraps(() => CryptographicOperations.ZeroMemory(cold.Open(p.Snap.SnapshotId, p.Snap.Files[3].FileId))) == 1);
+    Assert(Unwraps(() => CryptographicOperations.ZeroMemory(cold.Open(p.Snap.SnapshotId, p.Snap.Files[3].FileId))) == 1); // the project key
     StoreSnapshot next = p.Snap;
-    Assert(Unwraps(() => next = cold.Commit(p.Snap.SnapshotId, "file3.cs", Text("synthetic-edit"))) == 1); // reads file3's history once
-    Assert(Unwraps(() => next = cold.Commit(next.SnapshotId, "file3.cs", Text("synthetic-edit"))) == 0);
+    Assert(Unwraps(() => next = cold.Commit(p.Snap.SnapshotId, "file3.cs", Text("synthetic-edit"))) == 1); // the key; history decrypts under it
+    Assert(Unwraps(() => next = cold.Commit(next.SnapshotId, "file3.cs", Text("synthetic-edit"))) == 1); // never cached between operations
     var seen = new List<string>();
-    Assert(Unwraps(() => cold.ReadSnapshot(next.SnapshotId, (f, content) => seen.Add(f.LogicalName + "=" + Encoding.UTF8.GetString(content)))) == 8);
+    Assert(Unwraps(() => cold.ReadSnapshot(next.SnapshotId, (f, content) => seen.Add(f.LogicalName + "=" + Encoding.UTF8.GetString(content)))) == 1);
     Assert(seen.Count == 8 && seen.Contains("file3.cs=synthetic-edit") && seen.Contains("file7.cs=synthetic-content-7"));
     Reject<RevisionConflictException>(() => cold.ReadSnapshot(p.Snap.SnapshotId, (_, _) => { }));
 });
 
-Test("CommitMany: many files in one snapshot, all or nothing, no TPM unwraps when warm", () =>
+Test("CommitMany: many files in one snapshot, all or nothing, one TPM unwrap however many files", () =>
 {
     var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); var project = Guid.NewGuid();
     var store = new RevisionStore(path, project, counting); var s = store.Initialize();
     var batch = Enumerable.Range(0, 50).Select(i => ($"src/m{i / 10}/f{i}.ts", Text($"synthetic-{i}"))).ToList();
     StoreSnapshot next = s;
-    Assert(Unwraps(() => next = store.CommitMany(s.SnapshotId, batch)) == 0);
-    Assert(next.Files.Count == 50 && Directory.GetFiles(path, "*.svr").Length == 1 + 1 + 50 + 50); // manifests, documents, history records
+    Assert(Unwraps(() => next = store.CommitMany(s.SnapshotId, batch)) == 1);
+    Assert(next.Files.Count == 50 && Directory.GetFiles(path, "*.svr").Length == 2 + 1 + 50 + 50); // manifests, project key, documents, history records
     Reject<ArgumentException>(() => store.CommitMany(next.SnapshotId, [("dup.ts", Text("a")), ("DUP.ts", Text("b"))]));
     Reject<RevisionConflictException>(() => store.CommitMany(s.SnapshotId, [("late.ts", Text("x"))]));
     var replaced = store.CommitMany(next.SnapshotId, [("src/m0/f0.ts", Text("synthetic-replaced")), ("new.ts", Text("synthetic-new"))]);
@@ -282,14 +314,68 @@ Test("cache not reused when the manifest record is replaced under the same id", 
     Assert(Unwraps(() => listed = p.Store.List()) == 1 && listed.Files.Count == 0);
 });
 
-Test("warm instance still detects a swapped document record without decrypting", () =>
+Test("a swapped document record (same size) is refused when read; a different size by any listing", () =>
 {
     var p = Populated(2);
     p.Store.List(); // warm
     var first = Path.Combine(p.Path, p.Snap.Files[0].RevisionId + ".svr");
     var second = Path.Combine(p.Path, p.Snap.Files[1].RevisionId + ".svr");
     File.Copy(second, first, overwrite: true); // same length: both synthetic contents are equally long
+    Assert(Unwraps(() => p.Store.List()) == 0); // decision C4: existence and size only
+    Reject<Exception>(() => p.Store.Open(p.Snap.SnapshotId, p.Snap.Files[0].FileId));
+    Reject<Exception>(() => p.Store.ReadSnapshot(p.Snap.SnapshotId, (_, _) => { }));
+    File.WriteAllBytes(first, new byte[10]);
     Assert(Unwraps(() => Reject<InvalidDataException>(() => p.Store.List())) == 0);
+});
+
+Test("superseded manifests are pruned: only HEAD and PREVIOUS stay (decision C5)", () =>
+{
+    var f = Fixture(); var s = f.Store.Initialize();
+    for (int i = 0; i < 10; i++) s = f.Store.Commit(s.SnapshotId, "a.ts", Text("synthetic-" + i));
+    // 2 manifests + project key + 10 revisions + 10 history chunks
+    Assert(Directory.GetFiles(f.Path, "*.svr").Length == 2 + 1 + 10 + 10);
+    var previous = File.ReadAllText(Path.Combine(f.Path, "PREVIOUS"));
+    Assert(File.Exists(Path.Combine(f.Path, previous + ".svr")) && File.Exists(Path.Combine(f.Path, s.SnapshotId + ".svr")));
+    File.WriteAllText(Path.Combine(f.Path, "PREVIOUS"), "garbage"); // a damaged recovery pointer never blocks a commit
+    s = f.Store.Commit(s.SnapshotId, "a.ts", Text("synthetic-after"));
+    Assert(f.Store.List().SnapshotId == s.SnapshotId && new RevisionStore(f.Path, f.Project, key).ReadHistory(s.Files[0].FileId, 0).Revisions.Count == 11);
+});
+
+Test("migration: a schema 3 store (SVR1) reads as before, its first commit adds the project key, old content stays readable", () =>
+{
+    // Build a schema 3 store the old way: SVR1 content, SVR1 version 1 history chunk, SVR1 schema 3 manifest.
+    var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path);
+    var project = Guid.NewGuid(); var fileId = Guid.NewGuid(); var revision = Guid.NewGuid(); var chunkId = Guid.NewGuid(); var snapshot = Guid.NewGuid();
+    var content = Text("synthetic-old");
+    var record = RecordCodec.Encrypt(new(project, fileId, revision, RecordKind.Document), content, counting);
+    File.WriteAllBytes(Path.Combine(path, revision + ".svr"), record);
+    var chunk = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, fileId = fileId.ToString("D"), entries = new[] { new { revisionId = revision.ToString("D"),
+        recordSha256 = Convert.ToHexStringLower(SHA256.HashData(record)), byteLength = content.Length, name = "old.ts", savedAt = "2026-10-18T10:00:00.000Z", savedBy = @"PC\old", action = "created" } }, older = (object?)null });
+    var chunkRecord = RecordCodec.Encrypt(new(project, fileId, chunkId, RecordKind.Document), chunk, counting);
+    File.WriteAllBytes(Path.Combine(path, chunkId + ".svr"), chunkRecord);
+    var manifest = JsonSerializer.SerializeToUtf8Bytes(new { version = 3, snapshotId = snapshot.ToString("D"), files = new[] { new { fileId = fileId.ToString("D"), name = "old.ts",
+        revisionId = revision.ToString("D"), byteLength = content.Length, recordSha256 = Convert.ToHexStringLower(SHA256.HashData(record)),
+        historyRecordId = chunkId.ToString("D"), historyRecordSha256 = Convert.ToHexStringLower(SHA256.HashData(chunkRecord)) } }, deleted = Array.Empty<object>() });
+    File.WriteAllBytes(Path.Combine(path, snapshot + ".svr"), RecordCodec.Encrypt(new(project, Guid.Empty, snapshot, RecordKind.Manifest), manifest, counting));
+    File.WriteAllText(Path.Combine(path, "HEAD"), snapshot.ToString("D"));
+    var store = new RevisionStore(path, project, counting);
+    var s = store.List();
+    Assert(s.Files.Single().Kind == FileKind.Text && s.Files.Single().Sha256 is null);
+    Assert(Unwraps(() => Assert(Encoding.UTF8.GetString(store.Open(s.SnapshotId, fileId)) == "synthetic-old")) == 1); // SVR1: one TPM unwrap, no project key
+    Assert(store.ReadHistory(fileId, 0).Revisions.Single().SavedBy == @"PC\old");
+    // A rename-only first commit migrates: project key record plus a schema 4 manifest; nothing is re-encrypted.
+    s = store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(fileId, "src/old.ts")]);
+    var head = File.ReadAllText(Path.Combine(path, "HEAD"));
+    Assert(File.ReadAllBytes(Path.Combine(path, head + ".svr")).AsSpan(0, 4).SequenceEqual("SVR2"u8));
+    Assert(File.ReadAllBytes(Path.Combine(path, revision + ".svr")).AsSpan(0, 4).SequenceEqual("SVR1"u8));
+    s = store.CommitMany(s.SnapshotId, [("new.bin", new byte[] { 0, 1, 2 })]);
+    var fresh = new RevisionStore(path, project, counting);
+    int read = 0;
+    Assert(Unwraps(() => fresh.ReadSnapshot(s.SnapshotId, (_, _) => read++)) == 1 + 1 + 1); // manifest, the SVR1 file, the project key
+    Assert(read == 2 && Encoding.UTF8.GetString(fresh.OpenRevision(fileId, revision)) == "synthetic-old");
+    s = fresh.Commit(s.SnapshotId, "src/old.ts", Text("synthetic-new"));
+    var history = fresh.ReadHistory(fileId, 0).Revisions;
+    Assert(history.Select(r => r.Action).SequenceEqual(new[] { "edited", "created" }) && s.Files.Single(x => x.FileId == fileId).Sha256 is not null);
 });
 
 // Project catalog: vault root = index\ + projects\<id>\, names only inside the encrypted index.
@@ -438,7 +524,7 @@ Test("changes: rename keeps the file id, revision and content; names can be swap
     var a = s.Files.Single(x => x.LogicalName == "a.ts"); var b = s.Files.Single(x => x.LogicalName == "b.ts");
     int records = Directory.GetFiles(f.Path, "*.svr").Length;
     var swapped = f.Store.CommitChanges(s.SnapshotId, [new StoreChange.Rename(a.FileId, "b.ts"), new StoreChange.Rename(b.FileId, "a.ts")]);
-    Assert(Directory.GetFiles(f.Path, "*.svr").Length == records + 1); // only a new manifest: nothing re-encrypted
+    Assert(Directory.GetFiles(f.Path, "*.svr").Length == records); // a new manifest and the oldest pruned: nothing re-encrypted
     var a2 = swapped.Files.Single(x => x.FileId == a.FileId);
     Assert(a2.LogicalName == "b.ts" && a2.RevisionId == a.RevisionId && Encoding.UTF8.GetString(f.Store.Open(swapped.SnapshotId, a.FileId)) == "synthetic-a");
     var x = swapped.Files.Single(e => e.LogicalName == "src/x.ts");
@@ -584,15 +670,15 @@ Test("history: chunks chain after 256 saves; a tampered history record fails onl
     Assert(fresh.List().Files.Count == 2 && Encoding.UTF8.GetString(fresh.Open(s.SnapshotId, a)) == "synthetic-300");
 });
 
-Test("history: warm saves need no TPM unwrap; a cold save of an existing file needs one", () =>
+Test("history: a save costs one TPM unwrap (the project key) warm, two cold (plus the manifest)", () =>
 {
     var path = Path.Combine(testRoot, Guid.NewGuid().ToString("N")); var project = Guid.NewGuid();
     var store = new RevisionStore(path, project, counting);
     var s = store.Initialize();
     s = store.CommitMany(s.SnapshotId, [("a.ts", Text("synthetic-1"))]);
-    Assert(Unwraps(() => s = store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-2"))])) == 0);
+    Assert(Unwraps(() => s = store.CommitChanges(s.SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-2"))])) == 1);
     var cold = new RevisionStore(path, project, counting);
-    Assert(Unwraps(() => cold.CommitChanges(cold.List().SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-3"))])) == 2); // manifest + history
+    Assert(Unwraps(() => cold.CommitChanges(cold.List().SnapshotId, [new StoreChange.Write("a.ts", Text("synthetic-3"))])) == 2); // manifest + key; history under the key
 });
 
 foreach (var target in new[] { "LOCK", "HEAD", "blob", "root" })

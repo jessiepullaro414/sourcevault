@@ -1,5 +1,7 @@
 # Design: file operations, history, merge and container builds (owner-approved 2026-10-18)
 
+> **Since 2026-10-19** the vault holds any file: the text-only and 256 KiB / 1,024-file limits below are superseded by [vault-any-file-design.md](vault-any-file-design.md).
+
 Owner requests from 2026-10-18:
 - add file delete/rename and project rename;
 - add per-file history and merging;

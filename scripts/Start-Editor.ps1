@@ -1,4 +1,6 @@
-param([string]$DotnetPath, [switch]$Rebuild)
+# Builds (if needed) and opens the editor from this repository. -Demo opens the demo: the full vault editor on a
+# simulated vault, shown in red, with nothing encrypted. Without it, the synthetic preview opens.
+param([string]$DotnetPath, [switch]$Rebuild, [switch]$Demo)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if (!$DotnetPath) {
@@ -32,9 +34,10 @@ try {
     $start = [System.Diagnostics.ProcessStartInfo]::new($exe)
     $start.UseShellExecute = $false
     $start.WorkingDirectory = $publishFolder
-    $start.Arguments = '--synthetic-preview' # constant; ArgumentList is unavailable in Windows PowerShell 5.1
+    $start.Arguments = if ($Demo) { '--demo' } else { '--synthetic-preview' } # constants; ArgumentList is unavailable in Windows PowerShell 5.1
     $start.Environment['DOTNET_ROOT'] = Split-Path -Parent $DotnetPath
     $start.Environment['DOTNET_ROOT_X64'] = Split-Path -Parent $DotnetPath
     [System.Diagnostics.Process]::Start($start) | Out-Null
-    Write-Output 'Opened SourceVault synthetic editor. Revisions are session-only; no vault is connected.'
+    if ($Demo) { Write-Output 'Opened the SourceVault DEMO. Nothing is encrypted and no vault is connected; use made-up code only.' }
+    else { Write-Output 'Opened SourceVault synthetic editor. Revisions are session-only; no vault is connected.' }
 } finally { $env:APPDATA = $oldAppData }

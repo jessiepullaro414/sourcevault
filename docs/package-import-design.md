@@ -1,5 +1,7 @@
 # Design: importing encrypted projects from another computer (owner-approved 2026-10-19; built, in-process tested)
 
+> **Since 2026-10-19** the vault holds any file: the text-only and 256 KiB / 1,024-file limits below are superseded by [vault-any-file-design.md](vault-any-file-design.md).
+
 Owner request (2026-10-19): code that lives as ordinary files on another computer must arrive at the vault PC **encrypted**. A small separate program on the other computer encrypts it, and the vault PC imports it.
 
 Owner answers so far:

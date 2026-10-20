@@ -105,6 +105,7 @@ internal sealed class VaultPipeServer : IDisposable
         state.Capability = null;
         state.Closed = true;
         state.OnClose?.Invoke(); // ends an unfinished package upload and frees its slot
+        state.DiscardUploads(); // file uploads never outlive their connection
         state.OnClose = null;
         try { pipe.Dispose(); } catch { /* already closed */ }
     }

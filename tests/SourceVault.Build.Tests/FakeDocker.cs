@@ -17,6 +17,7 @@ sealed class FakeContainer
     public readonly List<string> Calls = [];
     public Func<FakeContainer, (int ExitCode, string Output)> Build = _ => (0, "ok\n");
     public bool Hang;                     // the build never finishes (timeout)
+    public bool PutFails;                 // the engine fails while receiving the source
     public Func<string, Stream?>? ArchiveOverride;
 }
 
@@ -32,7 +33,8 @@ sealed class FakeEngine(FakeContainer container) : IDockerEngine
         while ((entry = await reader.GetNextEntryAsync(true, ct)) is not null)
             if (entry.EntryType == TarEntryType.RegularFile)
             {
-                var data = new MemoryStream(); entry.DataStream!.CopyTo(data);
+                if (container.PutFails) throw new IOException("synthetic engine failure mid-upload");
+                var data = new MemoryStream(); entry.DataStream?.CopyTo(data); // an empty file has no data stream
                 container.Files[path + "/" + entry.Name] = data.ToArray();
             }
     }
@@ -147,4 +149,14 @@ sealed class FakeDockerServer : IDisposable
     }
 
     public void Dispose() { stop.Cancel(); try { loop.Wait(2000); } catch { } }
+}
+
+/// <summary>A source that fails after some chunks, like a vault record failing its check mid-copy.</summary>
+sealed class FailingSource(IReadOnlyList<(string Name, byte[] Content)> files, int failAfterChunks) : IBuildSource
+{
+    private readonly InMemoryBuildSource inner = new(files);
+    private int chunks;
+    public IReadOnlyList<BuildFile> Files => inner.Files;
+    public ValueTask<ReadOnlyMemory<byte>> NextAsync(CancellationToken ct) =>
+        ++chunks > failAfterChunks ? throw new BuildSourceException("SourceUnavailable") : inner.NextAsync(ct);
 }

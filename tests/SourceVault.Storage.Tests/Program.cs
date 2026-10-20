@@ -165,6 +165,137 @@ Check("null protectors reject", () =>
     Throws<ArgumentNullException>(() => RecordCodec.Decrypt(context, record, null!));
 });
 
+// ---- SVR2 (docs/vault-any-file-design.md section 2.2) -------------------------------------------------------------
+const int Seg = SegmentedRecord.SegmentLength;
+var projectId = context.ProjectId;
+var (projectKey, projectKeyRecord) = ProjectKey.Create(projectId, protector);
+var otherKey = ProjectKey.Create(projectId, protector).Key;
+RecordContext Doc(Guid? file = null, Guid? revision = null) => new(projectId, file ?? context.FileId, revision ?? context.RevisionId, RecordKind.Document);
+byte[] Bytes(int length, int seed) { var b = new byte[length]; new Random(seed).NextBytes(b); return b; }
+byte[] big = Bytes(2 * Seg + 123, 1); // three segments, binary
+byte[] bigRecord = SegmentedRecord.Encrypt(Doc(), big, null, projectKey);
+long SegmentStart(int i) => SegmentedRecord.PrefixLength + SegmentedRecord.ProjectWrappedKeyLength + (long)i * (Seg + 16);
+
+Check("SVR2 project key: TPM-wrapped record of exact size, opens to a usable key", () =>
+{
+    Assert(projectKeyRecord.Length == 68 + 256 + 32 + 16);
+    Assert(projectKeyRecord.AsSpan(0, 4).SequenceEqual("SVR2"u8) && projectKeyRecord[4] == 3 && projectKeyRecord[5] == 1);
+    Assert(new Guid(projectKeyRecord.AsSpan(40, 16), bigEndian: true) == projectKey.Id);
+    int calls = protector.UnwrapCalls;
+    using var opened = ProjectKey.Open(projectId, projectKey.Id, projectKeyRecord, protector);
+    Assert(protector.UnwrapCalls == calls + 1);
+    Assert(SegmentedRecord.Decrypt(Doc(), bigRecord, null, opened).SequenceEqual(big));
+});
+Check("SVR2 document: binary roundtrip over three segments, project-key wrap, exact layout", () =>
+{
+    Assert(bigRecord.Length == SegmentedRecord.RecordLength(RecordKind.Document, big.Length));
+    Assert(bigRecord.Length == 68 + 76 + big.Length + 3 * 16);
+    Assert(bigRecord[4] == 1 && bigRecord[5] == 2 && BinaryPrimitives.ReadUInt64LittleEndian(bigRecord.AsSpan(56, 8)) == (ulong)big.Length);
+    Assert(BinaryPrimitives.ReadUInt32LittleEndian(bigRecord.AsSpan(64, 4)) == Seg);
+    Assert(new Guid(bigRecord.AsSpan(68, 16), bigEndian: true) == projectKey.Id);
+    int calls = protector.UnwrapCalls;
+    Assert(SegmentedRecord.Decrypt(Doc(), bigRecord, null, projectKey).SequenceEqual(big));
+    Assert(protector.UnwrapCalls == calls); // content needs no TPM unwrap once the project key is open
+    Assert(SegmentedRecord.IsSegmented(bigRecord) && !SegmentedRecord.IsSegmented(record));
+});
+Check("SVR2 empty and exact-multiple plaintexts", () =>
+{
+    var empty = SegmentedRecord.Encrypt(Doc(), [], null, projectKey);
+    Assert(empty.Length == 68 + 76 + 16 && SegmentedRecord.Decrypt(Doc(), empty, null, projectKey).Length == 0);
+    var two = Bytes(2 * Seg, 2);
+    var twoRecord = SegmentedRecord.Encrypt(Doc(), two, null, projectKey);
+    Assert(twoRecord.Length == 68 + 76 + two.Length + 2 * 16 && SegmentedRecord.Decrypt(Doc(), twoRecord, null, projectKey).SequenceEqual(two));
+});
+Check("SVR2 streaming: odd write sizes, segments read in order and by index", () =>
+{
+    var output = new MemoryStream();
+    using (var writer = new SegmentedRecordWriter(Doc(), big.Length, output, null, projectKey))
+    {
+        for (int at = 0, step = 1; at < big.Length; at += step, step = step * 7 % 100003 + 1) writer.Write(big.AsSpan(at, Math.Min(step, big.Length - at)));
+        writer.Complete();
+    }
+    output.Position = 0;
+    using var reader = new SegmentedRecordReader(Doc(), output, null, projectKey);
+    Assert(reader.Segments == 3 && reader.PlaintextLength == big.Length);
+    var buffer = new byte[Seg];
+    int n = reader.ReadSegment(2, buffer);
+    Assert(n == 123 && buffer.AsSpan(0, n).SequenceEqual(big.AsSpan(2 * Seg)));
+    var all = new List<byte>();
+    while ((n = reader.ReadNextSegment(buffer)) > 0) all.AddRange(buffer.AsSpan(0, n).ToArray());
+    Assert(reader.Finished && all.ToArray().SequenceEqual(big));
+});
+Check("SVR2 manifest: TPM-wrapped (mode 1), refused without the protector", () =>
+{
+    var m = new RecordContext(projectId, Guid.Empty, Guid.NewGuid(), RecordKind.Manifest);
+    var payload = Encoding.UTF8.GetBytes("{\"synthetic\":true}");
+    var r = SegmentedRecord.Encrypt(m, payload, protector);
+    Assert(r[5] == 1 && r.Length == 68 + 256 + payload.Length + 16);
+    Assert(SegmentedRecord.Decrypt(m, r, protector).SequenceEqual(payload));
+    Throws<ArgumentNullException>(() => SegmentedRecord.Decrypt(m, r, null, projectKey));
+    Throws<ArgumentException>(() => SegmentedRecord.Encrypt(Doc(), payload, protector)); // content needs the project key
+});
+Check("SVR2 fresh data key and nonce per record", () =>
+{
+    var a = SegmentedRecord.Encrypt(Doc(), source, null, projectKey);
+    var b = SegmentedRecord.Encrypt(Doc(), source, null, projectKey);
+    Assert(!a.AsSpan(68, 76).SequenceEqual(b.AsSpan(68, 76)) && !a.AsSpan(144).SequenceEqual(b.AsSpan(144)));
+});
+Check("SVR2 tampering anywhere is refused: prefix, wrapped key, ciphertext, tag", () =>
+{
+    foreach (int at in new[] { 0, 4, 5, 6, 10, 30, 50, 57, 65, 70, 90, 140, 144, 144 + Seg - 1, 144 + Seg + 3, bigRecord.Length - 1 })
+    {
+        var t = (byte[])bigRecord.Clone(); t[at] ^= 0x01;
+        Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(), t, null, projectKey));
+    }
+});
+Check("SVR2 truncation, extension, reordering and splicing are refused", () =>
+{
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(), bigRecord.AsSpan(0, (int)SegmentStart(2)).ToArray(), null, projectKey));
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(), [.. bigRecord, 0], null, projectKey));
+    var swapped = (byte[])bigRecord.Clone();
+    bigRecord.AsSpan((int)SegmentStart(1), Seg + 16).CopyTo(swapped.AsSpan((int)SegmentStart(0)));
+    bigRecord.AsSpan((int)SegmentStart(0), Seg + 16).CopyTo(swapped.AsSpan((int)SegmentStart(1)));
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(), swapped, null, projectKey));
+    var other = SegmentedRecord.Encrypt(Doc(), Bytes(big.Length, 9), null, projectKey);
+    var spliced = (byte[])bigRecord.Clone();
+    other.AsSpan((int)SegmentStart(1), Seg + 16).CopyTo(spliced.AsSpan((int)SegmentStart(1)));
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(), spliced, null, projectKey));
+    // A record that claims to be shorter (last segment dropped, length rewritten) fails: the header is in every AAD.
+    var shorter = bigRecord.AsSpan(0, (int)SegmentStart(2)).ToArray();
+    BinaryPrimitives.WriteUInt64LittleEndian(shorter.AsSpan(56, 8), 2UL * Seg);
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(), shorter, null, projectKey));
+});
+Check("SVR2 wrong key, wrong context and wrong kind are refused", () =>
+{
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(), bigRecord, null, otherKey));
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(file: Guid.NewGuid()), bigRecord, null, projectKey));
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(Doc(revision: Guid.NewGuid()), bigRecord, null, projectKey));
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(new(Guid.NewGuid(), context.FileId, context.RevisionId, RecordKind.Document), bigRecord, null, projectKey));
+    int calls = protector.UnwrapCalls;
+    Throws<CryptographicException>(() => SegmentedRecord.Decrypt(new(projectId, Guid.Empty, context.RevisionId, RecordKind.Manifest), bigRecord, protector));
+    Throws<CryptographicException>(() => ProjectKey.Open(projectId, Guid.NewGuid(), projectKeyRecord, protector));
+    Throws<CryptographicException>(() => ProjectKey.Open(projectId, projectKey.Id, [.. projectKeyRecord, 0], protector));
+    Assert(protector.UnwrapCalls == calls); // all refused before the TPM was asked
+    Throws<CryptographicException>(() => RecordCodec.Decrypt(context, bigRecord, protector)); // SVR1 reader refuses SVR2
+});
+Check("SVR2 limits: 32 MiB manifest, 32-byte project key, 1 GiB document, exact write length", () =>
+{
+    var m = new RecordContext(projectId, Guid.Empty, Guid.NewGuid(), RecordKind.Manifest);
+    Throws<ArgumentException>(() => SegmentedRecord.Encrypt(m, new byte[SegmentedRecord.MaxManifestLength + 1], protector));
+    Throws<ArgumentException>(() => SegmentedRecord.Encrypt(new(projectId, Guid.Empty, Guid.NewGuid(), RecordKind.ProjectKey), new byte[31], protector));
+    Throws<CryptographicException>(() => new SegmentedRecordWriter(Doc(), SegmentedRecord.MaxDocumentLength + 1, new MemoryStream(), null, projectKey));
+    using var writer = new SegmentedRecordWriter(Doc(), 10, new MemoryStream(), null, projectKey);
+    writer.Write(new byte[5]);
+    Throws<InvalidOperationException>(() => writer.Complete());
+    Throws<InvalidOperationException>(() => writer.Write(new byte[6]));
+});
+Check("SVR2 a disposed project key cannot be used", () =>
+{
+    var (k, _) = ProjectKey.Create(projectId, protector);
+    k.Dispose();
+    Throws<ObjectDisposedException>(() => SegmentedRecord.Encrypt(Doc(), source, null, k));
+});
+
 Console.WriteLine($"Record codec: {passed} passed, {failures.Count} failed.");
 return failures.Count == 0 ? 0 : 1;
 

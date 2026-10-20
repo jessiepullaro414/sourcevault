@@ -385,7 +385,8 @@ Check("bridge rejects non-canonical, empty and malformed ids", () => Rejects(Vau
 Check("bridge enforces the text limit in UTF-8 bytes and rejects lone surrogates", () =>
 {
     string Save(string escapedText) => Req("saveDocument", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"text\":\"{escapedText}\"}}");
-    Assert(Vault(Save(new string('a', BridgePolicy.MaxTextBytes))), "exactly 256 KiB accepted");
+    Assert(BridgePolicy.MaxTextBytes == 1024 * 1024 && BridgePolicy.MaxMessageChars >= 6 * BridgePolicy.MaxTextBytes + 4096, "1 MiB of text, room for JSON escaping");
+    Assert(Vault(Save(new string('a', BridgePolicy.MaxTextBytes))), "exactly 1 MiB accepted");
     Rejects(Vault, Save(new string('a', BridgePolicy.MaxTextBytes + 1)), Save(new string('é', BridgePolicy.MaxTextBytes / 2 + 1)),
         Save("\\ud800"), Save("x\\udc00y"), Save("\\ud834"));
     Assert(Vault(Save(string.Concat(Enumerable.Repeat("\\n", 100000)))), "escaped content within limits");
@@ -441,7 +442,7 @@ Check("top-level navigation allows only the exact entry document", () =>
         App, App + "/", App + "/index.html?fake-vault", App + "/index.html?", App + "/index.html#", App + "/index.html#top",
         App + "/INDEX.HTML", App + "/Index.html", App + "/index.htm", App + "/index.html/", App + "/index.html/x", App + "//index.html",
         App + "/index%2ehtml", App + "/./index.html", App + "/vendor/../index.html", App + "/vendor/monaco/vs/loader.js",
-        App + "/vendor/monaco/LICENSE", App + "/README.md", App + "/app.mjs", App + "/dev/fake-host.mjs", App + "/vendor/monaco/vs/editor/editor.main.js");
+        App + "/vendor/monaco/LICENSE", App + "/README.md", App + "/app.mjs", App + "/demo-host.mjs", App + "/vendor/monaco/vs/editor/editor.main.js");
 });
 
 Check("external URI schemes and browser-internal pages are never navigable", () => Rejects(PreviewPolicy.IsNavigationAllowed,
@@ -710,6 +711,27 @@ Check("bridge: searchProject takes one line of plain text and two flags", () =>
         $"{{\"projectId\":\"not-an-id\",\"query\":\"a\",\"matchCase\":false,\"wholeWord\":false}}",
     })
         Rejects(Vault, Req("searchProject", args));
+});
+
+// ---- Any-file vault (docs/vault-any-file-design.md section 4) ----
+Check("bridge: info panel, from disk, keep mine/theirs and revert carry ids only, never a path or content", () =>
+{
+    foreach (var (op, kind) in new[] { ("fileInfo", VaultOperation.FileInfo), ("replaceFromDisk", VaultOperation.ReplaceFromDisk), ("keepMine", VaultOperation.KeepMine), ("keepTheirs", VaultOperation.KeepTheirs) })
+    {
+        var parsed = Parsed(Req(op, $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"));
+        Assert(parsed.Operation == kind && parsed.FileId == Guid.Parse(F) && parsed.Text is null && parsed.Name is null, op);
+        Rejects(Vault, Req(op, $"{{\"projectId\":\"{P}\"}}"), Req(op, $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"path\":\"C:\\\\x\"}}"),
+            Req(op, $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"contentBase64\":\"AA==\"}}"));
+    }
+    var revert = Parsed(Req("revertFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\",\"revisionId\":\"{Guid1}\"}}"));
+    Assert(revert.Operation == VaultOperation.RevertFile && revert.RevisionId == Guid.Parse(Guid1), "revert");
+    Rejects(Vault, Req("revertFile", $"{{\"projectId\":\"{P}\",\"fileId\":\"{F}\"}}"));
+    Assert(Parsed(Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"\"}}")).Folder == "", "the project root");
+    Assert(Parsed(Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"res/icons\"}}")).Folder == "res/icons", "a folder");
+    Rejects(Vault, Req("addFromDisk", $"{{\"projectId\":\"{P}\"}}"), Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"/res\"}}"),
+        Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"res/\"}}"), Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":null}}"),
+        Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"a\\u0000b\"}}"), Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"{new string('f', BridgePolicy.MaxNameChars + 1)}\"}}"),
+        Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"res\",\"files\":[\"C:\\\\a.png\"]}}"));
 });
 
 Check("bridge: settings carry exactly eight bounded display preferences", () =>

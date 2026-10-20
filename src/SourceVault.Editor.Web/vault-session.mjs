@@ -24,6 +24,14 @@ const LANGUAGES = { ts: 'typescript', tsx: 'typescript', mts: 'typescript', js: 
   psd1: 'powershell', sh: 'shell', bash: 'shell', bat: 'bat', cmd: 'bat', ini: 'ini', dockerfile: 'dockerfile' };
 export const languageFor = name => LANGUAGES[String(name).split('.').at(-1).toLowerCase()] ?? 'plaintext';
 
+/** Text the editor opens and saves (docs/vault-any-file-design.md section 4). Other files get the info panel. */
+export const MAX_EDITOR_TEXT_BYTES = 1024 * 1024;
+/** Whether the editor can show a file or revision ({ kind, byteLength }): text of at most 1 MiB. */
+export const isOpenable = f => (f.kind ?? 'text') === 'text' && f.byteLength <= MAX_EDITOR_TEXT_BYTES;
+/** The explorer badge: null for openable files, else binary | large. */
+export const badgeOf = f => isOpenable(f) ? null : (f.kind === 'binary' ? 'binary' : 'large');
+const tooLarge = text => new TextEncoder().encode(text).length > MAX_EDITOR_TEXT_BYTES;
+
 /** A failed vault operation. `code` is a fixed protocol/bridge code, never text from a document. */
 export class VaultError extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -57,7 +65,7 @@ export class BridgeClient {
 export class VaultSession {
   projects = [];
   project = null;          // { projectId, name, fileCount }
-  files = new Map();       // fileId -> { id, path, language, byteLength, loaded, text, saved, revision, conflict }
+  files = new Map();       // fileId -> { id, path, language, byteLength, kind, sha256, loaded, text, saved, revision, conflict, pending }
   openIds = [];
   activeId = null;
   locked = true;
@@ -93,8 +101,10 @@ export class VaultSession {
     const result = await this.#call('unlock');
     this.locked = false; this.lockReason = null;
     const changed = (result.changed ?? []).filter(c => c.projectId === this.project?.projectId).map(c => c.fileId);
-    // A draft already merged onto their version is checked again by its save, so it is not flagged here.
-    for (const id of changed) { const f = this.files.get(id); if (f && !f.mergedOnto) f.conflict = true; }
+    // A draft already merged onto their version is checked again by its save, so it is not flagged here. An info
+    // panel's file (not loaded) is simply shown as it is now. A staged replacement was discarded with the connection.
+    for (const f of this.files.values()) f.pending = false;
+    for (const id of changed) { const f = this.files.get(id); if (f?.loaded && !f.mergedOnto) f.conflict = true; }
     await this.refreshProjects();
     if (this.project) await this.#refreshFiles();
     return changed;
@@ -150,8 +160,9 @@ export class VaultSession {
     const next = new Map();
     for (const info of listed) {
       const existing = this.files.get(info.fileId);
-      next.set(info.fileId, existing ? { ...existing, path: info.name, language: languageFor(info.name), byteLength: info.byteLength, deleted: false }
-        : { id: info.fileId, path: info.name, language: languageFor(info.name), byteLength: info.byteLength, loaded: false, text: null, saved: null, revision: 0, conflict: false, deleted: false });
+      const listing = { path: info.name, language: languageFor(info.name), byteLength: info.byteLength, kind: info.kind ?? 'text', sha256: info.sha256 ?? null, deleted: false };
+      next.set(info.fileId, existing ? { ...existing, ...listing }
+        : { id: info.fileId, ...listing, loaded: false, text: null, saved: null, revision: 0, conflict: false, pending: false });
     }
     // Someone else deleted a file this editor holds a draft of: keep the draft, marked, so it can be saved as a new file.
     for (const [id, f] of this.files) if (!next.has(id) && this.dirty(id)) next.set(id, { ...f, deleted: true });
@@ -162,6 +173,7 @@ export class VaultSession {
 
   async open(id) {
     const f = this.file(id);
+    if (!f.loaded && !isOpenable(f)) throw new VaultError('NotOpenable'); // the UI shows the info panel instead
     if (!f.loaded) {
       const doc = await this.#call('openDocument', { projectId: this.project.projectId, fileId: id });
       f.text = f.saved = doc.text; f.loaded = true; f.conflict = false;
@@ -170,11 +182,29 @@ export class VaultSession {
     this.activeId = id;
   }
 
-  /** Discards local edits and loads the vault's current version (after a conflict). */
+  /**
+   * Discards local edits and loads the vault's current version (after a conflict). Returns false when their version is
+   * binary or over 1 MiB: the tab is then closed and the file shows its info panel.
+   */
   async reload(id) {
     const f = this.file(id);
-    const doc = await this.#call('openDocument', { projectId: this.project.projectId, fileId: id });
-    f.text = f.saved = doc.text; f.loaded = true; f.conflict = false; f.mergedOnto = null;
+    try {
+      const doc = await this.#call('openDocument', { projectId: this.project.projectId, fileId: id });
+      f.text = f.saved = doc.text; f.loaded = true; f.conflict = false; f.mergedOnto = null;
+      return true;
+    } catch (e) {
+      if (e.code !== 'NotText' && e.code !== 'LimitExceeded') throw e;
+      await this.#refreshFiles();
+      this.#unload(id);
+      return false;
+    }
+  }
+
+  #unload(id) {
+    const f = this.files.get(id);
+    if (f) { f.loaded = false; f.text = f.saved = null; f.conflict = false; f.mergedOnto = null; }
+    this.openIds = this.openIds.filter(x => x !== id);
+    if (this.activeId === id) this.activeId = this.openIds.at(-1) ?? null;
   }
 
   /** Closes a tab; refused with unsaved edits. The file's text is dropped from memory. */
@@ -200,12 +230,13 @@ export class VaultSession {
     const f = this.file(id);
     if (!this.dirty(id)) return false;
     const sent = f.text; // edits made while the save is in flight stay dirty
+    if (tooLarge(sent)) throw new VaultError('LimitExceeded'); // the host would ignore it
     const merged = f.mergedOnto;
     try {
       const result = merged
         ? await this.#call('saveMerged', { projectId: this.project.projectId, fileId: id, text: sent, revisionId: merged })
         : await this.#call('saveDocument', { projectId: this.project.projectId, fileId: id, text: sent });
-      f.saved = sent; f.byteLength = result.byteLength; f.revision++; f.conflict = false; f.mergedOnto = null; this.savedCount++;
+      f.saved = sent; f.byteLength = result.byteLength; f.kind = 'text'; f.revision++; f.conflict = false; f.mergedOnto = null; this.savedCount++;
       return true;
     } catch (e) {
       if (e.code === 'Conflict') { f.conflict = true; f.mergedOnto = null; } // changed again: merge again from the latest version
@@ -222,7 +253,9 @@ export class VaultSession {
     const f = this.file(id);
     if (!f.loaded) throw new VaultError('NotOpen');
     const sources = await this.#call('mergeSources', { projectId: this.project.projectId, fileId: id });
-    return { ...merge3(sources.base, f.text, sources.theirs), theirsRevisionId: sources.theirsRevisionId };
+    // Binary or over 1 MiB on a side: no text merge, only keep mine (save over theirs) or keep theirs (reload).
+    if (sources.mergeable === false) return { mergeable: false, theirsRevisionId: sources.theirsRevisionId };
+    return { mergeable: true, ...merge3(sources.base, f.text, sources.theirs), theirsRevisionId: sources.theirsRevisionId };
   }
 
   /** Takes a merge result as the draft. The next save is made on top of their version, if it is still current. */
@@ -249,6 +282,90 @@ export class VaultSession {
     const result = await this.#call('renameFolder', { projectId: this.project.projectId, name: folder, newName: newFolder });
     await this.#refreshFiles();
     return result.renamed;
+  }
+
+  // ---- files the editor doesn't show (binary, or text over 1 MiB), and files from disk ----------------------------
+  // The host shows its own Open dialog and reads the file: this page never sees a path or the bytes.
+
+  /** Info panel: { fileId, name, kind, byteLength, sha256, savedAt, savedBy }. The host then treats the file as shown. */
+  async info(id) {
+    const f = this.file(id);
+    const result = await this.#call('fileInfo', { projectId: this.project.projectId, fileId: id });
+    Object.assign(f, { path: result.name, language: languageFor(result.name), byteLength: result.byteLength, kind: result.kind, sha256: result.sha256 });
+    return result;
+  }
+
+  /** The info panel closed: the host forgets the file (an opened text file stays open). */
+  async closeInfo(id) {
+    const f = this.files.get(id);
+    if (f && !f.loaded && this.project) await this.#call('closeDocument', { projectId: this.project.projectId, fileId: id });
+  }
+
+  #took(f, result) {
+    Object.assign(f, { byteLength: result.byteLength, kind: result.kind, sha256: result.sha256, pending: false, conflict: false });
+    f.revision++; this.savedCount++;
+  }
+
+  /**
+   * Replaces a file with one chosen in the host's Open dialog. Returns false if the dialog was cancelled. Conflict:
+   * someone else changed the file meanwhile; the upload stays staged for keepMine / keepTheirs (f.pending).
+   */
+  async replaceFromDisk(id) {
+    const f = this.file(id);
+    if (this.dirty(id)) throw new VaultError('UnsavedChanges');
+    let result;
+    try { result = await this.#call('replaceFromDisk', { projectId: this.project.projectId, fileId: id }); }
+    catch (e) {
+      if (e.code === 'Cancelled') return false;
+      if (e.code === 'Conflict') f.pending = true;
+      throw e;
+    }
+    this.#took(f, result);
+    if (f.loaded) { if (isOpenable(f)) await this.reload(id); else this.#unload(id); }
+    return true;
+  }
+
+  /** After a replacement conflicted: my file goes over theirs (theirs stays in history). */
+  async keepMine(id) {
+    const f = this.file(id);
+    try { this.#took(f, await this.#call('keepMine', { projectId: this.project.projectId, fileId: id })); }
+    finally { f.pending = false; }
+    if (f.loaded) { if (isOpenable(f)) await this.reload(id); else this.#unload(id); }
+  }
+
+  /** After a replacement conflicted: my upload is discarded and theirs is shown. */
+  async keepTheirs(id) {
+    const f = this.file(id);
+    try {
+      const result = await this.#call('keepTheirs', { projectId: this.project.projectId, fileId: id });
+      Object.assign(f, { byteLength: result.byteLength, kind: result.kind, sha256: result.sha256 });
+    } finally { f.pending = false; }
+  }
+
+  /** Adds files chosen in the host's Open dialog under `folder` ('' for the root). Returns their names ([] if cancelled). */
+  async addFromDisk(folder = '') {
+    let result;
+    try { result = await this.#call('addFromDisk', { projectId: this.project.projectId, folder }); }
+    catch (e) { if (e.code === 'Cancelled') return []; throw e; }
+    await this.#refreshFiles();
+    const added = result.files ?? [];
+    if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + added.length };
+    this.savedCount += added.length;
+    return added.map(a => a.name);
+  }
+
+  /**
+   * Makes an older version current again (any kind of file; nothing is decrypted here). Refused with unsaved edits;
+   * Conflict if someone else changed the file since the editor showed it.
+   */
+  async revertFile(id, revisionId) {
+    if (this.dirty(id)) throw new VaultError('UnsavedChanges');
+    this.file(id);
+    await this.#call('revertFile', { projectId: this.project.projectId, fileId: id, revisionId });
+    this.savedCount++;
+    await this.#refreshFiles();
+    const now = this.files.get(id);
+    if (now?.loaded) { if (isOpenable(now)) await this.reload(id); else this.#unload(id); }
   }
 
   /** Deletes a file from the vault. Refused with unsaved edits; Conflict if someone else changed it since it was opened. */
@@ -341,9 +458,10 @@ export class VaultSession {
   }
 
   async createFile(name, text = '') {
+    if (tooLarge(text)) throw new VaultError('LimitExceeded');
     const created = await this.#call('createFile', { projectId: this.project.projectId, name, text });
     this.files.set(created.fileId, { id: created.fileId, path: created.name, language: languageFor(created.name),
-      byteLength: new TextEncoder().encode(text).length, loaded: true, text, saved: text, revision: 0, conflict: false, deleted: false });
+      byteLength: new TextEncoder().encode(text).length, kind: 'text', sha256: null, loaded: true, text, saved: text, revision: 0, conflict: false, deleted: false, pending: false });
     this.openIds.push(created.fileId); this.activeId = created.fileId;
     if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + 1 };
     return created.fileId;

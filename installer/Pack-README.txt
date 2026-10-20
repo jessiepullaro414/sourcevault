@@ -25,9 +25,9 @@ THE COMMAND LINE (same rules, for scripts): pack\SourceVault.Pack.exe
      pack\SourceVault.Pack.exe C:\code\my-app --to recipient.json --out my-app.svpkg --dry-run
      pack\SourceVault.Pack.exe C:\code\my-app --to recipient.json --out my-app.svpkg
 
-What goes in: UTF-8 text files up to 256 KiB, at most 1,024, from the folder and all its subfolders. Binaries,
-large files, links, and folders such as .git, bin, obj and node_modules are skipped and listed. Your folder is
-not changed.
+What goes in: every file from the folder and all its subfolders, text or binary (icons, .lib and .dll files,
+UTF-16 .rc files), up to 1 GiB each, at most 25,000 files and 8 GiB in all. Links, files over 1 GiB, names the vault
+can't hold, and folders such as .git, bin, obj and node_modules are skipped and listed. Your folder is not changed.
 
 Then carry the .svpkg file to the vault PC any way you like (it is encrypted) and import it there:
      SourceVault.Import.exe --package my-app.svpkg --project "My app"

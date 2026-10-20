@@ -58,6 +58,32 @@ public sealed class ProjectCatalog
     private string BuildsPath => Path.Combine(vaultRoot, "builds");
     private string BuildLogPath(Guid id) => Path.Combine(BuildsPath, id.ToString("D"));
     private readonly ConcurrentDictionary<Guid, RevisionStore> buildLogs = new();
+    private string StagingPath => Path.Combine(vaultRoot, "staging");
+
+    /// <summary>
+    /// staging\ (decision C6): uploads in progress, as SVR2 ciphertext only, one random folder per connection, on the
+    /// vault's own volume so a commit moves records with a rename. Emptied when the service starts.
+    /// </summary>
+    public string CreateStagingFolder()
+    {
+        if (Directory.Exists(StagingPath) && (File.GetAttributes(StagingPath) & FileAttributes.ReparsePoint) != 0) throw new IOException("Untrusted staging path.");
+        var folder = Path.Combine(StagingPath, Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        if ((File.GetAttributes(StagingPath) & FileAttributes.ReparsePoint) != 0) throw new IOException("Untrusted staging path.");
+        return folder;
+    }
+
+    /// <summary>Removes everything in staging\ (leftovers of uploads from a previous run). Never follows links.</summary>
+    public void ClearStaging()
+    {
+        if (!Directory.Exists(StagingPath)) return;
+        if ((File.GetAttributes(StagingPath) & FileAttributes.ReparsePoint) != 0) { Directory.Delete(StagingPath); return; } // the link itself
+        foreach (var entry in new DirectoryInfo(StagingPath).EnumerateFileSystemInfos())
+        {
+            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0 || entry is FileInfo) entry.Delete();
+            else ((DirectoryInfo)entry).Delete(recursive: true); // does not follow links inside
+        }
+    }
 
     /// <summary>
     /// Verifies the whole vault and returns its projects. An empty root is a fresh vault with no projects.
@@ -233,8 +259,9 @@ public sealed class ProjectCatalog
         string[] rootEntries;
         try { rootEntries = Directory.EnumerateFileSystemEntries(vaultRoot).Select(p => Path.GetFileName(p)!).ToArray(); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new VaultCatalogException(CatalogFailure.Layout); }
-        if (rootEntries.Length == 0) return null;
-        if (!rootEntries.Contains("index", StringComparer.Ordinal) || rootEntries.Any(n => n is not ("index" or "projects" or "builds")))
+        // staging\ (uploads in progress, ciphertext only) alone does not make a vault: an otherwise empty root is fresh.
+        if (rootEntries.All(n => n == "staging")) return null;
+        if (!rootEntries.Contains("index", StringComparer.Ordinal) || rootEntries.Any(n => n is not ("index" or "projects" or "builds" or "staging")))
             throw new VaultCatalogException(CatalogFailure.Layout);
         byte[]? content = null;
         try
