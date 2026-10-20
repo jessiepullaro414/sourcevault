@@ -146,7 +146,38 @@ using (var lifecycle = new ServiceLifecycle(s => statuses.Add(s)))
     lifecycle.Run(() => throw new StartupRefusedException(StartupRefusedException.VaultDriveUnavailable));
     Check(statuses[^1].State == ServiceState.Stopped && statuses[^1].ExitCode == 1066 && statuses[^1].ServiceSpecificExitCode == 17);
 }
+// ---- internal security review 2026-10-20 -----------------------------------------------------------------------------
+// The build output folder is judged like the vault root, with the build service as the trusted writer.
+{
+    var build = ServiceSid.FromServiceName("SourceVaultBuild");
+    var users = new System.Security.Principal.SecurityIdentifier("S-1-5-11"); // Authenticated Users
+    var operators = new System.Security.Principal.SecurityIdentifier("S-1-5-21-1-2-3-1001");
+    DirectoryObservation Dir(System.Security.Principal.SecurityIdentifier owner, bool isProtected, params AceInfo[] aces) =>
+        new(DirectoryState.Directory, new DirectorySecurityInfo(owner, true, isProtected, aces));
+    var full = System.Security.AccessControl.FileSystemRights.FullControl;
+    var read = System.Security.AccessControl.FileSystemRights.ReadAndExecute;
+    var root = Dir(TrustedPrincipals.Administrators, true, new AceInfo(TrustedPrincipals.LocalSystem, true, full), new AceInfo(TrustedPrincipals.Administrators, true, full),
+        new AceInfo(build, true, System.Security.AccessControl.FileSystemRights.Modify), new AceInfo(operators, true, read));
+    var lockedParent = Dir(TrustedPrincipals.Administrators, true, new AceInfo(TrustedPrincipals.Administrators, true, full), new AceInfo(operators, true, read));
+    var userParent = Dir(TrustedPrincipals.Administrators, false, new AceInfo(TrustedPrincipals.Administrators, true, full), new AceInfo(users, true, System.Security.AccessControl.FileSystemRights.Modify));
+    var driveRoot = Dir(TrustedPrincipals.TrustedInstaller, false, new AceInfo(TrustedPrincipals.Administrators, true, full), new AceInfo(users, true, System.Security.AccessControl.FileSystemRights.Modify, inheritOnly: true));
+    var good = ArtifactRoot.Validate(@"D:\SourceVault\artifacts", new FakeInspector(new() { [@"D:\SourceVault\artifacts"] = root, [@"D:\SourceVault"] = lockedParent, [@"D:\"] = driveRoot }));
+    Check(good.Passed); // operators' read access is only a warning
+    var bad = ArtifactRoot.Validate(@"D:\SourceVault\artifacts", new FakeInspector(new() { [@"D:\SourceVault\artifacts"] = root, [@"D:\SourceVault"] = userParent, [@"D:\"] = driveRoot }));
+    Check(!bad.Passed && bad.HasCode(FindingCodes.UntrustedWriteAccess, "ancestor:1")); // users could rename the parent and plant a link
+    var linked = ArtifactRoot.Validate(@"D:\SourceVault\artifacts", new FakeInspector(new() { [@"D:\SourceVault\artifacts"] = new(DirectoryState.ReparsePoint, null), [@"D:\SourceVault"] = lockedParent, [@"D:\"] = driveRoot }));
+    Check(!linked.Passed && linked.HasCode(FindingCodes.ReparsePoint, "root"));
+}
+// No program runs .NET startup hooks (DOTNET_STARTUP_HOOKS): Directory.Build.props sets StartupHookSupport=false.
+Check(AppContext.TryGetSwitch("System.StartupHookProvider.IsSupported", out var hooks) && !hooks);
+
 Console.WriteLine($"serviceTests=passed; assertions={count}; tpmTouched=false; scmTouched=false; endpoints=pipe-v2 (see Endpoints.Tests)");
+
+sealed class FakeInspector(Dictionary<string, DirectoryObservation> directories) : IStorageRootInspector
+{
+    public VolumeObservation ObserveVolume(string path) => new(DriveType.Fixed, "NTFS", LocalDisk: true);
+    public DirectoryObservation ObserveDirectory(string path) => directories.TryGetValue(path, out var d) ? d : new(DirectoryState.Missing, null);
+}
 /// <summary>Synthetic volume; every directory reads as missing. No filesystem access.</summary>
 sealed class SyntheticVolume(VolumeObservation volume) : IStorageRootInspector
 {

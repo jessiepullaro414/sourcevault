@@ -270,6 +270,46 @@ Test("docker client: inspect, upload, exec with multiplexed output, archive down
     Assert(server.Requests.Contains("POST /v1.41/containers/box/restart?t=0"), "restart");
 });
 
+// ---- the output folder (internal security review 2026-10-20) --------------------------------------------------------
+Test("channel: an untrusted output folder is refused before the vault sends anything", () =>
+{
+    var name = "sv-build-test-" + Guid.NewGuid().ToString("N");
+    var config = BuildConfig.Parse(Utf8(Config(LinuxTarget, Dest().Replace("\\", "\\\\"))));
+    var box = new FakeContainer();
+    string? checkedRoot = null;
+    using var stop = new CancellationTokenSource();
+    var serving = Task.Run(async () =>
+    {
+        await using var pipe = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+        try { await pipe.WaitForConnectionAsync(stop.Token); } catch (OperationCanceledException) { return; }
+        try { await BuildChannel.ServeAsync(pipe, () => config, _ => new FakeEngine(box), stop.Token, root => { checkedRoot = root; return false; }); } catch { }
+    });
+    var client = new BuildChannel.Client(async ct => { var p = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous); await p.ConnectAsync(5000, ct); return p; });
+    var source = new InMemoryBuildSource(Source());
+    try { Run(client.RunAsync("linux", Guid.NewGuid(), 1, source, default)); throw new Exception("untrusted output folder accepted"); }
+    catch (BuildServiceUnavailableException e) { Assert(e.Reason == "ArtifactFolderUntrusted", e.Reason); }
+    Assert(checkedRoot == config.ArtifactRoot && box.Files.Count == 0 && box.Calls.Count == 0, "checked, and nothing reached the container");
+    stop.Cancel(); serving.Wait(TimeSpan.FromSeconds(5));
+});
+
+Test("publish: a link planted in the output folder stops the build before anything is written through it", () =>
+{
+    var root = Dest(); var elsewhere = Dest(); var project = Guid.NewGuid();
+    Directory.CreateDirectory(root); Directory.CreateDirectory(elsewhere);
+    var junction = Path.Combine(root, project.ToString("D"));
+    using (var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/d /c mklink /J \"{junction}\" \"{elsewhere}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!)
+    {
+        mklink.WaitForExit();
+        if (mklink.ExitCode != 0) { Console.WriteLine("SKIP planted junction: mklink /J unavailable"); return; }
+    }
+    var linux = BuildConfig.Parse(Utf8(Config(LinuxTarget, root.Replace("\\", "\\\\")))).Targets[0];
+    var box = new FakeContainer { Build = c => { c.Files["/sv/out/result.txt"] = Utf8("output"); return (0, "ok\n"); } };
+    var outcome = Run(BuildRunner.RunAsync(linux, root, project, 1, new InMemoryBuildSource(Source()), new FakeEngine(box), default));
+    Assert(outcome.Reason == "ArtifactFolderUntrusted" && outcome.State == BuildState.Rejected, "refused: " + outcome.Reason);
+    Assert(Directory.GetFileSystemEntries(elsewhere).Length == 0, "nothing was written where the link points");
+    Directory.Delete(junction); // the link itself
+});
+
 // ---- the private channel, end to end over a named pipe -------------------------------------------------------------
 Test("channel: targets and a whole build cross the pipe; bad names and unknown targets are refused", () =>
 {

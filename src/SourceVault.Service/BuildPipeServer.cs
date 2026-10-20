@@ -45,7 +45,7 @@ internal sealed class BuildPipeServer : IDisposable
             {
                 await pipe.WaitForConnectionAsync(stopping.Token).ConfigureAwait(false);
                 VaultPipe.ValidatePrivateClient(pipe, vaultAccount);
-                await BuildChannel.ServeAsync(pipe, loadConfig, engineFor, stopping.Token).ConfigureAwait(false);
+                await BuildChannel.ServeAsync(pipe, loadConfig, engineFor, stopping.Token, ArtifactRoot.IsTrusted).ConfigureAwait(false);
             }
             catch { /* this connection only; never reported */ }
             finally { try { pipe.Dispose(); } catch { } }

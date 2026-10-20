@@ -16,7 +16,8 @@ public sealed record PipePeer(SecurityIdentifier User, uint Session, uint Proces
 /// <summary>
 /// Who may use the vault pipe: interactive members of the operators group, running an installed client executable.
 /// The executable check is defense in depth: it stops other programs run by the operator, not code injected into
-/// an allowed client.
+/// an allowed client. Startup hooks are off in every client (StartupHookSupport=false); a debugger or a .NET profiler
+/// set through environment variables can still inject code, and that stays outside the claim.
 /// </summary>
 public sealed class PipePeerPolicy(SecurityIdentifier operatorsGroup, IEnumerable<string> allowedImagePaths, ClientPins? pins = null)
 {

@@ -207,7 +207,8 @@ Before opening the key, the service validates the vault root (`TrustedStorageRoo
 - **Executable path:** the client process must be one of the installed clients at its exact path under Program Files (lab-verified: PowerShell and a byte-identical copy elsewhere were refused).
 - **Hash pins:** on each connection the service re-reads `install-manifest.sha256` and requires the client's folder, recursively and including the editor's web assets, to hold exactly the listed files with matching hashes. An extra or changed file is refused.
 - **PID reuse:** the client process must still be running and must be older than the connection.
-- **Be aware:** these are defence in depth. An administrator can rewrite the manifest; only files on disk are checked, not the running image; code injected into an allowed client is not stopped. Authenticode signer checks wait for a signing decision.
+- **Startup hooks are off** in every program (`StartupHookSupport=false`), so `DOTNET_STARTUP_HOOKS` can't load code into an installed client.
+- **Be aware:** these are defence in depth. An administrator can rewrite the manifest; only files on disk are checked, not the running image; code injected into an allowed client (a debugger, or a .NET profiler set through environment variables) is not stopped. Authenticode signer checks wait for a signing decision.
 
 ### 7.5 Sessions
 
@@ -267,6 +268,7 @@ Builds are the one way vault content becomes plaintext files, and they are desig
 - **Separation:** Docker access is administrator-equivalent, so it belongs to a second identity, `NT SERVICE\SourceVaultBuild`. That identity has no access to the vault or the TPM, never receives project names, and serves only the vault service over an access-checked pipe. The vault service checks that pipe's owner before sending anything.
 - **Administrator-only configuration** (`build.json`): containers, commands, paths, time and size limits. Operators see target names only. A container with network access is refused unless the administrator allows it per target; plain-TCP Docker is refused.
 - **The engine is checked:** a Windows engine's named pipe must be owned by SYSTEM or Administrators before anything is sent, and the connection allows identification only. A pipe created by an ordinary user while Docker is down is refused (`EngineUntrusted`). The WSL engine's TLS certificate must chain to the administrator's own CA.
+- **The output folder is checked** before every build, like the vault root: no links, and only the build service, SYSTEM and Administrators can change it or any folder above it. Otherwise the build is refused before any source is sent.
 - **Output checks:** regular files and folders only, no links, devices, absolute or `..` paths, size and count limits. Source maps, debug symbols, compiler intermediates and inline source maps are dropped and listed in the encrypted build log. Output goes to `<artifactRoot>\<projectId>\<build>-<target>`, so names never appear on disk.
 - **Be aware:**
   - a build runs the project's own scripts and any vendored binaries, so anyone who can edit a project can make its build copy source into the output. The administrator controls *where* output comes from, not *what* it contains;

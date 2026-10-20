@@ -271,7 +271,10 @@ function Show-Status {
     $build = Get-Service -Name $buildServiceName -ErrorAction SilentlyContinue
     if ($build) {
         $config = Invoke-ServiceTool 'build-config-check'
-        if ($config.Exit -eq 0) { Ok "build configuration valid ($(($config.Output -split "`r?`n") -join '; '))" } else { Warn "build configuration: $($config.Output)" }
+        if ($config.Exit -eq 0) {
+            Ok "build configuration valid ($(($config.Output -split "`r?`n" | Where-Object { $_ -match '^(artifactRoot|targets)=' }) -join '; '))"
+            if ($config.Output -notmatch 'artifactRootTrusted=yes') { Warn "builds are refused until the artifact folder and the folders above it are locked down (ArtifactFolderUntrusted):`n$(($config.Output -split "`r?`n" | Where-Object { $_ -match '^(error|warning|artifactRootTrusted)' }) -join "`n")" }
+        } else { Warn "build configuration: $($config.Output)" }
         if ($build.Status -eq 'Running') { Ok 'build service RUNNING' }
         else {
             $exit = Get-ExitInfo $buildServiceName
@@ -569,12 +572,24 @@ if ($WithBuilds -or $buildExisting) {
         $artifactRoot = ($check.Output -split "`r?`n" | Where-Object { $_ -like 'artifactRoot=*' }) -replace '^artifactRoot=', ''
         Ok "build.json is valid ($(($check.Output -split "`r?`n" | Where-Object { $_ -like 'targets=*' }) -replace '^targets=', 'targets: '))"
         if (!(Test-Path -LiteralPath $artifactRoot)) {
-            New-Item -ItemType Directory -Path $artifactRoot -Force | Out-Null
             $operatorsSid = (New-Object Security.Principal.NTAccount($groupName)).Translate([Security.Principal.SecurityIdentifier]).Value
+            # A parent setup creates is locked down too: the build service refuses an output folder whose parents others can change.
+            $artifactParent = Split-Path -Parent $artifactRoot
+            if (!(Test-Path -LiteralPath $artifactParent)) {
+                New-Item -ItemType Directory -Path $artifactParent -Force | Out-Null
+                Set-ExactSecurity $artifactParent "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x1200a9;;;$buildSid)(A;;0x1200a9;;;$operatorsSid)"
+            }
+            New-Item -ItemType Directory -Path $artifactRoot | Out-Null
             # The build service writes artifacts; operators read them; ordinary users get nothing.
             Set-ExactSecurity $artifactRoot "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$buildSid)(A;OICI;0x1200a9;;;$operatorsSid)"
             Ok "created artifact folder $artifactRoot (build service writes; '$groupName' can read)"
         } else { Warn "artifact folder $artifactRoot already exists; its permissions were not changed (the build service needs Modify, operators Read)" }
+        $check = Invoke-ServiceTool 'build-config-check'
+        if ($check.Output -match 'artifactRootTrusted=yes') { Ok 'artifact folder and the folders above it are locked down' }
+        else {
+            Write-Host (($check.Output -split "`r?`n" | Where-Object { $_ -match '^(error|warning) ' }) -join "`n")
+            Warn "builds will be refused (ArtifactFolderUntrusted): the artifact folder, or a folder above it, can be changed by people other than administrators, or is a link. Put artifactRoot inside a folder only administrators can change (e.g. one setup creates), then run setup -Update -WithBuilds."
+        }
         Stop-BuildService
         & sc.exe start $buildServiceName | Out-Null
         $state = Wait-Service 'Running', 'Stopped' 60 $buildServiceName
