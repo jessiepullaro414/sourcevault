@@ -1,4 +1,5 @@
 using System.Formats.Tar;
+using System.IO.Pipelines;
 using System.Security.Cryptography;
 
 namespace SourceVault.Build;
@@ -11,7 +12,9 @@ public sealed record BuildOutcome(BuildState State, string? Reason, int? ExitCod
 /// <summary>
 /// One build in a named container (docs/files-history-builds-design.md, section 4):
 /// 1. the container must be running, on the configured platform, and (unless allowed) have no network;
-/// 2. sourcePath and artifactPath are emptied; 3. the project is copied in as a tar; 4. the command runs with a time
+/// 2. sourcePath and artifactPath are emptied; 3. the project is copied in as a tar, streamed from the source straight
+/// into the engine (any-file design section 6: a few chunks in memory, 30 minutes at most, not counted in the build's
+/// own time limit; a source that fails mid-copy fails the build with SourceUnavailable); 4. the command runs with a time
 /// limit, output captured (bounded); 5. on success the artifact folder is published to the host;
 /// 6. both folders are emptied again. A timed-out build restarts the container to stop it.
 /// Emptying folders is best effort, not erasure: whatever the build copied elsewhere stays in the container.
@@ -20,9 +23,10 @@ public static class BuildRunner
 {
     public const int MaxLogBytes = 512 * 1024;
     private static readonly TimeSpan StepTimeout = TimeSpan.FromMinutes(2);
+    internal static TimeSpan CopyTimeout = TimeSpan.FromMinutes(30);
 
     public static async Task<BuildOutcome> RunAsync(BuildTarget target, string artifactRoot, Guid projectId, int buildNumber,
-        IReadOnlyList<(string Name, byte[] Content)> files, IDockerEngine engine, CancellationToken ct)
+        IBuildSource source, IDockerEngine engine, CancellationToken ct)
     {
         ContainerInfo info;
         try { info = await engine.InspectAsync(target.Container, ct).ConfigureAwait(false); }
@@ -37,9 +41,7 @@ public static class BuildRunner
         {
             if (!await CleanAsync(target, engine, ct).ConfigureAwait(false)) return Unavailable("CleanupFailed");
             needsCleanup = true;
-            var tar = SourceArchive(files);
-            try { await engine.PutArchiveAsync(target.Container, target.SourcePath, tar, ct).ConfigureAwait(false); }
-            finally { CryptographicOperations.ZeroMemory(tar.GetBuffer()); tar.Dispose(); } // the tar holds plaintext source
+            if (await CopySourceAsync(target, source, engine, ct).ConfigureAwait(false) is { } failed) return failed;
             var run = await engine.ExecAsync(target.Container, target.Command, target.SourcePath, TimeSpan.FromSeconds(target.TimeoutSeconds), MaxLogBytes, ct).ConfigureAwait(false);
             if (run.TimedOut)
             {
@@ -72,6 +74,56 @@ public static class BuildRunner
 
     private static BuildOutcome Unavailable(string reason) => new(BuildState.Unavailable, reason, null, [], false, null);
 
+    // Streams the source into sourcePath as a tar: a producer writes tar entries into a pipe while the engine reads the
+    // upload body from it, so memory is the pipe's window. Null on success; otherwise the build's outcome.
+    private static async Task<BuildOutcome?> CopySourceAsync(BuildTarget target, IBuildSource source, IDockerEngine engine, CancellationToken ct)
+    {
+        using var copy = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        copy.CancelAfter(CopyTimeout);
+        var pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 2 << 20, resumeWriterThreshold: 1 << 20, useSynchronizationContext: false));
+        var producer = Task.Run(() => WriteTarAsync(source, pipe.Writer, copy.Token), CancellationToken.None);
+        Exception? upload = null;
+        try { await engine.PutArchiveAsync(target.Container, target.SourcePath, pipe.Reader.AsStream(), copy.Token).ConfigureAwait(false); }
+        catch (Exception e) when (e is not OutOfMemoryException) { upload = e; }
+        finally { await pipe.Reader.CompleteAsync().ConfigureAwait(false); } // a stopped upload releases a waiting producer
+        try { await producer.ConfigureAwait(false); }
+        catch (BuildSourceException) { return new(BuildState.Failed, "SourceUnavailable", null, [], false, null); }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { return new(BuildState.Failed, "CopyTimedOut", null, [], false, null); }
+        catch (Exception) when (upload is not null) { } // the upload's failure is reported below
+        if (upload is OperationCanceledException && !ct.IsCancellationRequested) return new(BuildState.Failed, "CopyTimedOut", null, [], false, null);
+        if (upload is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(upload).Throw();
+        return null;
+    }
+
+    // The project as a tar of relative paths ("src/a.ts"), written entry by entry from the source into the pipe.
+    internal static async Task WriteTarAsync(IBuildSource source, PipeWriter writer, CancellationToken ct)
+    {
+        try
+        {
+            await using (var stream = writer.AsStream(leaveOpen: true))
+            await using (var tar = new TarWriter(stream, TarEntryFormat.Pax, leaveOpen: true))
+            {
+                var folders = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var file in source.Files)
+                {
+                    var parts = file.Name.Split('/');
+                    for (int i = 1; i < parts.Length; i++)
+                    {
+                        var folder = string.Join('/', parts[..i]) + "/";
+                        if (folders.Add(folder)) await tar.WriteEntryAsync(new PaxTarEntry(TarEntryType.Directory, folder) { Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute }, ct).ConfigureAwait(false);
+                    }
+                    var data = new SourceFileStream(source, file.Length, ct);
+                    var entry = new PaxTarEntry(TarEntryType.RegularFile, file.Name) { Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead, DataStream = data };
+                    await tar.WriteEntryAsync(entry, ct).ConfigureAwait(false);
+                    if (data.Position != file.Length) throw new BuildSourceException("SourceUnavailable");
+                }
+            }
+            if (!(await source.NextAsync(ct).ConfigureAwait(false)).IsEmpty) throw new BuildSourceException("SourceUnavailable"); // more bytes than the table
+            await writer.CompleteAsync().ConfigureAwait(false);
+        }
+        catch (Exception e) { await writer.CompleteAsync(e).ConfigureAwait(false); throw; }
+    }
+
     // The dropped files are listed at the end of the build log, which the vault stores encrypted (and, when trimming
     // a long log, keeps the end of). The old buffer, which may hold build output, is zeroed.
     internal static byte[] WithDroppedNotice(byte[] output, PublishedArtifacts published)
@@ -99,33 +151,4 @@ public static class BuildRunner
         return !result.TimedOut && result.ExitCode == 0;
     }
 
-    // The project as an in-memory tar of relative paths ("src/a.ts"); extracted by Docker into sourcePath.
-    internal static MemoryStream SourceArchive(IReadOnlyList<(string Name, byte[] Content)> files)
-    {
-        // Pre-sized so the buffer never grows: a reallocation would leave an unzeroed copy of the source behind.
-        var stream = new MemoryStream(files.Sum(f => f.Content.Length + 3072) + 4096);
-        using (var writer = new TarWriter(stream, TarEntryFormat.Pax, leaveOpen: true))
-        {
-            var folders = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var (name, content) in files)
-            {
-                var parts = name.Split('/');
-                for (int i = 1; i < parts.Length; i++)
-                {
-                    var folder = string.Join('/', parts[..i]) + "/";
-                    if (folders.Add(folder)) writer.WriteEntry(new PaxTarEntry(TarEntryType.Directory, folder) { Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute });
-                }
-                var entry = new PaxTarEntry(TarEntryType.RegularFile, name) { Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead, DataStream = new MemoryStream(content, writable: false) };
-                writer.WriteEntry(entry);
-            }
-        }
-        stream.Position = 0;
-        return stream;
-    }
-
-    /// <summary>Zeroes the plaintext buffers of a build's files.</summary>
-    public static void Zero(IReadOnlyList<(string Name, byte[] Content)> files)
-    {
-        foreach (var (_, content) in files) CryptographicOperations.ZeroMemory(content);
-    }
 }

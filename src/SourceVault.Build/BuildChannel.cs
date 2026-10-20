@@ -13,7 +13,7 @@ public sealed record BuildReply(string State, string? Reason, int? ExitCode, byt
 public interface IBuildService
 {
     Task<IReadOnlyList<string>> TargetsAsync(CancellationToken ct);
-    Task<BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IReadOnlyList<(string Name, byte[] Content)> files, CancellationToken ct);
+    Task<BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IBuildSource source, CancellationToken ct);
 }
 
 /// <summary>The build service is not installed, not running, misconfigured, or answered unexpectedly.</summary>
@@ -26,16 +26,29 @@ public sealed class BuildServiceUnavailableException(string reason) : Exception(
 /// The private channel between the vault service (client) and the build service (server), over a pipe only those two
 /// accounts can use. Frames are <see cref="FrameCodec"/> JSON. One connection per request:
 ///   {op:"targets"}                                   -> {ok, targets[] | code}
-///   {op:"build", target, projectId, buildNumber, fileCount}, then fileCount × {name, contentBase64}
+///   build, version 2 (any-file design section 6; both services are installed together):
+///     {op:"build", version:2, target, projectId, buildNumber, fileCount, totalBytes}
+///                                                     -> {ok:true, accepted:true} | {ok:false, code}
+///     then table frames {files:[{name, length}]} (at most 1,000 each) until fileCount entries
+///                                                     -> {ok:true, ready:true} | {ok:false, code}
+/// Every refusal comes while the vault side is waiting to read, never while it is still writing (the service reads
+/// the whole table before refusing a bad entry), so neither side can block the other.
+///     then data frames {dataBase64} (at most 512 KiB, never spanning files) with the files' bytes in table order,
+///     or {abort} if the vault cannot read a record
 ///                                                     -> {ok, state, reason, exitCode, logBase64, logTruncated, artifactFolder, artifactFiles, artifactBytes, artifactsDropped}
-/// Source crosses only this pipe; the build service never sees the vault, its key, or project names.
+/// Every name and limit is checked before any byte is copied. Source crosses only this pipe; the build service never
+/// sees the vault, its key, or project names.
 /// </summary>
 public static class BuildChannel
 {
     public const string PipeName = "SourceVault.Build.v1";
-    public const int MaxFiles = 1024;
-    public const int MaxFileBytes = 256 * 1024;
-    private static readonly TimeSpan BuildWait = TimeSpan.FromMinutes(70); // longest allowed build plus copying
+    public const int Version = 2;
+    public const int MaxFiles = 25000;
+    public const long MaxFileBytes = 1L << 30;
+    public const long MaxTotalBytes = 8L << 30;
+    public const int MaxChunkBytes = 512 * 1024;
+    private const int TableEntriesPerFrame = 1000;
+    private static readonly TimeSpan BuildWait = TimeSpan.FromMinutes(70); // longest allowed build after the copy
 
     // ---- client (vault service) ----------------------------------------------------------------------------------
     public sealed class Client(Func<CancellationToken, Task<Stream>> connect) : IBuildService
@@ -49,17 +62,40 @@ public static class BuildChannel
             return root.GetProperty("targets").EnumerateArray().Select(t => t.GetString()!).ToList();
         }
 
-        public async Task<BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IReadOnlyList<(string Name, byte[] Content)> files, CancellationToken ct)
+        public async Task<BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IBuildSource source, CancellationToken ct)
         {
             await using var pipe = await Connect(ct).ConfigureAwait(false);
+            var files = source.Files;
+            long total = files.Sum(f => f.Length);
             await Send(pipe, w =>
             {
-                w.WriteString("op", "build"); w.WriteString("target", target); w.WriteString("projectId", projectId.ToString("D"));
-                w.WriteNumber("buildNumber", buildNumber); w.WriteNumber("fileCount", files.Count);
+                w.WriteString("op", "build"); w.WriteNumber("version", Version); w.WriteString("target", target); w.WriteString("projectId", projectId.ToString("D"));
+                w.WriteNumber("buildNumber", buildNumber); w.WriteNumber("fileCount", files.Count); w.WriteNumber("totalBytes", total);
             }, ct).ConfigureAwait(false);
-            foreach (var (name, content) in files)
-                await Send(pipe, w => { w.WriteString("name", name); w.WriteBase64String("contentBase64", content); }, ct, 16384 + content.Length * 4 / 3).ConfigureAwait(false);
-            using var reply = await Receive(pipe, BuildWait, ct).ConfigureAwait(false);
+            using (var accepted = await Receive(pipe, TimeSpan.FromMinutes(1), ct).ConfigureAwait(false)) Ok(accepted); // refused: version, counts, target
+            for (int at = 0; at < files.Count; at += TableEntriesPerFrame)
+            {
+                var page = files.Skip(at).Take(TableEntriesPerFrame).ToList();
+                await Send(pipe, w =>
+                {
+                    w.WriteStartArray("files");
+                    foreach (var f in page) { w.WriteStartObject(); w.WriteString("name", f.Name); w.WriteNumber("length", f.Length); w.WriteEndObject(); }
+                    w.WriteEndArray();
+                }, ct, 65536).ConfigureAwait(false);
+            }
+            using (var ready = await Receive(pipe, TimeSpan.FromMinutes(1), ct).ConfigureAwait(false)) Ok(ready); // refused: unknown target, limits
+            try
+            {
+                for (long sent = 0; sent < total;)
+                {
+                    var chunk = await source.NextAsync(ct).ConfigureAwait(false);
+                    if (chunk.IsEmpty || chunk.Length > MaxChunkBytes) throw new BuildSourceException("SourceUnavailable");
+                    await Send(pipe, w => w.WriteBase64String("dataBase64", chunk.Span), ct, 16384 + chunk.Length * 4 / 3).ConfigureAwait(false);
+                    sent += chunk.Length;
+                }
+            }
+            catch (BuildSourceException e) { await Send(pipe, w => w.WriteString("abort", e.Reason), ct).ConfigureAwait(false); }
+            using var reply = await Receive(pipe, BuildWait + BuildRunner.CopyTimeout, ct).ConfigureAwait(false);
             var root = Ok(reply);
             var log = root.GetProperty("logBase64").GetBytesFromBase64();
             int? exit = root.GetProperty("exitCode").ValueKind == JsonValueKind.Number ? root.GetProperty("exitCode").GetInt32() : null;
@@ -102,25 +138,46 @@ public static class BuildChannel
         if (op != "build") { await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; }
         var targetName = root.GetProperty("target").GetString();
         var target = config.Targets.FirstOrDefault(t => t.Name.Equals(targetName, StringComparison.OrdinalIgnoreCase));
-        if (!Guid.TryParseExact(root.GetProperty("projectId").GetString(), "D", out var projectId) || !root.GetProperty("buildNumber").TryGetInt32(out int number) || number < 1
-            || !root.GetProperty("fileCount").TryGetInt32(out int count) || count is < 0 or > MaxFiles)
+        if (!root.TryGetProperty("version", out var version) || !version.TryGetInt32(out int v) || v != Version
+            || !Guid.TryParseExact(root.GetProperty("projectId").GetString(), "D", out var projectId) || !root.GetProperty("buildNumber").TryGetInt32(out int number) || number < 1
+            || !root.GetProperty("fileCount").TryGetInt32(out int count) || count is < 0 or > MaxFiles
+            || !root.GetProperty("totalBytes").TryGetInt64(out long total) || total is < 0 or > MaxTotalBytes)
         { await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; }
-        var files = new List<(string, byte[])>();
+        if (target is null) { await Refuse(pipe, "UnknownTarget", ct).ConfigureAwait(false); return; }
+        await Send(pipe, w => { w.WriteBoolean("ok", true); w.WriteBoolean("accepted", true); }, ct).ConfigureAwait(false);
+        // The whole table, every name and limit, before a single byte is copied. A bad entry is remembered and the rest of
+        // the table still read, so the refusal comes when the vault side is listening.
+        var files = new List<BuildFile>(count);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        long sum = 0;
+        int seen = 0;
+        bool valid = true;
+        while (seen < count)
+        {
+            using var frame = await Receive(pipe, TimeSpan.FromMinutes(1), ct).ConfigureAwait(false);
+            if (!frame.RootElement.TryGetProperty("files", out var page) || page.ValueKind != JsonValueKind.Array || page.GetArrayLength() is 0 or > TableEntriesPerFrame
+                || seen + page.GetArrayLength() > count)
+            { await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; } // not this protocol: no point reading on
+            foreach (var entry in page.EnumerateArray())
+            {
+                seen++;
+                var name = entry.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString()! : "";
+                if (!valid || !ValidSourceName(name) || !names.Add(name) || !entry.TryGetProperty("length", out var l) || !l.TryGetInt64(out long length)
+                    || length is < 0 or > MaxFileBytes || (sum += length) > total)
+                { valid = false; continue; }
+                files.Add(new BuildFile(name, length));
+            }
+        }
+        if (!valid || sum != total) { await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; }
+        await Send(pipe, w => { w.WriteBoolean("ok", true); w.WriteBoolean("ready", true); }, ct).ConfigureAwait(false);
+        var source = new PipeBuildSource(pipe, files);
         try
         {
-            for (int i = 0; i < count; i++)
-            {
-                using var frame = await Receive(pipe, TimeSpan.FromMinutes(1), ct).ConfigureAwait(false);
-                var name = frame.RootElement.GetProperty("name").GetString() ?? "";
-                if (!ValidSourceName(name) || files.Any(f => string.Equals(f.Item1, name, StringComparison.OrdinalIgnoreCase))) { await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; }
-                var content = frame.RootElement.GetProperty("contentBase64").GetBytesFromBase64();
-                if (content.Length > MaxFileBytes) { CryptographicOperations.ZeroMemory(content); await Refuse(pipe, "InvalidRequest", ct).ConfigureAwait(false); return; }
-                files.Add((name, content));
-            }
-            if (target is null) { await Refuse(pipe, "UnknownTarget", ct).ConfigureAwait(false); return; }
             BuildOutcome outcome;
             using (var engine = engineFor(target))
-                outcome = await BuildRunner.RunAsync(target, config.ArtifactRoot, projectId, number, files, engine, ct).ConfigureAwait(false);
+                outcome = await BuildRunner.RunAsync(target, config.ArtifactRoot, projectId, number, source, engine, ct).ConfigureAwait(false);
+            // A copy that stopped early (engine error, timeout) still reads the rest, so the vault side never blocks writing.
+            await source.DrainAsync(ct).ConfigureAwait(false);
             try
             {
                 await Send(pipe, w =>
@@ -139,7 +196,44 @@ public static class BuildChannel
             }
             finally { CryptographicOperations.ZeroMemory(outcome.Log); }
         }
-        finally { BuildRunner.Zero(files); }
+        finally { source.Dispose(); }
+    }
+
+    // The build service's view of the copy: data frames from the vault side, checked against the table.
+    private sealed class PipeBuildSource(Stream pipe, IReadOnlyList<BuildFile> files) : IBuildSource, IDisposable
+    {
+        private int file;
+        private long fileLeft = files.Count > 0 ? files[0].Length : 0;
+        private byte[]? last;
+        private bool aborted;
+        public IReadOnlyList<BuildFile> Files => files;
+
+        public async ValueTask<ReadOnlyMemory<byte>> NextAsync(CancellationToken ct)
+        {
+            Zero();
+            while (file < files.Count && fileLeft == 0) { file++; fileLeft = file < files.Count ? files[file].Length : 0; }
+            if (file >= files.Count) return ReadOnlyMemory<byte>.Empty;
+            if (aborted) throw new BuildSourceException("SourceUnavailable");
+            using var frame = await Receive(pipe, TimeSpan.FromMinutes(1), ct).ConfigureAwait(false);
+            var root = frame.RootElement;
+            if (root.TryGetProperty("abort", out _)) { aborted = true; throw new BuildSourceException("SourceUnavailable"); }
+            if (!root.TryGetProperty("dataBase64", out var data) || data.ValueKind != JsonValueKind.String) { aborted = true; throw new BuildSourceException("InvalidRequest"); }
+            last = data.GetBytesFromBase64();
+            if (last.Length == 0 || last.Length > MaxChunkBytes || last.Length > fileLeft) { aborted = true; throw new BuildSourceException("InvalidRequest"); }
+            fileLeft -= last.Length;
+            return last;
+        }
+
+        /// <summary>Reads and discards whatever the vault side still sends, up to the table's end or an abort.</summary>
+        public async Task DrainAsync(CancellationToken ct)
+        {
+            try { while (!aborted && !(await NextAsync(ct).ConfigureAwait(false)).IsEmpty) { } }
+            catch (BuildSourceException) { }
+            Zero();
+        }
+
+        private void Zero() { if (last is not null) CryptographicOperations.ZeroMemory(last); last = null; }
+        public void Dispose() => Zero();
     }
 
     // Source names as the vault stores them: '/'-separated relative paths of valid Windows names.

@@ -422,30 +422,7 @@ public sealed partial class RevisionStore
     /// </summary>
     private void ReadContent(StoreFile entry, byte[] recordSha256, KeyScope keys, Action<ReadOnlySpan<byte>> consume)
     {
-        var path = BlobPath(entry.RevisionId);
-        CheckStoreFile(path);
-        using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.SequentialScan);
-        if (file.Length != RecordSize(entry)) throw new InvalidDataException("Document record does not match the manifest.");
-        using var hashing = new HashingReadStream(file);
-        using var plain = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-        using (var reader = new SegmentedRecordReader(new(projectId, entry.FileId, entry.RevisionId, RecordKind.Document), hashing, null, keys.Get()))
-        {
-            if (reader.PlaintextLength != entry.ByteLength) throw new InvalidDataException("Document length mismatch.");
-            var buffer = new byte[(int)Math.Min(SegmentedRecord.SegmentLength, entry.ByteLength)];
-            try
-            {
-                for (int n; !reader.Finished;)
-                {
-                    n = reader.ReadNextSegment(buffer);
-                    plain.AppendData(buffer, 0, n);
-                    consume(buffer.AsSpan(0, n));
-                }
-            }
-            finally { CryptographicOperations.ZeroMemory(buffer); }
-        }
-        if (hashing.Position != file.Length || !CryptographicOperations.FixedTimeEquals(hashing.Hash(), recordSha256) ||
-            !CryptographicOperations.FixedTimeEquals(plain.GetHashAndReset(), entry.Sha256))
-            throw new InvalidDataException("Document record does not match the manifest.");
+        foreach (var segment in ReadSegments(entry, recordSha256, keys)) consume(segment);
     }
 
     // ---- the project key: unwrapped at most once per operation, never kept between operations (decision C2) --------

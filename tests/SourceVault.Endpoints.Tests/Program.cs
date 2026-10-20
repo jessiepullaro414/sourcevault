@@ -1357,17 +1357,30 @@ sealed class FakeBuildService : SourceVault.Build.IBuildService
     public readonly Dictionary<string, string> ReceivedText = [];
     public Task<IReadOnlyList<string>> TargetsAsync(CancellationToken ct) =>
         Offline ? throw new SourceVault.Build.BuildServiceUnavailableException("NotRunning") : Task.FromResult<IReadOnlyList<string>>(["linux"]);
-    public Task<SourceVault.Build.BuildReply> RunAsync(string target, Guid projectId, int buildNumber, IReadOnlyList<(string Name, byte[] Content)> files, CancellationToken ct)
+    public async Task<SourceVault.Build.BuildReply> RunAsync(string target, Guid projectId, int buildNumber, SourceVault.Build.IBuildSource source, CancellationToken ct)
     {
         if (Offline) throw new SourceVault.Build.BuildServiceUnavailableException("NotRunning");
+        var files = new List<(string Name, byte[] Content)>();
+        foreach (var f in source.Files) // read the stream as the build service would
+        {
+            var content = new byte[f.Length];
+            for (int at = 0; at < content.Length;)
+            {
+                var chunk = await source.NextAsync(ct);
+                if (chunk.IsEmpty) throw new Exception("short source");
+                chunk.CopyTo(content.AsMemory(at)); at += chunk.Length;
+            }
+            files.Add((f.Name, content));
+        }
+        if (!(await source.NextAsync(ct)).IsEmpty) throw new Exception("long source");
         lock (Received)
         {
             Received.Add(files.Select(f => (f.Name, f.Content.ToArray())).ToList());
             foreach (var (name, content) in files) ReceivedText[name] = Encoding.UTF8.GetString(content);
         }
         var log = Encoding.UTF8.GetBytes($"synthetic-build-log: {files.Count} files\n");
-        return Task.FromResult(Fail
+        return Fail
             ? new SourceVault.Build.BuildReply("Failed", null, 1, log, false, null, 0, 0)
-            : new SourceVault.Build.BuildReply("Succeeded", null, 0, log, false, $@"D:\artifacts\{buildNumber}-{target}", 3, 1234, ArtifactsDropped: 2));
+            : new SourceVault.Build.BuildReply("Succeeded", null, 0, log, false, $@"D:\artifacts\{buildNumber}-{target}", 3, 1234, ArtifactsDropped: 2);
     }
 }
