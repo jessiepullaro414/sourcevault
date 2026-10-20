@@ -129,6 +129,7 @@ export function createWorkbench(ctx) {
     const groups = groupMatches(r.matches);
     $('search-summary').textContent = !r.matches.length ? `No results for "${search.query}" in ${plural(r.filesSearched, 'file')}.`
       : `${plural(r.matches.length, 'result')} in ${plural(groups.length, 'file')}` + (r.truncated ? ` · only the first ${MAX_SEARCH_MATCHES} are shown; search for something more specific` : '') + '.';
+    if (r.filesSkipped) $('search-summary').textContent += ` ${plural(r.filesSkipped, 'file')} skipped (binary or too large).`;
     for (const group of groups) {
       const file = session.files.get(group.fileId);
       const head = document.createElement('button'); head.type = 'button'; head.className = 'search-file'; head.title = group.name;

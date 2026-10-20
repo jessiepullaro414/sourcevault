@@ -20,11 +20,18 @@ const ARGS = {
   closeDocument: ['projectId', 'fileId'], saveDocument: ['projectId', 'fileId', 'text'], createFile: ['projectId', 'name', 'text'],
   searchProject: ['projectId', 'query', 'matchCase', 'wholeWord'], getSettings: [], saveSettings: ['settings'],
   lock: [], unlock: [],
+  fileInfo: ['projectId', 'fileId'], replaceFromDisk: ['projectId', 'fileId'], keepMine: ['projectId', 'fileId'], keepTheirs: ['projectId', 'fileId'],
+  addFromDisk: ['projectId', 'folder'], revertFile: ['projectId', 'fileId', 'revisionId'],
 };
 const isQuery = q => typeof q === 'string' && q.length > 0 && q.length <= 200 && ![...q].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
-const MAX_TEXT_BYTES = 256 * 1024;
+const MAX_TEXT_BYTES = 1024 * 1024; // the editor's text limit
 const encoder = new TextEncoder();
 const bytes = text => encoder.encode(text).length;
+const hex = buffer => [...new Uint8Array(buffer)].map(b => b.toString(16).padStart(2, '0')).join('');
+const openable = r => r.kind === 'text' && r.length <= MAX_TEXT_BYTES;
+// Made-up binary content for the demo's "from disk" actions: nothing is ever read from this computer.
+const madeUpBinary = (seed, length) => Uint8Array.from({ length }, (_, i) => (i < 4 ? [0, 0, 1, 0][i] : (i * 31 + seed * 17) & 255));
+const largeLog = () => Array.from({ length: 22000 }, (_, i) => `[${String(i).padStart(5, '0')}] fictional build step ${i % 97}: compiled synthetic unit ${i}\n`).join('');
 const isId = v => typeof v === 'string' && UUID.test(v) && v !== '00000000-0000-0000-0000-000000000000';
 const isName = v => typeof v === 'string' && v.length > 0 && v.length <= 260 && ![...v].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127) && v.isWellFormed();
 const isText = v => typeof v === 'string' && v.isWellFormed() && bytes(v) <= MAX_TEXT_BYTES;
@@ -43,6 +50,9 @@ const SEED = [
     ['src/gadget.cpp', '#include "gadget.h"\n\nnamespace demo {\n\nGadget::Gadget(int size) : size_(size) {}\n\nint Gadget::size() const {\n    return size_;\n}\n\nstd::string Gadget::label() const {\n    return "gadget-" + std::to_string(size_);\n}\n\n}  // namespace demo\n'],
     ['src/main.cpp', '#include <iostream>\n#include "gadget.h"\n\nint main() {\n    demo::Gadget gadget(3);\n    std::cout << gadget.label() << "\\n";\n    return 0;\n}\n'],
     ['CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)\nproject(synthetic_gadget CXX)\nadd_executable(gadget src/main.cpp src/gadget.cpp)\ntarget_include_directories(gadget PRIVATE include)\n'],
+    // Files the editor doesn't show: a binary icon and a text log over 1 MiB (both made up).
+    ['res/gadget.ico', () => madeUpBinary(1, 2238)],
+    ['logs/build-history.log', largeLog],
   ] },
   { name: 'Synthetic C# demo', files: [
     ['Widgets.csproj', '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net10.0</TargetFramework>\n    <Nullable>enable</Nullable>\n  </PropertyGroup>\n</Project>\n'],
@@ -56,7 +66,10 @@ export class DemoVaultHost {
   failNextUnlock = null;   // e.g. 'ServiceNotRunning' to rehearse unlock errors
   latencyMs;
   #projects = new Map();   // projectId -> { name, files: Map(fileId -> file), deleted: Map(fileId -> { file, deletedAt, deletedBy }) }
-                           // file: { name, text, rev, history: [{ revisionId, rev, text, savedAt, savedBy, action, name }] }
+                           // file: { name, text, kind, length, sha256, rev, history: [{ revisionId, rev, text, kind, length, sha256, savedAt, savedBy, action, name }] }
+                           // text is null for binary content; sha256 is a promise of the hex digest
+  #pending = new Map();    // `${projectId}/${fileId}` -> made-up content staged by a replacement that conflicted
+  #madeUp = 0;
   actor = 'DEMO\\operator';
   #opened = new Map();     // `${projectId}/${fileId}` -> rev the editor's copy is based on
   #listeners = new Set();
@@ -70,7 +83,7 @@ export class DemoVaultHost {
   constructor({ latencyMs = 0, seed = SEED } = {}) {
     this.latencyMs = latencyMs;
     for (const project of seed) {
-      const files = new Map(project.files.map(([name, text]) => [crypto.randomUUID(), this.#newFile(name, text, 'created')]));
+      const files = new Map(project.files.map(([name, text]) => [crypto.randomUUID(), this.#newFile(name, typeof text === 'function' ? text() : text, 'created')]));
       this.#projects.set(crypto.randomUUID(), { name: project.name, files, deleted: new Map() });
     }
   }
@@ -94,17 +107,33 @@ export class DemoVaultHost {
     this.#save(file, text, 'edited', 'DEMO\\someone-else');
     return true;
   }
-  #newFile(name, text, action) { const file = { name, text, rev: 0, history: [] }; this.#save(file, text, action); return file; }
-  #save(file, text, action, by = this.actor) {
-    file.text = text; file.rev++;
-    file.history.push({ revisionId: crypto.randomUUID(), rev: file.rev, text, savedAt: new Date().toISOString(), savedBy: by, action, name: file.name });
+  #newFile(name, content, action) { const file = { name, text: null, rev: 0, history: [] }; this.#save(file, content, action); return file; }
+  // content: a string (text) or a Uint8Array (binary, from the made-up "disk").
+  #save(file, content, action, by = this.actor) {
+    const text = typeof content === 'string' ? content : null;
+    const data = text === null ? content : encoder.encode(text);
+    const version = { kind: text === null ? 'binary' : 'text', length: data.length, sha256: crypto.subtle.digest('SHA-256', data).then(hex) };
+    Object.assign(file, { text }, version); file.rev++;
+    file.history.push({ revisionId: crypto.randomUUID(), rev: file.rev, text, ...version, savedAt: new Date().toISOString(), savedBy: by, action, name: file.name });
+  }
+  async #listed(fileId, f) { return { fileId, name: f.name, byteLength: f.length, kind: f.kind, sha256: await f.sha256 }; }
+  #madeUpFile() { this.#madeUp++; return madeUpBinary(this.#madeUp, 1024 * (3 + (this.#madeUp * 7) % 40)); }
+  /** Someone else replaces a file with made-up binary content. */
+  externalReplace(projectId, fileId) {
+    const key = projectId && fileId ? `${projectId}/${fileId}` : this.#opened.keys().next().value;
+    if (!key) return false;
+    const [p, f] = key.split('/');
+    const file = this.#projects.get(p)?.files.get(f);
+    if (!file) return false;
+    this.#save(file, this.#madeUpFile(), 'edited', 'DEMO\\someone-else');
+    return true;
   }
   /** Host-side lock: Windows lock (`windows`), session expiry (`expired`) or a dropped connection (`closed`). */
   simulateLock(reason = 'windows') { this.locked = true; this.#emit({ type: 'sourcevault.vault.locked', reason }); }
   projectIdByName(name) { for (const [id, p] of this.#projects) if (p.name === name) return id; return null; }
   textOf(projectId, fileId) { return this.#projects.get(projectId)?.files.get(fileId)?.text; }
 
-  #handle(message) {
+  async #handle(message) {
     // Exactly the real host's envelope: anything else is silently ignored.
     if (!message || typeof message !== 'object' || Object.keys(message).sort().join() !== 'args,operation,requestId,type') return;
     const { type, requestId, operation, args } = message;
@@ -176,17 +205,19 @@ export class DemoVaultHost {
         if (!Number.isInteger(args.page) || args.page < 0) return;
         const file = project.files.get(args.fileId) ?? project.deleted.get(args.fileId)?.file;
         if (!file) return reply('NotFound');
-        const revisions = args.page > 0 ? [] : [...file.history].reverse().map(({ revisionId, savedAt, savedBy, text, action, name }) => ({ revisionId, savedAt, savedBy, byteLength: bytes(text), action, name }));
+        const revisions = args.page > 0 ? [] : await Promise.all([...file.history].reverse().map(async ({ revisionId, savedAt, savedBy, length, kind, sha256, action, name }) =>
+          ({ revisionId, savedAt, savedBy, byteLength: length, action, name, kind, sha256: await sha256 })));
         return reply('Ok', { revisions, more: false });
       }
       case 'openRevision': {
         if (!isId(args.revisionId)) return;
         const file = project.files.get(args.fileId) ?? project.deleted.get(args.fileId)?.file;
         const revision = file?.history.find(r => r.revisionId === args.revisionId);
-        return revision ? reply('Ok', { text: revision.text }) : reply('NotFound');
+        if (!revision) return reply('NotFound');
+        return revision.kind !== 'text' ? reply('NotText') : revision.length > MAX_TEXT_BYTES ? reply('LimitExceeded') : reply('Ok', { text: revision.text });
       }
       case 'listDeleted':
-        return reply('Ok', { files: [...project.deleted].reverse().map(([fileId, d]) => ({ fileId, name: d.file.name, byteLength: bytes(d.file.text), deletedAt: d.deletedAt, deletedBy: d.deletedBy })) });
+        return reply('Ok', { files: [...project.deleted].reverse().map(([fileId, d]) => ({ fileId, name: d.file.name, byteLength: d.file.length, deletedAt: d.deletedAt, deletedBy: d.deletedBy, kind: d.file.kind })) });
       case 'restoreFile': {
         const entry = project.deleted.get(args.fileId);
         if (!entry) return reply('NotFound');
@@ -198,12 +229,74 @@ export class DemoVaultHost {
         entry.file.history.push({ ...entry.file.history.at(-1), savedAt: new Date().toISOString(), savedBy: this.actor, action: 'restored', name: args.newName });
         return reply('Ok', {});
       }
+      case 'revertFile': {
+        if (!isId(args.revisionId)) return;
+        const file = project.files.get(args.fileId);
+        if (!file) return reply('NotFound');
+        if (this.#opened.has(key) && this.#opened.get(key) !== file.rev) return reply('Conflict');
+        const old = file.history.find(r => r.revisionId === args.revisionId);
+        if (!old) return reply('NotFound');
+        // Like the service: the file points at that version again; nothing is re-encrypted.
+        file.rev++;
+        Object.assign(file, { text: old.text, kind: old.kind, length: old.length, sha256: old.sha256 });
+        file.history.push({ ...old, rev: file.rev, savedAt: new Date().toISOString(), savedBy: this.actor, action: 'reverted', name: file.name });
+        if (this.#opened.has(key)) this.#opened.set(key, file.rev);
+        return reply('Ok', {});
+      }
+      case 'fileInfo': {
+        const file = project.files.get(args.fileId);
+        if (!file) return reply('NotFound');
+        this.#opened.set(key, file.rev);
+        const last = file.history.at(-1);
+        return reply('Ok', { ...(await this.#listed(args.fileId, file)), savedAt: last.savedAt, savedBy: last.savedBy });
+      }
+      case 'replaceFromDisk': {
+        // The real host shows its Open dialog and reads the chosen file; the demo makes one up.
+        const file = project.files.get(args.fileId);
+        if (!file) return reply('NotFound');
+        this.#pending.delete(key);
+        const content = this.#madeUpFile();
+        if (this.#opened.has(key) && this.#opened.get(key) !== file.rev) { this.#pending.set(key, content); return reply('Conflict'); }
+        this.#save(file, content, 'edited');
+        if (this.#opened.has(key)) this.#opened.set(key, file.rev);
+        return reply('Ok', await this.#listed(args.fileId, file));
+      }
+      case 'keepMine':
+      case 'keepTheirs': {
+        const file = project.files.get(args.fileId);
+        const content = this.#pending.get(key);
+        this.#pending.delete(key);
+        if (!file) return reply('NotFound');
+        if (operation === 'keepMine') {
+          if (!content) return reply('UploadExpired');
+          this.#save(file, content, 'edited');
+        }
+        this.#opened.set(key, file.rev);
+        return reply('Ok', await this.#listed(args.fileId, file));
+      }
+      case 'addFromDisk': {
+        const folder = args.folder;
+        if (typeof folder !== 'string' || (folder && (!isName(folder) || folder.startsWith('/') || folder.endsWith('/')))) return;
+        const count = 1 + (this.#madeUp % 2);
+        const names = Array.from({ length: count }, (_, i) => `${folder ? folder + '/' : ''}demo-asset-${this.#madeUp + 1}-${i + 1}.bin`);
+        if (names.some(n => !validFileName(n))) return reply('InvalidRequest');
+        if (names.some(n => [...project.files.values()].some(f => f.name.toLowerCase() === n.toLowerCase()))) return reply('AlreadyExists');
+        const added = [];
+        for (const name of names) {
+          const fileId = crypto.randomUUID();
+          project.files.set(fileId, this.#newFile(name, this.#madeUpFile(), 'created'));
+          added.push(await this.#listed(fileId, project.files.get(fileId)));
+        }
+        return reply('Ok', { files: added });
+      }
       case 'mergeSources': {
         const file = project.files.get(args.fileId);
         if (!file) return reply('NotFound');
         if (!this.#opened.has(key)) return reply('NotOpen');
         const base = file.history.find(r => r.rev === this.#opened.get(key));
-        return reply('Ok', { base: base?.text ?? '', theirs: file.text, theirsRevisionId: file.history.at(-1).revisionId });
+        const theirsRevisionId = file.history.at(-1).revisionId;
+        if (!openable(file) || (base && !openable(base))) return reply('Ok', { mergeable: false, theirsRevisionId });
+        return reply('Ok', { mergeable: true, base: base?.text ?? '', theirs: file.text, theirsRevisionId });
       }
       case 'saveMerged': {
         if (!isId(args.revisionId)) return;
@@ -226,11 +319,12 @@ export class DemoVaultHost {
         // Like the build service: source maps and debug symbols are left out and listed at the end of the log.
         const dropped = files.filter(f => /\.(map|pdb)$/i.test(f.name)), kept = files.filter(f => !dropped.includes(f));
         const notice = dropped.length ? `\n[SourceVault] ${dropped.length} output file(s) were not published because they can reveal source:\n${dropped.map(f => `  ${f.name}  (${/\.map$/i.test(f.name) ? 'SourceMap' : 'DebugSymbols'})\n`).join('')}` : '';
+        const total = kept.reduce((n, f) => n + f.length, 0);
         setTimeout(() => Object.assign(build, this.buildFails
           ? { state: 'failed', exitCode: 1, finishedAt: new Date().toISOString(), logAvailable: true, log: `$ ./build.sh\nerror: fictional failure in ${files[0]?.name ?? 'nothing'}\n` }
           : { state: 'succeeded', exitCode: 0, finishedAt: new Date().toISOString(), logAvailable: true,
               artifactFolder: ['D:', 'SourceVault', 'artifacts', args.projectId, `${build.buildNumber}-${args.name}`].join('\\'),
-              artifactFiles: kept.length, artifactBytes: kept.reduce((n, f) => n + bytes(f.text), 0), artifactsDropped: dropped.length,
+              artifactFiles: kept.length, artifactBytes: total, artifactsDropped: dropped.length,
               log: `$ ./build.sh\ncompiling ${files.length} fictional file(s)\ndone\n${notice}` }), this.buildMs);
         return reply('Ok', { buildNumber: build.buildNumber });
       }
@@ -245,23 +339,27 @@ export class DemoVaultHost {
         return build.logAvailable ? reply('Ok', { text: build.log }) : reply('NotFound');
       }
       case 'searchProject': {
-        // Like the service: saved text only, the first 500 matches, then sorted by name, line and column.
+        // Like the service: saved text only (binary files are skipped and counted), the first 500 matches, then
+        // sorted by name, line and column.
         const matches = [];
-        let truncated = false;
+        let truncated = false, skipped = 0;
         for (const [fileId, f] of project.files) {
+          if (f.kind !== 'text') { skipped++; continue; }
           const found = searchText(f.text, args.query, args, MAX_SEARCH_MATCHES - matches.length + 1);
           if (matches.length + found.length > MAX_SEARCH_MATCHES) { truncated = true; found.length = MAX_SEARCH_MATCHES - matches.length; }
           matches.push(...found.map(m => ({ fileId, name: f.name, ...m })));
           if (truncated) break;
         }
         matches.sort((a, b) => (a.name.toUpperCase() < b.name.toUpperCase() ? -1 : a.name.toUpperCase() > b.name.toUpperCase() ? 1 : 0) || a.line - b.line || a.column - b.column);
-        return reply('Ok', { matches, truncated, filesSearched: project.files.size });
+        return reply('Ok', { matches, truncated, filesSearched: project.files.size - skipped, filesSkipped: skipped });
       }
       case 'listFiles':
-        return reply('Ok', { files: [...project.files].map(([fileId, f]) => ({ fileId, name: f.name, byteLength: bytes(f.text) })) });
+        return reply('Ok', { files: await Promise.all([...project.files].map(([fileId, f]) => this.#listed(fileId, f))) });
       case 'openDocument': {
         const file = project.files.get(args.fileId);
         if (!file) return reply('NotFound');
+        if (file.kind !== 'text') return reply('NotText');
+        if (file.length > MAX_TEXT_BYTES) return reply('LimitExceeded');
         this.#opened.set(key, file.rev);
         return reply('Ok', { fileId: args.fileId, name: file.name, text: file.text });
       }
@@ -331,6 +429,7 @@ export function installDemoPanel(demo, getActive) {
   const actions = [
     ['Someone else edits this file', () => { const a = getActive(); return demo.externalEdit(a?.projectId, a?.fileId) ? 'Edited elsewhere: the next save conflicts (then Merge).' : 'Open a file first.'; }],
     ['Someone else deletes this file', () => { const a = getActive(); return a && demo.externalDelete(a.projectId, a.fileId) ? 'Deleted elsewhere: edit it and lock/unlock to see the notice, or open Deleted files.' : 'Open a file first.'; }],
+    ['Someone else replaces this file with a binary', () => { const a = getActive(); return demo.externalReplace(a?.projectId, a?.fileId) ? 'Replaced elsewhere with a made-up binary: the next save offers keep mine / keep theirs.' : 'Open a file first.'; }],
     ['Windows lock', () => { demo.simulateLock('windows'); return 'Simulated a Windows lock.'; }],
     ['Session expiry', () => { demo.simulateLock('expired'); return 'Simulated the 30-minute expiry.'; }],
     ['Next unlock fails', () => { demo.failNextUnlock = 'ServiceNotRunning'; return 'The next unlock reports the service as not running.'; }],

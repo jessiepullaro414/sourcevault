@@ -4,11 +4,12 @@ using System.Text.Json;
 
 namespace SourceVault.Editor.Host;
 
-internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock, SearchProject, GetSettings, SaveSettings }
+internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock, SearchProject, GetSettings, SaveSettings,
+    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
 internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0,
-    string? Query = null, bool MatchCase = false, bool WholeWord = false, EditorSettings? Settings = null);
+    string? Query = null, bool MatchCase = false, bool WholeWord = false, EditorSettings? Settings = null, string? Folder = null);
 
 /// <summary>
 /// Bridge v2 (docs/editor-vault-design.md): pure, UI-free validation of renderer-to-host vault requests and
@@ -22,8 +23,8 @@ internal static class BridgePolicy
     internal const string RequestType = "sourcevault.vault.request";
     internal const string ResponseType = "sourcevault.vault.response";
     internal const string LockedType = "sourcevault.vault.locked";
-    internal const int MaxMessageChars = 2 * 1024 * 1024; // checked before parsing; escaped 256 KiB text fits
-    internal const int MaxTextBytes = 256 * 1024;
+    internal const int MaxMessageChars = 8 * 1024 * 1024; // checked before parsing; escaped 1 MiB text fits (at most 6 characters a byte)
+    internal const int MaxTextBytes = 1024 * 1024; // the editor's text limit (docs/vault-any-file-design.md section 4)
     internal const int MaxNameChars = 260; // vault paths: up to 260 characters ("src/app/main.ts")
     internal const int MaxQueryChars = 200; // "Search all files": one line of plain text
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
@@ -58,6 +59,14 @@ internal static class BridgePolicy
         ["searchProject"] = (VaultOperation.SearchProject, ["projectId", "query", "matchCase", "wholeWord"]),
         ["getSettings"] = (VaultOperation.GetSettings, []),
         ["saveSettings"] = (VaultOperation.SaveSettings, ["settings"]), // display preferences only (EditorSettings)
+        // Files the editor doesn't show (binary, or text over 1 MiB) and files from disk. The host shows its own Open
+        // dialog and reads the file; the renderer never sends or receives a path or the bytes.
+        ["fileInfo"] = (VaultOperation.FileInfo, ["projectId", "fileId"]),
+        ["replaceFromDisk"] = (VaultOperation.ReplaceFromDisk, ["projectId", "fileId"]),
+        ["keepMine"] = (VaultOperation.KeepMine, ["projectId", "fileId"]),     // after a replacement conflicted
+        ["keepTheirs"] = (VaultOperation.KeepTheirs, ["projectId", "fileId"]),
+        ["addFromDisk"] = (VaultOperation.AddFromDisk, ["projectId", "folder"]), // folder: "" for the project root
+        ["revertFile"] = (VaultOperation.RevertFile, ["projectId", "fileId", "revisionId"]),
     };
 
     /// <summary>Exactly {type, requestId, operation, args} with the operation's exact argument set. Never throws.</summary>
@@ -78,7 +87,7 @@ internal static class BridgePolicy
             if (!ExactFields(args, op.Args)) return false;
             Guid projectId = Guid.Empty, fileId = Guid.Empty, revisionId = Guid.Empty;
             int page = 0, buildNumber = 0;
-            string? name = null, text = null, newName = null, query = null;
+            string? name = null, text = null, newName = null, query = null, folder = null;
             bool matchCase = false, wholeWord = false;
             EditorSettings? settings = null;
             if (op.Args.Contains("projectId") && !TryId(args.GetProperty("projectId"), out projectId)) return false;
@@ -93,7 +102,8 @@ internal static class BridgePolicy
             if (op.Args.Contains("matchCase") && !TryBool(args.GetProperty("matchCase"), out matchCase)) return false;
             if (op.Args.Contains("wholeWord") && !TryBool(args.GetProperty("wholeWord"), out wholeWord)) return false;
             if (op.Args.Contains("settings")) { if (!EditorSettings.TryParse(args.GetProperty("settings"), out var parsed)) return false; settings = parsed; }
-            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber, query, matchCase, wholeWord, settings);
+            if (op.Args.Contains("folder") && !TryFolder(args.GetProperty("folder"), out folder)) return false;
+            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber, query, matchCase, wholeWord, settings, folder);
             return true;
         }
         catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException)
@@ -152,6 +162,15 @@ internal static class BridgePolicy
     {
         name = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         return name is { Length: > 0 and <= MaxNameChars } && !name.Any(char.IsControl) && IsStrictUtf8(name, out _);
+    }
+
+    // A folder path for new files: "" (the project root) or a name, without a leading or trailing '/'.
+    private static bool TryFolder(JsonElement value, out string? folder)
+    {
+        folder = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        if (folder is null) return false;
+        if (folder.Length == 0) return true;
+        return TryName(value, out folder) && !folder!.StartsWith('/') && !folder.EndsWith('/');
     }
 
     // One line of plain text, 1-200 characters, no control characters.

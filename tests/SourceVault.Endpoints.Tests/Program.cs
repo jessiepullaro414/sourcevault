@@ -634,10 +634,128 @@ Test("controller: locked, not-open and content limits", () =>
         Run(ctl.UnlockAsync());
         var project = Run(ctl.CreateProjectAsync("Limits")).Value!.ProjectId;
         Assert(Run(ctl.SaveDocumentAsync(project, Guid.NewGuid(), "x")).Code == "NotOpen", "save of a file never opened");
-        Assert(Run(ctl.CreateFileAsync(project, "big.ts", new string('x', 262145))).Code == "LimitExceeded", "over 256 KiB");
+        Assert(Run(ctl.CreateFileAsync(project, "big.ts", new string('x', EditorVaultController.MaxEditorTextBytes + 1))).Code == "LimitExceeded", "over 1 MiB");
         Assert(Run(ctl.CreateFileAsync(project, "bad.ts", "\ud800")).Code == "InvalidRequest", "lone surrogate is not UTF-8");
         Assert(Run(ctl.CreateFileAsync(project, "a/../b.ts", "x")).Code == "InvalidRequest", "bad name");
         Assert(Run(ctl.OpenDocumentAsync(project, Guid.NewGuid())).Code == "NotFound", "unknown file");
+    }
+});
+
+// ---- any-file vault in the editor host (docs/vault-any-file-design.md section 4) ----
+DiskFile Disk(string name, byte[] bytes) => new(name, bytes.Length, () => new MemoryStream(bytes, writable: false));
+
+Test("controller: text of 256 KiB to 1 MiB opens and saves in parts; history and merge read it in parts", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Large text")).Value!.ProjectId;
+        string Lines(char c, int kib) => string.Concat(Enumerable.Range(0, kib * 16).Select(i => $"{c}{i:D10} line of synthetic text 0123456789abcdefghijklmnopqr\n")); // 64 bytes a line
+        var first = Lines('a', 700);
+        var created = Run(ctl.CreateFileAsync(project, "big.txt", first));
+        Assert(created is { Ok: true, Value.ByteLength: 700 * 1024, Value.Kind: "text" }, "created through an upload: " + created.Code);
+        var id = created.Value!.FileId;
+        Assert(Run(ctl.SaveDocumentAsync(project, id, Lines('b', 1000))).Ok, "saved in parts");
+        using var fresh = Controller(pipe);
+        Run(fresh.UnlockAsync());
+        Assert(Run(fresh.OpenDocumentAsync(project, id)).Value!.Text == Lines('b', 1000), "opened in parts");
+        var history = Run(ctl.ListHistoryAsync(project, id, 0)).Value!.Revisions;
+        Assert(Run(ctl.OpenRevisionAsync(project, id, history[1].RevisionId)).Value == first, "old revision read in parts");
+        ExternalEdit(pipe, project, id, "small now\n"); // someone else
+        Assert(Run(fresh.SaveDocumentAsync(project, id, Lines('c', 400))).Code == "Conflict", "conflict");
+        var merge = Run(fresh.MergeSourcesAsync(project, id)).Value!;
+        Assert(merge.Mergeable && merge.BaseText == Lines('b', 1000) && merge.TheirsText == "small now\n", "merge sources across sizes");
+        Assert(Run(fresh.SaveMergedAsync(project, id, Lines('c', 400), merge.TheirsRevision)).Ok, "merged save in parts");
+        Assert(Run(fresh.ListFilesAsync(project)).Value!.Single().Openable, "still openable at 400 KiB");
+    }
+});
+
+Test("controller: binary files: info, replace from disk, revert, history; never opened as text; search skips them", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Binary")).Value!.ProjectId;
+        var icon = new byte[700 * 1024]; new Random(3).NextBytes(icon); icon[0] = 0;
+        var added = Run(ctl.AddFromDiskAsync(project, "res", [Disk("app.ico", icon), Disk("notes.txt", Encoding.UTF8.GetBytes("Widget notes\n"))]));
+        Assert(added is { Ok: true, Value.Count: 2 } && added.Value[0].Name == "res/app.ico" && added.Value[0].Kind == "binary" && added.Value[1].Kind == "text", "added: " + added.Code);
+        var id = added.Value![0].FileId;
+        Assert(added.Value[0].Sha256 == Convert.ToHexStringLower(SHA256.HashData(icon)), "hash of the plaintext");
+        Assert(Run(ctl.OpenDocumentAsync(project, id)).Code == "NotText", "binary never opens as text");
+        var info = Run(ctl.FileInfoAsync(project, id)).Value!;
+        Assert(info.File.ByteLength == icon.Length && !info.File.Openable && info.SavedBy is not null && info.SavedAt is not null, "info panel");
+        var second = new byte[3000]; new Random(4).NextBytes(second); second[0] = 0;
+        var replaced = Run(ctl.ReplaceFromDiskAsync(project, id, Disk("other.ico", second)));
+        Assert(replaced is { Ok: true, Value.ByteLength: 3000, Value.Kind: "binary" } && replaced.Value.Name == "res/app.ico", "replaced, same name: " + replaced.Code);
+        var history = Run(ctl.ListHistoryAsync(project, id, 0)).Value!.Revisions;
+        Assert(history.Count == 2 && history.All(r => r.Kind == "binary" && r.Sha256 is { Length: 64 }), "history with kind and hash");
+        Assert(Run(ctl.OpenRevisionAsync(project, id, history[1].RevisionId)).Code == "NotText", "no binary content to the editor");
+        Assert(Run(ctl.RevertFileAsync(project, id, history[1].RevisionId)).Ok, "revert");
+        Assert(Run(ctl.ListFilesAsync(project)).Value!.Single(f => f.FileId == id).Sha256 == Convert.ToHexStringLower(SHA256.HashData(icon)), "first version current again");
+        Assert(Run(ctl.ListHistoryAsync(project, id, 0)).Value!.Revisions[0].Action == "reverted", "reverted in history");
+        var search = Run(ctl.SearchProjectAsync(project, "Widget", false, false)).Value!;
+        Assert(search.Matches.Count == 1 && search.FilesSkipped == 1, "the binary is skipped and counted");
+        Assert(Run(ctl.AddFromDiskAsync(project, "res", [Disk("app.ico", [1, 2])])).Code == "AlreadyExists", "a taken name adds nothing");
+        Assert(Run(ctl.ListFilesAsync(project)).Value!.Count == 2, "still two files");
+    }
+});
+
+Test("controller: a replacement that conflicts is staged for keep mine; keep theirs discards it; bad disk reads change nothing", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Keep")).Value!.ProjectId;
+        var id = Run(ctl.AddFromDiskAsync(project, "", [Disk("logo.png", [0x89, 0x50, 0x4E, 0x47, 0, 1])])).Value![0].FileId;
+        Run(ctl.FileInfoAsync(project, id));
+        ExternalEdit(pipe, project, id, "someone else's text\n");
+        Assert(Run(ctl.ReplaceFromDiskAsync(project, id, Disk("mine.png", [0x89, 0, 7]))).Code == "Conflict", "conflict");
+        var mine = Run(ctl.KeepMineAsync(project, id));
+        Assert(mine is { Ok: true, Value.ByteLength: 3, Value.Kind: "binary" }, "keep mine commits the staged upload: " + mine.Code);
+        Assert(Run(ctl.ListHistoryAsync(project, id, 0)).Value!.Revisions.Count == 3, "theirs stays in history");
+        Assert(Run(ctl.KeepMineAsync(project, id)).Code == "UploadExpired", "nothing staged any more");
+        ExternalEdit(pipe, project, id, "theirs again\n");
+        Assert(Run(ctl.ReplaceFromDiskAsync(project, id, Disk("mine.png", [0x89, 0, 8]))).Code == "Conflict", "conflict again");
+        var theirs = Run(ctl.KeepTheirsAsync(project, id));
+        Assert(theirs is { Ok: true, Value.Kind: "text" } && Run(ctl.ListHistoryAsync(project, id, 0)).Value!.Revisions.Count == 4, "keep theirs saves nothing");
+        Assert(Run(ctl.ReplaceFromDiskAsync(project, id, Disk("next.png", [0x89, 0, 9]))).Ok, "theirs is now the version shown");
+        // The file on disk changes between the hash and the upload, or can't be read.
+        int opens = 0;
+        var changing = new DiskFile("x.bin", 4, () => new MemoryStream(++opens == 1 ? new byte[] { 0, 1, 2, 3 } : new byte[] { 0, 1, 2, 4 }));
+        Assert(Run(ctl.ReplaceFromDiskAsync(project, id, changing)).Code == "SourceChanged", "changed while read");
+        Assert(Run(ctl.ReplaceFromDiskAsync(project, id, new DiskFile("y.bin", 4, () => throw new IOException("locked")))).Code == "FileUnreadable", "unreadable");
+        Assert(Run(ctl.ReplaceFromDiskAsync(project, id, new DiskFile("z.bin", 9, () => new MemoryStream(new byte[4])))).Code == "FileUnreadable", "shorter than listed");
+        Assert(!ctl.IsLocked, "disk failures don't lock the session");
+        Assert(Run(ctl.ListHistoryAsync(project, id, 0)).Value!.Revisions.Count == 5, "nothing committed by the failures");
+        Assert(Run(ctl.ReplaceFromDiskAsync(project, id, new DiskFile("huge.bin", EditorVaultController.MaxFileBytes + 1, () => Stream.Null))).Code == "LimitExceeded", "over 1 GiB");
+    }
+});
+
+Test("controller: a text draft conflicting with a binary version is not mergeable; keep mine saves over theirs", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Mixed")).Value!.ProjectId;
+        var id = Run(ctl.CreateFileAsync(project, "app.rc", "IDS 1\n")).Value!.FileId;
+        using (var other = Controller(pipe))
+        {
+            Run(other.UnlockAsync());
+            Assert(Run(other.ReplaceFromDiskAsync(project, id, Disk("app.rc", Encoding.Unicode.GetPreamble().Concat(Encoding.Unicode.GetBytes("IDS 2\r\n")).ToArray()))).Value!.Kind == "binary", "UTF-16 is stored as binary");
+        }
+        Assert(Run(ctl.SaveDocumentAsync(project, id, "IDS 3\n")).Code == "Conflict", "conflict");
+        var merge = Run(ctl.MergeSourcesAsync(project, id)).Value!;
+        Assert(!merge.Mergeable && merge.BaseText is null && merge.TheirsText is null, "no text merge with a binary side");
+        Assert(Run(ctl.SaveMergedAsync(project, id, "IDS 3\n", merge.TheirsRevision)).Ok, "keep mine");
+        Assert(Run(ctl.OpenDocumentAsync(project, id)).Value!.Text == "IDS 3\n", "mine is current");
     }
 });
 

@@ -304,6 +304,7 @@ internal sealed class EditorWindow : Window
                         if (r.SavedAt is { } at) w.WriteString("savedAt", at.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)); else w.WriteNull("savedAt");
                         if (r.SavedBy is { } by) w.WriteString("savedBy", by); else w.WriteNull("savedBy");
                         w.WriteNumber("byteLength", r.ByteLength); w.WriteString("action", r.Action); w.WriteString("name", r.Name);
+                        w.WriteString("kind", r.Kind); if (r.Sha256 is null) w.WriteNull("sha256"); else w.WriteString("sha256", r.Sha256);
                         w.WriteEndObject();
                     }
                     w.WriteEndArray();
@@ -320,6 +321,7 @@ internal sealed class EditorWindow : Window
                         w.WriteString("fileId", f.FileId.ToString("D")); w.WriteString("name", f.Name); w.WriteNumber("byteLength", f.ByteLength);
                         w.WriteString("deletedAt", f.DeletedAt.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture));
                         if (f.DeletedBy is { } by) w.WriteString("deletedBy", by); else w.WriteNull("deletedBy");
+                        w.WriteString("kind", f.Kind);
                         w.WriteEndObject();
                     }
                     w.WriteEndArray();
@@ -327,7 +329,10 @@ internal sealed class EditorWindow : Window
                 VaultOperation.RestoreFile => Respond(request, await controller.RestoreFileAsync(request.ProjectId, request.FileId, request.NewName!), (w, _) => { }),
                 VaultOperation.MergeSources => Respond(request, await controller.MergeSourcesAsync(request.ProjectId, request.FileId), (w, m) =>
                 {
-                    w.WriteString("base", m.BaseText); w.WriteString("theirs", m.TheirsText); w.WriteString("theirsRevisionId", m.TheirsRevision.ToString("D"));
+                    // Not mergeable (binary or over 1 MiB on a side): no texts, only the revision "keep mine" saves over.
+                    w.WriteBoolean("mergeable", m.Mergeable);
+                    if (m.Mergeable) { w.WriteString("base", m.BaseText); w.WriteString("theirs", m.TheirsText); }
+                    w.WriteString("theirsRevisionId", m.TheirsRevision.ToString("D"));
                 }),
                 VaultOperation.SaveMerged => Respond(request, await controller.SaveMergedAsync(request.ProjectId, request.FileId, request.Text!, request.RevisionId), (w, f) =>
                     w.WriteNumber("byteLength", f.ByteLength)),
@@ -344,7 +349,7 @@ internal sealed class EditorWindow : Window
                 {
                     // Revision ids stay in the host.
                     w.WriteStartArray("files");
-                    foreach (var f in files) { w.WriteStartObject(); w.WriteString("fileId", f.FileId.ToString("D")); w.WriteString("name", f.Name); w.WriteNumber("byteLength", f.ByteLength); w.WriteEndObject(); }
+                    foreach (var f in files) { w.WriteStartObject(); WriteFile(w, f); w.WriteEndObject(); }
                     w.WriteEndArray();
                 }),
                 VaultOperation.OpenDocument => Respond(request, await controller.OpenDocumentAsync(request.ProjectId, request.FileId), (w, doc) =>
@@ -364,8 +369,24 @@ internal sealed class EditorWindow : Window
                         w.WriteEndObject();
                     }
                     w.WriteEndArray();
-                    w.WriteBoolean("truncated", s.Truncated); w.WriteNumber("filesSearched", s.FilesSearched);
+                    w.WriteBoolean("truncated", s.Truncated); w.WriteNumber("filesSearched", s.FilesSearched); w.WriteNumber("filesSkipped", s.FilesSkipped);
                 }),
+                VaultOperation.FileInfo => Respond(request, await controller.FileInfoAsync(request.ProjectId, request.FileId), (w, d) =>
+                {
+                    WriteFile(w, d.File);
+                    if (d.SavedAt is { } at) w.WriteString("savedAt", at.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)); else w.WriteNull("savedAt");
+                    if (d.SavedBy is { } by) w.WriteString("savedBy", by); else w.WriteNull("savedBy");
+                }),
+                VaultOperation.ReplaceFromDisk => ChooseFiles(multiple: false) is { } chosen
+                    ? Respond(request, await controller.ReplaceFromDiskAsync(request.ProjectId, request.FileId, chosen[0]), WriteFile)
+                    : BridgePolicy.BuildResponse(request.RequestId, "Cancelled", null),
+                VaultOperation.KeepMine => Respond(request, await controller.KeepMineAsync(request.ProjectId, request.FileId), WriteFile),
+                VaultOperation.KeepTheirs => Respond(request, await controller.KeepTheirsAsync(request.ProjectId, request.FileId), WriteFile),
+                VaultOperation.AddFromDisk => ChooseFiles(multiple: true) is { } many
+                    ? Respond(request, await controller.AddFromDiskAsync(request.ProjectId, request.Folder!, many), (w, added) =>
+                        { w.WriteStartArray("files"); foreach (var f in added) { w.WriteStartObject(); WriteFile(w, f); w.WriteEndObject(); } w.WriteEndArray(); })
+                    : BridgePolicy.BuildResponse(request.RequestId, "Cancelled", null),
+                VaultOperation.RevertFile => Respond(request, await controller.RevertFileAsync(request.ProjectId, request.FileId, request.RevisionId), (w, _) => { }),
                 // Display preferences only (EditorSettings); they never contain names or text and need no vault session.
                 VaultOperation.GetSettings => BridgePolicy.BuildResponse(request.RequestId, "Ok", w => { w.WriteStartObject("settings"); EditorSettings.Load(EditorSettings.FilePath).Write(w); w.WriteEndObject(); }),
                 VaultOperation.SaveSettings => SaveSettings(request),
@@ -380,6 +401,39 @@ internal sealed class EditorWindow : Window
             response = BridgePolicy.BuildResponse(request.RequestId, "InternalError", null); // never reflect details
         }
         if (!closing) webView.CoreWebView2?.PostWebMessageAsJson(response);
+    }
+
+    // A file as the renderer sees it: no revision id (it stays in the host).
+    private static void WriteFile(System.Text.Json.Utf8JsonWriter w, FileSummary f)
+    {
+        w.WriteString("fileId", f.FileId.ToString("D")); w.WriteString("name", f.Name); w.WriteNumber("byteLength", f.ByteLength);
+        w.WriteString("kind", f.Kind);
+        if (f.Sha256 is null) w.WriteNull("sha256"); else w.WriteString("sha256", f.Sha256);
+    }
+
+    /// <summary>
+    /// The host's own Open dialog for "Replace from disk" and "Add files from disk". The chosen paths and the bytes stay
+    /// in the host; the renderer learns only the vault names. Null: cancelled.
+    /// Windows may still remember the last folder used in its Open dialog.
+    /// </summary>
+    private List<DiskFile>? ChooseFiles(bool multiple)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog
+        {
+            Title = multiple ? "Add files to the vault" : "Replace with a file from disk",
+            Multiselect = multiple, CheckFileExists = true, ValidateNames = true, AddToRecent = false,
+        };
+        if (dialog.ShowDialog(this) != true) return null;
+        var files = new List<DiskFile>();
+        foreach (var path in dialog.FileNames.Take(EditorVaultController.MaxAddFiles + 1))
+        {
+            long length;
+            try { length = new FileInfo(path).Length; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { length = -1; } // read failures surface as FileUnreadable
+            var chosen = path;
+            files.Add(new DiskFile(Path.GetFileName(path), length, () => new FileStream(chosen, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1, FileOptions.SequentialScan)));
+        }
+        return files;
     }
 
     private static void WriteBuild(System.Text.Json.Utf8JsonWriter w, BuildSummary b)

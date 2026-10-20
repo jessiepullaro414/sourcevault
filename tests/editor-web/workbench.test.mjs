@@ -125,7 +125,7 @@ test('search all files: the service searches saved files, unsaved drafts are sea
   await session.unlock();
   await session.selectProject(host.projectIdByName('Synthetic C++ demo'));
   const saved = await session.search('gadget');
-  assert.ok(saved.matches.length > 5 && !saved.truncated && saved.filesSearched === 4);
+  assert.ok(saved.matches.length > 5 && !saved.truncated && saved.filesSearched === 5 && saved.filesSkipped === 1, "the binary icon is skipped");
   assert.deepEqual([...new Set(saved.matches.map(m => m.name))], ['CMakeLists.txt', 'include/gadget.h', 'src/gadget.cpp', 'src/main.cpp']);
   const main = [...session.files.values()].find(f => f.path === 'src/main.cpp');
   await session.open(main.id);
