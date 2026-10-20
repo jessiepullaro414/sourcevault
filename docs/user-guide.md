@@ -261,18 +261,22 @@ To show SourceVault to people on a PC without the vault, run **Start SourceVault
 
 - **Choose a project** from the list, or type a name and **Create project**. Names are 1–64 characters.
 - **Open a file** from the Explorer. Only files you open are decrypted; closing a tab removes its text from the editor.
+- **Any kind of file** can be in a project: images, icons, DLLs and `.lib` files, UTF-16 resource files, big logs. The editor opens **text up to 1 MiB**. Other files are marked **binary** or **large** in the Explorer; clicking one shows its details instead: kind, size, last change (when, who) and its SHA-256. From there you can rename, delete, see its history, or **Replace from disk…**. Their content never comes back out of the vault to you: no download, no preview. A build is the only way it is used.
+- **Add files from disk:** **+ Add from disk** in the Explorer (to the project's top level), or **⋯ → Add files from disk to *folder*/** on a file in that folder. Windows' own *Open* dialog appears; you can choose several files. The editor's window program reads them and sends them to the service, which encrypts them; the editor page itself never sees the path or the bytes. Windows may remember the folder you last chose in that dialog.
+- **Replace from disk…** (in the details, or **⋯** on any file without unsaved edits) replaces a file's content with a file you choose, keeping its name and history.
 - **+ New file** creates a file. Use `/` for folders (`src/app/main.ts`), up to 260 characters and 32 levels. Names can't contain `\ : * ? " < > |`. Names aren't case-sensitive, so `Main.ts` and `main.ts` count as the same name.
 - **Rename, move or delete a file:** click **⋯** on its row in the Explorer.
   - **Rename / move** takes a full path, so `src/a.ts` → `lib/a.ts` moves it.
   - **Rename folder** moves every file in that file's folder at once.
   - **Delete** asks first, and is refused while the file has unsaved edits. Deleted files can be restored: **Deleted files** in the Explorer lists them with who deleted them and when; **Restore** brings one back with its history (under a new path if its old one is taken).
   - **History** lists every saved version of the file: when, who, and the path it had. Choosing one compares it side by side with the current version (read-only). **Restore this version** puts that text into the editor as unsaved edits; saving makes it the newest version, so history is never rewritten.
+  - For binary or large versions the history shows the size, kind and SHA-256 but no comparison. **Revert to this version** (click twice to confirm) makes that version the current one again; the version it replaces stays in history.
   - Open tabs and unsaved edits follow a renamed file.
 - **If someone else deletes a file you have unsaved edits in,** it shows *Deleted by someone else*. **Save** creates it again with your text, or **⋯ → Delete** discards your version.
 - **Rename a project:** **Switch project** → **Rename…** next to it.
 - **Switch project** returns to the project list. Save or reload edited files first.
 - **Save** with **Ctrl+S** or the Save button. Each save becomes a new encrypted, unchangeable revision in the vault. Until you save, your edits exist only in the editor; a dot on the tab means unsaved changes.
-- Limits: 256 KiB per file (UTF-8 text), 1,024 files per project, 256 projects.
+- Limits: 1 GiB per file, 25,000 files and 8 GiB per project, 256 projects. The editor opens and saves text up to 1 MiB. The vault also keeps 4 GiB of its disk free: a save or import that would go below that is refused, and nothing is changed.
 - **Closing the editor with unsaved edits** asks *Close anyway?* first. Closing discards them.
 
 ### Working in the editor
@@ -280,7 +284,7 @@ To show SourceVault to people on a PC without the vault, run **Start SourceVault
 **Ctrl+K Ctrl+S** (or **⌨** at the bottom left) shows every shortcut. **F1** lists every command.
 
 - **Go to a file:** **Ctrl+P**, then type part of its name: `gadcpp` finds `src/gadget.cpp`. Start with `:` to go to a line, `@` for a symbol in the file, or `>` for a command. **Ctrl+E** lists the files you opened recently; it starts on the one before the current file, so **Ctrl+E**, **Enter** switches back and forth.
-- **Search all files:** **Ctrl+Shift+F**, or the **⌕** button on the left. Type, press **Enter**, then click a result to jump to it. **Aa** matches case and **ab** matches whole words. Search is plain text (no wildcards), at most 500 results, and covers your unsaved edits too. Each search decrypts the project's files inside the service, so it is not run on every keystroke.
+- **Search all files:** **Ctrl+Shift+F**, or the **⌕** button on the left. Type, press **Enter**, then click a result to jump to it. **Aa** matches case and **ab** matches whole words. Search is plain text (no wildcards), at most 500 results, and covers your unsaved edits too. It searches text files up to 16 MiB; binary files and larger ones are skipped, and the result says how many. Each search decrypts the project's files inside the service, so it is not run on every keystroke.
 - **Outline:** **Ctrl+Shift+O** lists the classes, functions and other symbols of the file. This works for TypeScript, JavaScript, C#, C and C++. For C#, C and C++ it is a quick outline, not a compiler, so an unusual layout can be missed.
 - **C and C++:** highlighting for `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp` and similar files. **Alt+O** switches between a header and its source file (`gadget.h` ↔ `gadget.cpp`). There is no C or C++ formatter or code completion in this editor.
 - **Save all:** **Ctrl+Alt+S**, the **Save all** button, or the **● N unsaved** count in the status bar. Files changed or deleted by someone else are skipped and named, because each needs your choice.
@@ -289,7 +293,7 @@ To show SourceVault to people on a PC without the vault, run **Start SourceVault
 - **Split editor:** **Ctrl+\\** shows two files side by side. Click a side, then a tab, to choose what it shows. **Ctrl+\\** again goes back to one.
 - **Focus mode:** **Ctrl+K Z** hides the side panels; press it again to bring them back.
 - **Editor settings:** **Ctrl+,** or **⚙**. Theme, font size, tab size, spaces or tabs, word wrap, minimap, whitespace and line numbers. Changes show at once; **Save** keeps them for your Windows account on this computer. Only these choices are stored, never file names or text. Each file keeps its own indentation; tab-size changes apply to new files and when you change them here.
-- **Status bar:** cursor and selection, indentation, line endings (LF or CRLF), and the file's size (amber close to the 256 KiB limit).
+- **Status bar:** cursor and selection, indentation, line endings (LF or CRLF), and the file's size (amber close to the editor's 1 MiB limit).
 - Recently opened files and search results are kept only while the editor runs. Locking clears the search results.
 
 ### Delete a project
@@ -312,15 +316,16 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 ```
 
 - **`--dry-run` first:** it lists what would be imported and what would be skipped, with reasons. It doesn't connect and changes nothing.
-- **What's imported:** UTF-8 text files up to 256 KiB, with their folder structure. Up to 1,024 files per project.
+- **What's imported:** every file, whatever its content (text, images, DLLs, `.lib` files, UTF-16 text), up to 1 GiB each, with their folder structure. Up to 25,000 files and 8 GiB per project; a bigger folder is refused as a whole, with a message to exclude folders.
 - **What's skipped:**
-  - binaries and non-UTF-8 files (images, DLLs, UTF-16 text)
-  - files over 256 KiB
+  - files over 1 GiB
+  - names the vault can't hold (over 260 characters or 32 folder levels, or characters Windows doesn't allow), and names that differ only in letter case
+  - files that can't be read
   - links and junctions, which are never followed
   - the folders `.git`, `node_modules`, `bin`, `obj`, `dist`, `build`, `out`, `target`, `.vs`, `.idea`, `__pycache__`, `.venv`, `venv`, `packages`, `.gradle`, `.next` and `coverage`
   - more folders by name with `--exclude <name>` (repeatable)
 - **Always a new project:** it never adds to or overwrites an existing one. If the name is taken, choose another.
-- **Verified:** after importing, it decrypts **every** file through the service and compares it byte for byte with your original. It ends with "all N decrypted and matched the originals" or lists any file that didn't.
+- **Verified:** after importing, it checks that every file's SHA-256 in the vault equals the one it computed from your original, then asks the service to decrypt and check **every** file. It ends with "all N match the originals (SHA-256) and decrypted cleanly in the service" or says what didn't.
 - **Changed files:** if a file changes while the import runs, the import stops. Run it again into a new project name.
 - **Your original folder is not changed** unless you add `--delete-source` (below).
 - **A half-finished import** (stopped or failed) stays in the project list. Delete it in the editor (see "Delete a project") and import again.
@@ -334,7 +339,7 @@ Use the importer to bring a folder of code into a **new** project. Copy/paste is
 - It runs **only after every file has verified**. If anything fails to verify, nothing is deleted.
 - It then explains what will happen and asks you to **type `DELETE`**. Anything else keeps everything.
 - It deletes **only the files it imported**, and only those still byte-for-byte identical to the vault's copy. Each is opened exclusively, overwritten with zeros, then deleted. Folders left empty are removed; the top folder itself is kept.
-- **Kept, and listed with a reason:** skipped files (binaries, large files and so on), excluded folders, files changed since the import, read-only files, files in use, files with other hard links, and anything reached through a link or junction.
+- **Kept, and listed with a reason:** skipped files (over 1 GiB, names the vault can't hold and so on), excluded folders, files changed since the import, read-only files, files in use, files with other hard links, and anything reached through a link or junction.
 - **`.git` is kept.** Its history still contains your source. Delete or move it yourself if that matters.
 - **Not a secure erase.** SSDs, backups, shadow copies, OneDrive/Dropbox sync and the recycle bin of other tools may keep earlier copies.
 - After this, **the vault project is the only copy**: readable only on this computer, with no recovery if the TPM is cleared. Think twice before using it on code you can't recreate.
@@ -368,12 +373,12 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
    ```
    - It shows the recipient's fingerprint: check it matches this PC's.
    - Type `YES` to write the package.
-   - The same rules as a folder import apply: UTF-8 text up to 256 KiB, at most 1,024 files, and `.git`, `bin`, `obj` and the like skipped.
+   - The same rules as a folder import apply: any file up to 1 GiB, at most 25,000 files and 8 GiB, and `.git`, `bin`, `obj` and the like skipped. Pack reads the files as it writes, so it stops if one changes in the meantime.
 2. **Import it here** (operator):
    ```powershell
    & "C:\Program Files\SourceVault\client\SourceVault.Import.exe" --package C:\path\my-app.svpkg --project "My app"
    ```
-   - The vault service checks the signature, decrypts the package in memory and creates the **new** project. Plaintext never touches this PC's disk.
+   - The vault service keeps the uploaded package, still encrypted, in its staging folder, checks the signature, then decrypts it file by file into the **new** project. Plaintext never touches this PC's disk. Packages made by the previous version of Pack are still accepted.
    - It refuses a package that was changed, was made for another PC, or comes from an unregistered computer, and then nothing is created.
 
 **Be aware:**
@@ -401,6 +406,8 @@ If the file changed in the vault since you opened it, Save does **not** overwrit
 - **Merge** combines your edits with theirs. Changes to different lines are combined automatically. Where you both changed the same lines, a merge view shows *Yours* and *Theirs* for each place: choose **Take yours**, **Take theirs** or **Take both**, then **Use merged text**. The result is in the editor as unsaved edits (*Merged · not saved yet*): check it, then **Save**. If they changed the file again in the meantime, Save reports the conflict again and you merge once more.
 - **Reload their version** throws away your unsaved edits and shows the current file.
 - **Keep editing** hides the banner, but saving keeps failing until you merge or reload.
+- **When one version is binary or over 1 MiB,** the two can't be merged as text. After **Merge** the banner offers **Keep mine** (your text is saved over theirs) or **Keep theirs** (your edits are discarded; if theirs is binary or large, its details are shown).
+- **Replace from disk** works the same way: if someone else changed the file after you opened its details, the details show **Keep mine** or **Keep theirs**. The service holds your chosen file for 2 minutes, and until you lock. Either way, the other version stays in history.
 
 Different files never conflict: two people can edit different files of the same project at the same time.
 
@@ -440,4 +447,5 @@ Different files never conflict: two people can edit different files of the same 
 - **Not yet verified:** that everything works after a reboot (automatic start at boot), and an independent security review.
 - **Builds are an export path.** A build runs the project's own scripts, so anyone who can edit a project can make its build copy the source into the output folder, which holds ordinary files. With network access a build could also send it elsewhere. The build containers hold plain source while a build runs, and caches or copies a build makes can stay in the container. The administrator-only paths control *where* output comes from, not *what* it contains.
 - **Builds are not yet verified against a real Docker engine.** They were tested against a simulated engine; the first real run is a lab step.
-- **History is kept forever** for the life of a project: every saved version stays encrypted on disk until the project is deleted. Files saved before this version start their history at the version they had then.
+- **History is kept forever** for the life of a project: every saved version stays encrypted on disk until the project is deleted. Files saved before this version start their history at the version they had then. With large files this adds up: replacing a 500 MB library ten times keeps 5 GB on disk.
+- **Upgrading is one-way.** The first change to a project after upgrading to this version (any-file storage) converts it. After that, an older SourceVault version refuses the vault and won't start, so keep the new setup package.

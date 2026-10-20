@@ -44,4 +44,4 @@ The editor host decides the mode. `app.mjs` posts a ready message and waits for 
 
 In vault mode this page never sees capabilities or snapshot/revision ids, and never puts document text in status messages.
 
-Demo mode (`SourceVault.Editor.exe --demo`, or `index.html?demo` in a browser) runs this page on `demo-host.mjs`, an in-page simulated vault with fictional data and a panel to simulate events. It is shown in red and nothing in it is encrypted. Vault mode never loads it. Node tests: `tests/editor-web/vault-session.test.mjs` and `workbench.test.mjs`.
+Demo mode (`SourceVault.Editor.exe --demo`, or `index.html?demo` in a browser) runs this page on `demo-host.mjs`, an in-page simulated vault with fictional data and a panel to simulate events. It is shown in red and nothing in it is encrypted. Vault mode never loads it. Node tests: `tests/editor-web/vault-session.test.mjs`, `workbench.test.mjs` and `any-file.test.mjs` (binary and large files, from disk, revert, keep mine/theirs; the demo vault makes the files up).

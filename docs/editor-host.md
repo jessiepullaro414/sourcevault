@@ -74,7 +74,7 @@ Design: [editor-vault-design.md](editor-vault-design.md).
 
 **Talking to the service.** Only the host talks to the service, through `SourceVault.Client.EditorVaultController`. The capability and snapshot/revision ids never reach the renderer.
 
-**Renderer requests.** Requests are validated by `BridgePolicy`: exact `{type, requestId, operation, args}`, canonical ids, text at most 256 KiB of strict UTF-8, messages at most 2 MiB. Operations: `listProjects`, `createProject`, `listFiles`, `openDocument`, `closeDocument`, `saveDocument`, `createFile`, `lock`, `unlock`. Responses carry protocol codes plus:
+**Renderer requests.** Requests are validated by `BridgePolicy`: exact `{type, requestId, operation, args}`, canonical ids, text at most 1 MiB of strict UTF-8, messages at most 8 MiB (checked before parsing). Operations: `listProjects`, `createProject`, `listFiles`, `openDocument`, `closeDocument`, `saveDocument`, `createFile`, `lock`, `unlock`. Responses carry protocol codes plus:
 - `Conflict` and `NotOpen`;
 - unlock failures `ServiceNotInstalled`, `ServiceNotRunning`, `AccessDenied`, `Busy`, `ServerUntrusted` and `ClientRejected`.
 
@@ -121,7 +121,7 @@ Everyday comforts in vault mode. Shortcuts are listed in the editor (Ctrl+K Ctrl
 
 - **Navigation.** Go to file (Ctrl+P, fuzzy; `:` line, `@` symbol, `>` command), recently opened files (Ctrl+E), Search all files (Ctrl+Shift+F), and an outline (Ctrl+Shift+O).
 - **Comfort.** Editor settings (Ctrl+,), Save all (Ctrl+Alt+S) with an unsaved count in the status bar, Compare with saved (Ctrl+K D, with Revert that Ctrl+Z undoes), and Format document (Shift+Alt+F) where Monaco has a formatter. Otherwise the editor says there is none.
-- **Layout.** Split editor (Ctrl+\\, two Monaco editors sharing the models), status-bar details (selection, indentation, line endings, file size against the 256 KiB limit), the shortcut list, and focus mode (Ctrl+K Z).
+- **Layout.** Split editor (Ctrl+\\, two Monaco editors sharing the models), status-bar details (selection, indentation, line endings, file size against the editor's 1 MiB limit), the shortcut list, and focus mode (Ctrl+K Z).
 - **C and C++.** `.c` is C. `.cpp`, `.cc`, `.cxx`, `.c++`, `.cppm`, `.ixx` and the headers `.h`, `.hpp`, `.hh`, `.hxx`, `.h++`, `.inl`, `.ipp`, `.tpp` are C++ (Monaco's C++ highlighting covers both). Alt+O switches between a header and its source: same folder first, then anywhere, for `include/` and `src/` layouts. Build files are mapped as well: `.vcxproj`, `.csproj`, `.props`, `.targets` as XML, `.ps1`, `.sh`, `.cmd`/`.bat`, `.ini` and `Dockerfile`.
 - **Outline.** Monaco's TypeScript worker outlines TypeScript and JavaScript. For C#, C and C++, `workbench.mjs` has a line-based outline (namespaces, types, functions and methods, C# properties and fields, C/C++ macros). It skips comments, strings and preprocessor lines. It is not a compiler: several declarations on one line, or multi-line raw strings, can be missed or misplaced. Go to definition and completion across files remain TypeScript/JavaScript only (no C# or C++ language server).
 
@@ -140,3 +140,15 @@ Reviewed in the browser with the fake host (2026-10-19), which has a fictional C
 The bridge accepts messages from the app origin only, bounded to 4 KiB and depth 3. The exact shape is `{ "type": "sourcevault.preview.ready" | "sourcevault.preview.status", "locked": boolean, "dirtyCount": integer, "revisionCount": integer }`. Counts must be 0..32 and 0..1000000 respectively. Duplicate/unknown properties and operations have no effect. A ready message receives `{ "type": "sourcevault.host.metadata", "mode": "synthetic-preview", "captureExclusion": false, "serviceConnected": false }`. The bridge never receives source text or evaluates script; status messages only update the window title. The frontend owns its synthetic lock presentation.
 
 Runtime navigation, actual rendering, and user interactions require a Windows desktop smoke check. No TPM/service/VM security gate follows from this preview.
+
+## Any file (2026-10-19)
+
+From [vault-any-file-design.md](vault-any-file-design.md) section 4.
+- **What the editor opens:** text up to 1 MiB. Up to 256 KiB it goes inline (`OpenDocument`, `ApplyEdits`); from 256 KiB to 1 MiB the host reads it with `ReadTextPart` and saves it with an upload, transparently.
+- **Other files** (binary, or text over 1 MiB) are listed with a *binary* or *large* badge and open an **info panel**: name, kind, size, last change and SHA-256, with rename, delete, history and **Replace from disk…**. The explorer adds **+ Add from disk** and, per folder, **Add files from disk to *folder*/**.
+- **Files from disk:** the host shows the native *Open* dialog (`AddToRecent` off; Windows may still remember the last folder), reads the chosen files (hashing first, then streaming with `BeginUpload`/`UploadPart`/`CommitUploads`), and returns only vault names, sizes, kinds and hashes. The renderer never sends or receives a path or the bytes. A disk read failure is `FileUnreadable`, a file changed between the two reads `SourceChanged`; neither locks the session.
+- **No way out:** there is no download, open-with or preview; binary content never reaches the renderer (decisions O4, O8).
+- **History** lists kind and SHA-256; binary and large versions have no diff, and **Revert to this version** (two-step) calls `RevertFile`.
+- **Conflicts:** a replacement that conflicts stays staged in the service for **Keep mine** / **Keep theirs** (2 minutes, and until the session ends). A text draft against a binary or large version gets the same two choices instead of a text merge.
+- **New bridge operations:** `fileInfo`, `replaceFromDisk`, `keepMine`, `keepTheirs` (`projectId`, `fileId`), `addFromDisk` (`projectId`, `folder`: `""` or a path without leading or trailing `/`) and `revertFile` (`projectId`, `fileId`, `revisionId`). Listings add `kind` and `sha256`; `mergeSources` adds `mergeable`; `searchProject` adds `filesSkipped`. New codes: `NotText`, `Cancelled`, `UploadExpired`, `SourceChanged`, `FileUnreadable`.
+- **Demo mode** simulates all of it with made-up files; nothing is read from disk.

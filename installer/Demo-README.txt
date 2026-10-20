@@ -21,8 +21,11 @@ WHAT IS IN IT
   - Every editor feature works as in the vault: projects and files, history and restore, conflicts and merge,
     deleted files, builds (simulated: nothing is compiled), search all files, go to file (Ctrl+P), outlines,
     split editor, settings, Save all, compare with saved, focus mode. Ctrl+K Ctrl+S lists the shortcuts.
+  - Binary and large files: the C++ demo has an icon and a log over 1 MiB, shown as file details. "Add from disk"
+    and "Replace from disk" make up demo files: NOTHING IS READ FROM THIS PC.
   - "Demo controls" (bottom right) make the events other people and the service cause: someone else edits or
-    deletes the open file, a Windows lock, session expiry, a failed unlock, a failed build. Click its title to fold it.
+    deletes the open file, replaces it with a binary, a Windows lock, session expiry, a failed unlock, a failed
+    build. Click its title to fold it.
   - Copy, paste, drag and right-click are blocked, as in the vault, and the editor has no network access.
 
 A SHORT DEMO
@@ -31,6 +34,7 @@ A SHORT DEMO
   3. Ctrl+Shift+F, search "gadget": results include your unsaved edits.
   4. Builds > Build saved files. Demo controls > "Next build fails", build again.
   5. Demo controls > "Windows lock", then Unlock vault: unsaved edits are kept and re-checked.
+  6. Click res/gadget.ico: its details. Replace from disk..., then History > the first version > Revert.
 
 Integrity: demo-manifest.sha256 lists the SHA-256 of every file in this folder.
 Licences: licenses\.

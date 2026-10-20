@@ -1,5 +1,7 @@
 # Editor on the vault service — design (proposed, not built)
 
+> **Since 2026-10-19** the vault holds any file: the text-only and 256 KiB / 1,024-file limits below are superseded by [vault-any-file-design.md](vault-any-file-design.md).
+
 Status: design approved by the owner 2026-10-17 (decisions at the end). Build steps 1 (client library, controller), 2 (host `--vault` mode, bridge policy, capture exclusion, profile handling, `Install-Editor.ps1`) and 3 (renderer vault mode, fake host for browser review) are done. Step 4, the owner smoke checklist on the installed editor, is next. Step 3 of `pipe-endpoints-design.md`. Builds on protocol v2 (`contracts/protocol-v2.md`), the installed lab client pattern, and the existing synthetic editor (`docs/editor-host.md`). Synthetic data only until the owner decides otherwise.
 
 ## Shape

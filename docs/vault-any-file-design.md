@@ -2,7 +2,7 @@
 
 **Owner decision (2026-10-19):** the vault must hold **any file a user adds**: binary files (icons, bitmaps, `.lib`/`.dll`), other encodings (UTF-16 `.rc` files, Windows code pages), larger files and more files per project. In the owner's words: "I can't control what someone might upload". Real C++/MFC projects also can't build without these files (`docs/cpp-build-design.md`, section 5, on branch `claude/hopeful-pasteur-d204a1`).
 
-Status: **approved; being built in the order of section 11.** It changes the record format, the manifest schema, the package format and the protocol. The coordinator reviewed all of these (AGENTS.md) and the owner made every owner decision on 2026-10-19; section 12 records both, including two review additions. Synthetic inputs only.
+Status: **approved and built (2026-10-19), in process tested;** the lab items in section 10 are still to run. It changes the record format, the manifest schema, the package format and the protocol. The coordinator reviewed all of these (AGENTS.md) and the owner made every owner decision on 2026-10-19; section 12 records both, including two review additions. Synthetic inputs only.
 
 **Unchanged:**
 - the TPM vault key, the import key and sender keys;

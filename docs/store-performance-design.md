@@ -1,5 +1,7 @@
 # Store performance and service hookup — design (proposed, not built)
 
+> **Since 2026-10-19** the vault holds any file: the text-only and 256 KiB / 1,024-file limits below are superseded by [vault-any-file-design.md](vault-any-file-design.md).
+
 Status: Phase A approved and built 2026-10-17 (decisions and results at the end). Phase B deferred. Service hookup steps 1-2 built (see `service-host.md`, "Project catalog at startup"); step 3 (pipe endpoints) not started.
 
 ## Problem, measured
