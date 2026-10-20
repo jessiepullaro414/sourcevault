@@ -49,7 +49,7 @@ function Invoke-Script([string]$path, [string[]]$arguments) {
     return $LASTEXITCODE
 }
 function Invoke-Wsl([string]$script, [switch]$AllowFailure) {
-    $output = ($script -replace "`r", '') | & wsl.exe -d $distro -u root -- sh -s
+    $output = ($script -replace "`r", '') | & wsl.exe -d $distro -u root --exec sh -c 'sed -e ''1s/^\xEF\xBB\xBF//'' -e ''s/\r$//'' | sh' # strip the CR/BOM PowerShell adds to piped text
     if ($LASTEXITCODE -ne 0 -and !$AllowFailure) { Fail "A command in the WSL distro failed (exit $LASTEXITCODE)." }
     return $output
 }
@@ -163,7 +163,7 @@ if ($state.done -notcontains 'wsl') {
         Ok "imported Ubuntu 24.04 as '$distro' for $env:USERNAME"
     } else { Ok "'$distro' already exists" }
     # Docker's static Linux binaries; its own containerd; no bridge network and no iptables (builds use no network).
-    $tgz = (& wsl.exe -d $distro -u root -- wslpath -u (KitFile 'docker-linux')) -join ''
+    $tgz = (& wsl.exe -d $distro -u root --exec wslpath -u (KitFile 'docker-linux')) -join ''
     Invoke-Wsl @"
 set -eu
 printf '[boot]\nsystemd=true\n[user]\ndefault=root\n' > /etc/wsl.conf
