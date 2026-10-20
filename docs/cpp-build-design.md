@@ -66,10 +66,16 @@ In that mode each script:
 - keeps the network-mode check and, on Windows, **the copy check**. That check decides whether the build service can work with the image's isolation mode at all;
 - labels the container with the image ID and its kit entry's name.
 
+**Built (2026-10-20), the on-target half.** Both container scripts take `-OwnerImageId` (and `-TargetName` for the printed target), with or without `-ImageArchive`. Without an archive, the image must already be in the engine; it is never pulled. Tested on the dev PC's WSL engine with an image already in the engine (an existing image standing in for an owner image). The kit half (`ownerImages` in `kit-sources.json`, `Build-DeploymentKit.ps1 -OwnerImages`, Deploy phase 5) is not built yet.
+
+Two findings from that test:
+- **Docker 29 in WSL uses the containerd image store,** where `docker image inspect --format '{{.Id}}'` gives the image's **manifest (or index) digest**, not its configuration digest. An owner image's ID must therefore be read from the engine it runs on. The drive's pinned `imageId` values (configuration digests) would not match on such an engine, so the offline `-ImageArchive` check needs to accept the manifest digest too. Follow-up in next-tasks.
+- **Builds run as root in the container (changes item 3 below).** The project's files are copied in as root, with owner-only write access, so an image's own non-root user couldn't write next to them or run `sed -i` on `build.sh`. The Linux container now always starts with `--user 0:0`, as the .NET image already ran, still with all capabilities dropped and `no-new-privileges`.
+
 ### What the owner's images must satisfy
 1. **Everything offline is inside.** Builds run with no network: no NuGet, vcpkg, apt or installer downloads at build time. Anything a build fetches today must be in the image or in the project.
 2. **No secrets in the image.** The drive isn't encrypted (deployment-kit-design.md). Registry credentials, signing keys, licence keys and tokens must not be in any layer, including deleted ones: an earlier layer keeps them.
-3. **Linux:** has `/bin/sh` and `sleep`, and builds as whatever user the image sets, with **all capabilities dropped** and no privilege escalation. A build that needs `sudo`, `apt` or a mount fails, by design.
+3. **Linux:** has `/bin/sh` and `sleep`. Builds run as root inside the container (`--user 0:0`, as for the .NET image), with **all capabilities dropped** and no privilege escalation. A build that needs `sudo`, `apt` or a mount fails, by design.
 4. **Windows: the base OS must suit this host.** The host is Windows 11 25H2 (build 26200). An image based on `ltsc2025` may run with process isolation; one based on `ltsc2022` or older needs Hyper-V isolation. The copy check then decides whether the build service can copy into it. Record which base the image uses (question 3).
 5. **Writable paths.** The build service copies the project into `C:\sourcevault\src` (`/sourcevault/src`) and reads `C:\sourcevault\out` (`/sourcevault/out`). The script creates both, so the image only has to allow it.
 6. **The .NET SDK, if the image is to build C# too** (question 1). Otherwise SourceVault's own .NET containers stay as separate targets.

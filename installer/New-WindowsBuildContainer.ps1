@@ -5,9 +5,16 @@
 # in Windows-container mode.
 #
 #   New-WindowsBuildContainer.ps1 [-Name sourcevault-build-windows] [-MemoryGB 4] [-Isolation auto|process|hyperv] [-Replace] [-ImageArchive <images\sdk-windows.tar>]
+#   New-WindowsBuildContainer.ps1 -OwnerImageId sha256:<64 hex> [-ImageArchive <your-image.tar>] [-Name sourcevault-build-java] [-TargetName java-windows]
 #
 # -ImageArchive (offline, the deployment drive): loads the image from that archive instead of pulling, and accepts it
 # only if its image ID is the pinned configuration digest below.
+#
+# -OwnerImageId (docs/cpp-build-design.md, section 1): YOUR build image instead of Microsoft's .NET SDK image (MSVC,
+# a JDK for Ant...). It is never pulled: it must already be in this engine (docker load / docker build), or come from
+# -ImageArchive, and its image ID must equal -OwnerImageId. It needs PowerShell (a Server Core base) for the keep-alive
+# and a base OS this host can run. Instead of the .NET checks, the script lists the build tools it finds. The copy
+# check still decides whether the build service can work with the container.
 #
 # What it does, with the docker CLI on this PC:
 #   1. Checks that the engine is running Windows containers.
@@ -31,7 +38,9 @@ param(
     [ValidateSet('auto', 'process', 'hyperv')][string]$Isolation = 'auto',
     [ValidatePattern('^npipe:////\./pipe/[A-Za-z0-9._-]{1,128}$')][string]$Engine = 'npipe:////./pipe/docker_engine',
     [switch]$Replace,
-    [string]$ImageArchive
+    [string]$ImageArchive,
+    [ValidatePattern('^sha256:[0-9a-f]{64}$')][string]$OwnerImageId,
+    [ValidatePattern('^[A-Za-z0-9_-]{1,32}$')][string]$TargetName = 'windows'
 )
 $ErrorActionPreference = 'Stop'
 # Talk to exactly the engine build.json names (default: the standard Windows engine pipe, served by Microsoft's
@@ -63,7 +72,8 @@ function Invoke-Docker {
 function Ok([string]$text) { Write-Host "   OK   $text" -ForegroundColor Green }
 function Encoded([string]$script) { [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script)) }
 
-Write-Host "SourceVault Windows build container: $imageRepo`:$imageTag pinned to $imageDigest" -ForegroundColor White
+if ($OwnerImageId) { Write-Host "SourceVault Windows build container from your image $OwnerImageId" -ForegroundColor White }
+else { Write-Host "SourceVault Windows build container: $imageRepo`:$imageTag pinned to $imageDigest" -ForegroundColor White }
 if (!(Get-Command docker.exe -CommandType Application -ErrorAction SilentlyContinue)) { throw 'The docker CLI (docker.exe) is not installed on this PC.' }
 $serverOs = (Invoke-Docker -AllowFailure version --format '{{.Server.Os}}') -join ''
 if ($LASTEXITCODE -ne 0 -or !$serverOs) { throw "No Docker engine answers on $Engine. Install or start the Windows engine (Microsoft's standalone Docker engine runs as the 'docker' service: Start-Service docker)." }
@@ -76,6 +86,7 @@ if ((Invoke-Docker -AllowFailure container inspect --format '{{.Name}}' $Name) -
     Ok "removed the old '$Name'"
 }
 
+if ($OwnerImageId) { $imageId = $OwnerImageId } # the ID every check below must match
 if ($ImageArchive) {
     $archive = (Resolve-Path -LiteralPath $ImageArchive).Path
     Write-Host "Loading the image from $archive (no download; a few minutes)..."
@@ -84,6 +95,11 @@ if ($ImageArchive) {
     if ($loaded -ne $imageId) { throw "The archive did not load the pinned image $imageId; not creating the container." }
     $image = $imageId # create the container from the verified image ID
     Ok 'image loaded from the archive and matches the pinned image ID'
+} elseif ($OwnerImageId) {
+    $found = (Invoke-Docker -AllowFailure image inspect --format '{{.Id}}' $imageId) -join ''
+    if ($found -ne $imageId) { throw "Image $imageId is not in the Windows Docker engine. Load it first (docker load -i <archive>) or pass -ImageArchive; SourceVault never pulls your images." }
+    $image = $imageId
+    Ok "your image $imageId is in the engine"
 } else {
     Write-Host "Pulling $image (about 2.7 GB; Docker verifies every layer against the digest)..."
     Invoke-Docker pull $image | Out-Null
@@ -100,7 +116,8 @@ $common = @('--network', 'none', '--memory', "${MemoryGB}g", '--restart', 'unles
 $modes = if ($Isolation -eq 'auto') { 'process', 'hyperv' } else { @($Isolation) }
 $created = $null
 foreach ($mode in $modes) {
-    $result = Invoke-Docker -AllowFailure run -d --name $Name --isolation $mode @common $image powershell -NoProfile -Command $keepAlive
+    # --entrypoint: SourceVault's keep-alive, whatever ENTRYPOINT an image defines.
+    $result = Invoke-Docker -AllowFailure run -d --name $Name --isolation $mode @common --entrypoint powershell.exe $image -NoProfile -Command $keepAlive
     if ($LASTEXITCODE -eq 0) { $created = $mode; break }
     Write-Host "   NOTE $mode isolation was refused: $($result -join ' ')" -ForegroundColor Yellow
     Invoke-Docker -AllowFailure rm -f $Name | Out-Null
@@ -111,9 +128,23 @@ Ok "container '$Name' created with $created isolation (no network, restarts with
 
 $network = (Invoke-Docker inspect --format '{{.HostConfig.NetworkMode}}' $Name) -join ''
 if ($network -ne 'none') { throw "The container's network mode is '$network', not 'none'." }
+if ($OwnerImageId) {
+    Ok 'network mode none'
+    # The tools your image carries, for the lab record (name: path; on PATH as the container starts).
+    $tools = @'
+foreach ($t in 'msbuild', 'cl', 'dotnet', 'java', 'javac', 'ant', 'mvn', 'gradle', 'cmake', 'ninja', 'python') {
+    $c = Get-Command $t -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { '{0}: {1}' -f $t, $c.Source }
+}
+'@
+    $found = Invoke-Docker -AllowFailure exec $Name powershell -NoProfile -EncodedCommand (Encoded $tools)
+    if ($found) { Write-Host '   Build tools on PATH in your image:'; $found | ForEach-Object { Write-Host "     $_" } }
+    else { Write-Host '   NOTE none of the usual build tools is on PATH in your image. A build script can call tools by full path, or build.json''s command can run an environment script first (e.g. VsDevCmd.bat).' -ForegroundColor Yellow }
+} else {
 $version = (Invoke-Docker exec $Name dotnet --version) -join ''
 if ($version -ne $sdkVersion) { throw "The container reports SDK $version, expected $sdkVersion." }
 Ok "network mode none; SDK $version"
+}
 
 # The key check: copy a fictional file into the RUNNING container and back out, as the build service does.
 $local = Join-Path ([IO.Path]::GetTempPath()) ('sourcevault-copycheck-' + [guid]::NewGuid().ToString('N'))
@@ -137,7 +168,8 @@ try {
 }
 finally { Remove-Item -LiteralPath $local -Recurse -Force -ErrorAction SilentlyContinue }
 
-# A fictional console app, built and run offline, then removed.
+# A fictional console app, built and run offline, then removed (the .NET image only).
+if (!$OwnerImageId) {
 $build = @'
 $ErrorActionPreference = 'Stop'
 $d = 'C:\svcheck'; Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory $d | Out-Null
@@ -151,12 +183,13 @@ Remove-Item $d -Recurse -Force
 $check = Invoke-Docker -AllowFailure exec $Name powershell -NoProfile -EncodedCommand (Encoded $build)
 if (@($check) -notcontains 'sourcevault offline build ok') { throw "The offline test build did not run: $($check -join ' ')" }
 Ok 'a fictional console app built and ran with no network'
+}
 
 Write-Host ''
 Write-Host 'Done. Use this target in C:\ProgramData\SourceVault\config\build.json:' -ForegroundColor White
 @"
     {
-      "name": "windows",
+      "name": "$TargetName",
       "engine": "$($Engine -replace '^npipe:////', 'npipe://')",
       "container": "$Name",
       "platform": "windows",
