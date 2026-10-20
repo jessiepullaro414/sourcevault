@@ -46,7 +46,8 @@ export function postStatus(metadata, type = 'sourcevault.preview.status') {
   window.chrome?.webview?.postMessage({ type, locked: metadata.locked, dirtyCount: metadata.dirtyCount, revisionCount: metadata.revisionCount });
 }
 
-export const languageLabel = id => ({ typescript: 'TypeScript', javascript: 'JavaScript', markdown: 'Markdown', json: 'JSON', css: 'CSS', html: 'HTML', plaintext: 'Plain text' })[id] ?? id;
+export const languageLabel = id => ({ typescript: 'TypeScript', javascript: 'JavaScript', markdown: 'Markdown', json: 'JSON', css: 'CSS', html: 'HTML', plaintext: 'Plain text',
+  csharp: 'C#', cpp: 'C++', c: 'C', python: 'Python', xml: 'XML', yaml: 'YAML', sql: 'SQL', powershell: 'PowerShell', shell: 'Shell script', bat: 'Batch', ini: 'INI', dockerfile: 'Dockerfile' })[id] ?? id;
 
 /** Loads the bundled Monaco (no CDN) and its local TypeScript workers. Resolves to the global monaco. */
 export async function loadMonaco() {
@@ -71,10 +72,10 @@ export async function loadMonaco() {
   return monaco;
 }
 
-export function createEditor(ariaLabel) {
+export function createEditor(ariaLabel, container = $('editor')) {
   // Use Monaco's textarea input path for Windows accessibility and desktop
   // automation compatibility instead of Chromium's newer EditContext API.
-  return monaco.editor.create($('editor'), { theme: 'sourcevault', model: null, automaticLayout: true, editContext: false, fontFamily: 'Cascadia Code, Consolas, monospace', fontSize: 13, lineHeight: 23, padding: { top: 12, bottom: 24 }, minimap: { enabled: true, renderCharacters: false, maxColumn: 80, scale: 1 }, scrollBeyondLastLine: false, contextmenu: false, dragAndDrop: false, dropIntoEditor: { enabled: false }, links: false, quickSuggestions: true, tabSize: 2, insertSpaces: true, bracketPairColorization: { enabled: true }, renderLineHighlight: 'line', overviewRulerBorder: false, hideCursorInOverviewRuler: true, smoothScrolling: true, fixedOverflowWidgets: true, ariaLabel });
+  return monaco.editor.create(container, { theme: 'sourcevault', model: null, automaticLayout: true, editContext: false, fontFamily: 'Cascadia Code, Consolas, monospace', fontSize: 13, lineHeight: 23, padding: { top: 12, bottom: 24 }, minimap: { enabled: true, renderCharacters: false, maxColumn: 80, scale: 1 }, scrollBeyondLastLine: false, contextmenu: false, dragAndDrop: false, dropIntoEditor: { enabled: false }, links: false, quickSuggestions: true, tabSize: 2, insertSpaces: true, bracketPairColorization: { enabled: true }, renderLineHighlight: 'line', overviewRulerBorder: false, hideCursorInOverviewRuler: true, smoothScrolling: true, fixedOverflowWidgets: true, ariaLabel });
 }
 
 /** A read-only side-by-side diff (file history). Same blocked context menu and drag paths as the main editor. */
@@ -87,15 +88,18 @@ export function createLogViewer(container, ariaLabel) {
   return monaco.editor.create(container, { theme: 'sourcevault', model: null, readOnly: true, automaticLayout: true, editContext: false, fontFamily: 'Cascadia Code, Consolas, monospace', fontSize: 12, lineHeight: 19, minimap: { enabled: false }, scrollBeyondLastLine: false, contextmenu: false, dragAndDrop: false, dropIntoEditor: { enabled: false }, links: false, wordWrap: 'on', renderLineHighlight: 'none', ariaLabel });
 }
 
-/** Explorer/inspector/activity panel toggles, find, and blocked browser shortcuts (Ctrl+S calls onSave). */
-export function wireChrome(getEditor, { onSave, isLocked }) {
+/**
+ * Explorer/inspector/activity panel toggles, find, and blocked browser shortcuts (Ctrl+S calls onSave). `skipKey`
+ * returns true for a key that belongs to a chord (Ctrl+K Ctrl+S), which is not a save.
+ */
+export function wireChrome(getEditor, { onSave, isLocked, skipKey = () => false }) {
   $('find').onclick = () => { if (!isLocked()) getEditor()?.getAction('actions.find').run(); };
   $('explorer-toggle').onclick = () => { const hidden = !$('explorer').hidden; $('explorer').hidden = hidden; $('explorer-toggle').setAttribute('aria-pressed', String(!hidden)); $('explorer-toggle').classList.toggle('selected', !hidden); getEditor()?.layout(); };
   $('inspector-toggle').onclick = () => { const hidden = !$('inspector').hidden; $('inspector').hidden = hidden; $('inspector-toggle').setAttribute('aria-pressed', String(!hidden)); getEditor()?.layout(); };
   $('activity-toggle').onclick = () => { const expanded = $('activity-toggle').getAttribute('aria-expanded') !== 'true'; $('activity-toggle').setAttribute('aria-expanded', String(expanded)); $('activity').classList.toggle('collapsed', !expanded); $('activity-content').hidden = !expanded; $('activity-chevron').textContent = expanded ? '⌄' : '⌃'; getEditor()?.layout(); };
   document.addEventListener('keydown', event => {
     const mod = event.ctrlKey || event.metaKey;
-    if (mod && event.key.toLowerCase() === 's') { event.preventDefault(); onSave(); }
+    if (mod && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 's' && !skipKey(event)) { event.preventDefault(); onSave(); }
     if (mod && ['p', 'o'].includes(event.key.toLowerCase())) event.preventDefault();
   }, true);
 }

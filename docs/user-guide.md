@@ -265,6 +265,24 @@ If you see a lock screen instead, it explains why:
 - **Switch project** returns to the project list. Save or reload edited files first.
 - **Save** with **Ctrl+S** or the Save button. Each save becomes a new encrypted, unchangeable revision in the vault. Until you save, your edits exist only in the editor; a dot on the tab means unsaved changes.
 - Limits: 256 KiB per file (UTF-8 text), 1,024 files per project, 256 projects.
+- **Closing the editor with unsaved edits** asks *Close anyway?* first. Closing discards them.
+
+### Working in the editor
+
+**Ctrl+K Ctrl+S** (or **⌨** at the bottom left) shows every shortcut. **F1** lists every command.
+
+- **Go to a file:** **Ctrl+P**, then type part of its name: `gadcpp` finds `src/gadget.cpp`. Start with `:` to go to a line, `@` for a symbol in the file, or `>` for a command. **Ctrl+E** lists the files you opened recently; it starts on the one before the current file, so **Ctrl+E**, **Enter** switches back and forth.
+- **Search all files:** **Ctrl+Shift+F**, or the **⌕** button on the left. Type, press **Enter**, then click a result to jump to it. **Aa** matches case and **ab** matches whole words. Search is plain text (no wildcards), at most 500 results, and covers your unsaved edits too. Each search decrypts the project's files inside the service, so it is not run on every keystroke.
+- **Outline:** **Ctrl+Shift+O** lists the classes, functions and other symbols of the file. This works for TypeScript, JavaScript, C#, C and C++. For C#, C and C++ it is a quick outline, not a compiler, so an unusual layout can be missed.
+- **C and C++:** highlighting for `.c`, `.cpp`, `.cc`, `.cxx`, `.h`, `.hpp` and similar files. **Alt+O** switches between a header and its source file (`gadget.h` ↔ `gadget.cpp`). There is no C or C++ formatter or code completion in this editor.
+- **Save all:** **Ctrl+Alt+S**, the **Save all** button, or the **● N unsaved** count in the status bar. Files changed or deleted by someone else are skipped and named, because each needs your choice.
+- **Compare with saved:** **Ctrl+K D**, or **Compare with saved** above the editor. It shows your unsaved edits (green) against the saved version (red). **Revert to saved** drops your edits; **Ctrl+Z** in the editor brings them back.
+- **Format document:** **Shift+Alt+F**, for TypeScript and JavaScript (and any other type the editor has a formatter for). Otherwise, as for C, C++ and C#, the editor says it has none.
+- **Split editor:** **Ctrl+\\** shows two files side by side. Click a side, then a tab, to choose what it shows. **Ctrl+\\** again goes back to one.
+- **Focus mode:** **Ctrl+K Z** hides the side panels; press it again to bring them back.
+- **Editor settings:** **Ctrl+,** or **⚙**. Theme, font size, tab size, spaces or tabs, word wrap, minimap, whitespace and line numbers. Changes show at once; **Save** keeps them for your Windows account on this computer. Only these choices are stored, never file names or text. Each file keeps its own indentation; tab-size changes apply to new files and when you change them here.
+- **Status bar:** cursor and selection, indentation, line endings (LF or CRLF), and the file's size (amber close to the 256 KiB limit).
+- Recently opened files and search results are kept only while the editor runs. Locking clears the search results.
 
 ### Delete a project
 

@@ -162,3 +162,17 @@ See `docs/package-import-design.md`. Every operation also takes `capability`. Wi
 - **New error codes:**
   - `PackageRejected`: the package is malformed, altered, made for another recipient, or contains files the vault does not accept. Nothing is created.
   - `UnknownSender`: the signature is valid, but its computer is not registered in `C:\ProgramData\SourceVault\senders`.
+
+## Addition: search all files (owner request, 2026-10-19)
+
+The editor's **Search all files**. Plain text only: no regular expressions, so a query can never be expensive.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| SearchProject | `capability`, `projectId`, `query`, `matchCase`, `wholeWord` | `matches[]`, `truncated`, `filesSearched` |
+
+- **Query:** 1 to 200 characters on one line; otherwise `InvalidRequest`. `matchCase` and `wholeWord` must be JSON booleans. Whole word means the characters on both sides are not letters, digits or `_`.
+- **What is searched:** the text of every file in the project's current snapshot, line by line (a trailing CR is ignored). Unsaved edits are not in the vault; the editor searches those itself, in its drafts.
+- **Each match:** `fileId`, `name`, `line` and `column` (1-based, UTF-16 units), `length`, `preview` (the line around the match, at most 240 characters plus a leading `…` when cut, leading spaces removed) and `previewOffset` (where the match starts in `preview`).
+- **Limits:** at most 500 matches; `truncated` is `true` when there were more. Matches are sorted by name (ignoring case), line and column.
+- **Cost:** a search decrypts every file of the project inside the service, like a build. Only matching lines leave it.

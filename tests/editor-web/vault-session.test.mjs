@@ -17,7 +17,7 @@ test('starts locked; unlock opens a session and lists projects; nothing is loade
   const session = new VaultSession(host.transport, { timeoutMs: 500 });
   assert.equal(session.locked, true);
   assert.deepEqual(await session.unlock(), []);
-  assert.deepEqual(session.projects.map(p => p.name), ['Synthetic demo 1', 'Lab client check']);
+  assert.deepEqual(session.projects.map(p => p.name), ['Synthetic demo 1', 'Synthetic C++ demo', 'Lab client check']);
   await session.selectProject(host.projectIdByName('Synthetic demo 1'));
   assert.equal(session.files.size, 3);
   assert.ok([...session.files.values()].every(f => !f.loaded && f.text === null), 'no text before open');
@@ -96,7 +96,7 @@ test('deleting a project needs its exact name, refuses drafts in it, and clears 
   session.edit(main.id, main.saved);
   await session.deleteProject(projectId, 'Synthetic demo 1');
   assert.equal(session.project, null); assert.equal(session.files.size, 0); assert.equal(session.activeId, null);
-  assert.deepEqual(session.projects, []);
+  assert.deepEqual(session.projects.map(p => p.name), ['Synthetic C++ demo']);
   await session.createProject('Fresh');
   assert.equal(session.project.name, 'Fresh');
 });

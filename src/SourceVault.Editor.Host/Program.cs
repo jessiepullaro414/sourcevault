@@ -53,6 +53,8 @@ internal sealed class EditorWindow : Window
     private bool closing;
     private bool captureExcluded;
     private DateTime lastVaultActivity = DateTime.UtcNow;
+    private int unsavedFiles; // from the renderer's status messages (a count only)
+    private bool closeConfirmed;
     private string? lockReasonOverride;
 
     public EditorWindow(EditorMode mode)
@@ -74,6 +76,14 @@ internal sealed class EditorWindow : Window
                 captureExcluded = CaptureProtection.SetWindowDisplayAffinity(new WindowInteropHelper(this).Handle, CaptureProtection.ExcludeFromCapture);
         };
         Loaded += async (_, _) => await InitializeAsync();
+        // Unsaved edits live only in this window: ask before closing it with some.
+        Closing += (_, e) =>
+        {
+            if (mode != EditorMode.Vault || unsavedFiles == 0 || closeConfirmed) return;
+            var answer = MessageBox.Show(this, $"{unsavedFiles} file(s) have unsaved edits. They exist only in this window and are lost if you close it.\n\nClose anyway?",
+                "Unsaved edits", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+            if (answer == MessageBoxResult.Yes) closeConfirmed = true; else e.Cancel = true;
+        };
         Closed += (_, _) =>
         {
             closing = true;
@@ -237,6 +247,7 @@ internal sealed class EditorWindow : Window
                 }));
                 break;
             case PreviewMessageKind.Status:
+                unsavedFiles = message.DirtyCount;
                 if (mode == EditorMode.SyntheticPreview) UpdateTitle(message.Locked);
                 // Editing activity keeps an otherwise quiet vault session from idling out (5-minute service limit).
                 else if (vault is { IsLocked: false } && DateTime.UtcNow - lastVaultActivity > KeepAliveAfter)
@@ -331,6 +342,22 @@ internal sealed class EditorWindow : Window
                     w.WriteNumber("byteLength", f.ByteLength)),
                 VaultOperation.CreateFile => Respond(request, await controller.CreateFileAsync(request.ProjectId, request.Name!, request.Text!), (w, f) =>
                     { w.WriteString("fileId", f.FileId.ToString("D")); w.WriteString("name", f.Name); }),
+                VaultOperation.SearchProject => Respond(request, await controller.SearchProjectAsync(request.ProjectId, request.Query!, request.MatchCase, request.WholeWord), (w, s) =>
+                {
+                    w.WriteStartArray("matches");
+                    foreach (var m in s.Matches)
+                    {
+                        w.WriteStartObject();
+                        w.WriteString("fileId", m.FileId.ToString("D")); w.WriteString("name", m.Name);
+                        w.WriteNumber("line", m.Line); w.WriteNumber("column", m.Column); w.WriteNumber("length", m.Length); w.WriteString("preview", m.Preview); w.WriteNumber("previewOffset", m.PreviewOffset);
+                        w.WriteEndObject();
+                    }
+                    w.WriteEndArray();
+                    w.WriteBoolean("truncated", s.Truncated); w.WriteNumber("filesSearched", s.FilesSearched);
+                }),
+                // Display preferences only (EditorSettings); they never contain names or text and need no vault session.
+                VaultOperation.GetSettings => BridgePolicy.BuildResponse(request.RequestId, "Ok", w => { w.WriteStartObject("settings"); EditorSettings.Load(EditorSettings.FilePath).Write(w); w.WriteEndObject(); }),
+                VaultOperation.SaveSettings => SaveSettings(request),
                 VaultOperation.CloseDocument => Close(request, controller),
                 VaultOperation.Lock => await LockAsync(request, controller),
                 VaultOperation.Unlock => await UnlockAsync(request, controller),
@@ -359,6 +386,12 @@ internal sealed class EditorWindow : Window
 
     private static string Respond<T>(VaultBridgeRequest request, VaultResult<T> result, Action<System.Text.Json.Utf8JsonWriter, T> write) =>
         BridgePolicy.BuildResponse(request.RequestId, result.Code, result.Ok ? w => write(w, result.Value!) : null);
+
+    private static string SaveSettings(VaultBridgeRequest request)
+    {
+        try { request.Settings!.Save(EditorSettings.FilePath); return BridgePolicy.BuildResponse(request.RequestId, "Ok", _ => { }); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return BridgePolicy.BuildResponse(request.RequestId, "Unavailable", null); }
+    }
 
     private static string Close(VaultBridgeRequest request, EditorVaultController controller)
     {

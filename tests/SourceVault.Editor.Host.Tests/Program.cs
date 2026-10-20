@@ -691,5 +691,58 @@ Check("app.mjs removes network APIs before it does anything else", () =>
         Assert(app.IndexOf(later, StringComparison.Ordinal) > guard, "network guard runs before: " + later.Trim());
 });
 
+// ---- Search all files and display settings (editor comfort features, 2026-10-19) ----
+const string GoodSettings = "{\"theme\":\"light\",\"fontSize\":15,\"wordWrap\":true,\"minimap\":false,\"tabSize\":4,\"insertSpaces\":true,\"renderWhitespace\":false,\"lineNumbers\":true}";
+
+Check("bridge: searchProject takes one line of plain text and two flags", () =>
+{
+    var search = Parsed(Req("searchProject", $"{{\"projectId\":\"{P}\",\"query\":\"Widget\",\"matchCase\":true,\"wholeWord\":false}}"));
+    Assert(search.Operation == VaultOperation.SearchProject && search.Query == "Widget" && search.MatchCase && !search.WholeWord, "parsed");
+    foreach (var args in new[]
+    {
+        $"{{\"projectId\":\"{P}\",\"query\":\"\",\"matchCase\":false,\"wholeWord\":false}}",                            // empty
+        $"{{\"projectId\":\"{P}\",\"query\":\"{new string('q', 201)}\",\"matchCase\":false,\"wholeWord\":false}}",      // too long
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\\nb\",\"matchCase\":false,\"wholeWord\":false}}",                      // two lines
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\\u0000\",\"matchCase\":false,\"wholeWord\":false}}",                   // control character
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\",\"matchCase\":\"true\",\"wholeWord\":false}}",                       // flag as text
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\",\"matchCase\":false}}",                                              // missing flag
+        $"{{\"projectId\":\"{P}\",\"query\":\"a\",\"matchCase\":false,\"wholeWord\":false,\"regex\":true}}",           // unknown field
+        $"{{\"projectId\":\"not-an-id\",\"query\":\"a\",\"matchCase\":false,\"wholeWord\":false}}",
+    })
+        Rejects(Vault, Req("searchProject", args));
+});
+
+Check("bridge: settings carry exactly eight bounded display preferences", () =>
+{
+    Assert(Parsed(Req("getSettings", "{}")).Operation == VaultOperation.GetSettings, "getSettings");
+    var saved = Parsed(Req("saveSettings", $"{{\"settings\":{GoodSettings}}}")).Settings!;
+    Assert(saved == new EditorSettings("light", 15, true, false, 4, true, false, true), "parsed");
+    foreach (var (from, to) in new[]
+    {
+        ("\"light\"", "\"neon\""), ("15", "9"), ("15", "29"), ("15", "15.5"), ("\"tabSize\":4", "\"tabSize\":3"), ("true,\"minimap\"", "1,\"minimap\""),
+        ("\"lineNumbers\":true", "\"lineNumbers\":true,\"recentFiles\":[\"src/a.ts\"]"), // nothing that could hold a name
+        (",\"lineNumbers\":true", ""),
+    })
+        Rejects(Vault, Req("saveSettings", $"{{\"settings\":{GoodSettings.Replace(from, to)}}}"));
+    Rejects(Vault, Req("saveSettings", "{\"settings\":\"dark\"}"), Req("getSettings", "{\"x\":1}"));
+});
+
+Check("settings file: round trip; a malformed, oversized or tampered file gives the defaults", () =>
+{
+    var settings = new EditorSettings("highContrast", 20, true, false, 8, false, true, false);
+    Assert(EditorSettings.Parse(settings.ToJson()) == settings, "round trip");
+    Assert(EditorSettings.Parse("not json") == EditorSettings.Default, "malformed");
+    Assert(EditorSettings.Parse(GoodSettings.Replace("15", "99")) == EditorSettings.Default, "out of range");
+    Assert(EditorSettings.Parse(GoodSettings + new string(' ', EditorSettings.MaxFileBytes)) == EditorSettings.Default, "oversized");
+    var path = Path.Combine(Path.GetTempPath(), "sv-settings-" + Guid.NewGuid().ToString("N"), "editor-settings.json");
+    try
+    {
+        Assert(EditorSettings.Load(path) == EditorSettings.Default, "missing file");
+        settings.Save(path);
+        Assert(EditorSettings.Load(path) == settings && !File.Exists(path + ".tmp"), "saved atomically and loaded");
+    }
+    finally { Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
+});
+
 Console.WriteLine($"Editor host policy tests: {passed} passed; {failures.Count} failed.");
 return failures.Count == 0 ? 0 : 1;

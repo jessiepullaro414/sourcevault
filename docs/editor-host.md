@@ -103,6 +103,28 @@ Reviewed in the browser with the fake host: picker, open, edit and save, externa
 
 **Not yet done:** running vault mode as the installed editor against the service (design step 4).
 
+## Editor features (owner request, 2026-10-19)
+
+Everyday comforts in vault mode. Shortcuts are listed in the editor (Ctrl+K Ctrl+S) and in [user-guide.md](user-guide.md).
+
+- **Navigation.** Go to file (Ctrl+P, fuzzy; `:` line, `@` symbol, `>` command), recently opened files (Ctrl+E), Search all files (Ctrl+Shift+F), and an outline (Ctrl+Shift+O).
+- **Comfort.** Editor settings (Ctrl+,), Save all (Ctrl+Alt+S) with an unsaved count in the status bar, Compare with saved (Ctrl+K D, with Revert that Ctrl+Z undoes), and Format document (Shift+Alt+F) where Monaco has a formatter. Otherwise the editor says there is none.
+- **Layout.** Split editor (Ctrl+\\, two Monaco editors sharing the models), status-bar details (selection, indentation, line endings, file size against the 256 KiB limit), the shortcut list, and focus mode (Ctrl+K Z).
+- **C and C++.** `.c` is C. `.cpp`, `.cc`, `.cxx`, `.c++`, `.cppm`, `.ixx` and the headers `.h`, `.hpp`, `.hh`, `.hxx`, `.h++`, `.inl`, `.ipp`, `.tpp` are C++ (Monaco's C++ highlighting covers both). Alt+O switches between a header and its source: same folder first, then anywhere, for `include/` and `src/` layouts. Build files are mapped as well: `.vcxproj`, `.csproj`, `.props`, `.targets` as XML, `.ps1`, `.sh`, `.cmd`/`.bat`, `.ini` and `Dockerfile`.
+- **Outline.** Monaco's TypeScript worker outlines TypeScript and JavaScript. For C#, C and C++, `workbench.mjs` has a line-based outline (namespaces, types, functions and methods, C# properties and fields, C/C++ macros). It skips comments, strings and preprocessor lines. It is not a compiler: several declarations on one line, or multi-line raw strings, can be missed or misplaced. Go to definition and completion across files remain TypeScript/JavaScript only (no C# or C++ language server).
+
+**New bridge operations** (`BridgePolicy`):
+- `searchProject {projectId, query, matchCase, wholeWord}`: the query is 1 to 200 characters with no control characters, and the flags are booleans. The host passes it to the service's `SearchProject` (contract: [protocol-v2.md](../contracts/protocol-v2.md)) and returns `matches`, `truncated` and `filesSearched`. The renderer then searches files with unsaved edits in their drafts, with the same rules (`withDrafts` in `workbench.mjs`), because the service only has the saved text.
+- `getSettings {}` and `saveSettings {settings}`: these need no vault session and work while locked.
+
+**Settings file.** `%LOCALAPPDATA%\SourceVault\editor-settings.json`, per Windows user, read and written only by the host (`EditorSettings`). It holds exactly eight display fields: theme (`dark`, `light` or `highContrast`), font size 10 to 28, tab size 2, 4 or 8, and the booleans insert spaces, word wrap, minimap, show whitespace and line numbers. It never holds file names, paths, project names or text. The bridge refuses any other field (a `recentFiles` list, for example). On read, a file over 4 KiB, a link, or any invalid content means the defaults. Writes go to a temporary file, then a rename.
+
+**What stays in memory only.** Recently opened files, search results and the split layout are never written anywhere. Search results hold lines of text from files that may not be open, so locking drops them, as it closes the comparison view.
+
+**Closing with unsaved edits.** In vault mode, closing the window while the renderer reports unsaved edits (the status message's `dirtyCount`) asks *Close anyway?* first. Closing discards them, as before. This prompt only adds a warning.
+
+Reviewed in the browser with the fake host (2026-10-19), which has a fictional C++ project: C++ highlighting and outline, Alt+O, Go to file, Ctrl+E, search including an unsaved draft and the jump to a match, split editor, compare and revert then undo, settings (theme and font live, then saved), the shortcut list, Ctrl+K Ctrl+S not saving, focus mode, Save all, the C++ "no formatter" message, and lock dropping search results then unlock. TypeScript kept its formatter and outline, and preview mode was unchanged. The browser automation could not send Ctrl+\\ or Ctrl+, (it sends no key code for punctuation), so those were run through their commands and buttons. A real keyboard check is a lab row.
+
 The bridge accepts messages from the app origin only, bounded to 4 KiB and depth 3. The exact shape is `{ "type": "sourcevault.preview.ready" | "sourcevault.preview.status", "locked": boolean, "dirtyCount": integer, "revisionCount": integer }`. Counts must be 0..32 and 0..1000000 respectively. Duplicate/unknown properties and operations have no effect. A ready message receives `{ "type": "sourcevault.host.metadata", "mode": "synthetic-preview", "captureExclusion": false, "serviceConnected": false }`. The bridge never receives source text or evaluates script; status messages only update the window title. The frontend owns its synthetic lock presentation.
 
 Runtime navigation, actual rendering, and user interactions require a Windows desktop smoke check. No TPM/service/VM security gate follows from this preview.

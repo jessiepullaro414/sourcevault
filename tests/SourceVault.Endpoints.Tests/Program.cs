@@ -1110,6 +1110,45 @@ Test("SourceVault Pack: scan, recipient check and confirmation, then a package t
     }
 });
 
+Test("SearchProject: plain-text matches with line, column and preview; case, whole word, the 500 limit and bad queries", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var created = c.Ok("CreateProject", ("name", "Search"));
+        var project = created.GetProperty("projectId").GetString()!;
+        var snap = created.GetProperty("snapshotId").GetString()!;
+        string Create(string name, string text) { var r = c.Ok("CreateFile", ("projectId", project), ("name", name), ("expectedSnapshotId", snap), ("contentBase64", B64(text))); snap = r.GetProperty("snapshotId").GetString()!; return r.GetProperty("fileId").GetString()!; }
+        Create("src/b.cs", "class Widget {}\r\n    var widgetCount = 1; // Widget\r\n");
+        Create("a.ts", "export const widget = 2;\n");
+        Create("many.txt", string.Concat(Enumerable.Repeat("x x x x x x x x x x\n", 60))); // 600 matches of "x"
+        Create("long.txt", new string('a', 300) + "needle\n");
+        JsonElement Search(string query, bool matchCase = false, bool wholeWord = false) =>
+            c.Ok("SearchProject", ("projectId", project), ("query", query), ("matchCase", matchCase), ("wholeWord", wholeWord));
+
+        var all = Search("widget");
+        var hits = all.GetProperty("matches").EnumerateArray().Select(m => $"{m.GetProperty("name").GetString()}:{m.GetProperty("line").GetInt32()}:{m.GetProperty("column").GetInt32()}").ToArray();
+        Assert(hits.SequenceEqual(["a.ts:1:14", "src/b.cs:1:7", "src/b.cs:2:9", "src/b.cs:2:29"]), "case-insensitive, sorted by file then line: " + string.Join(", ", hits));
+        Assert(all.GetProperty("matches")[2].GetProperty("preview").GetString() == "var widgetCount = 1; // Widget", "preview trims leading space and the CR");
+        Assert(all.GetProperty("matches")[2].GetProperty("previewOffset").GetInt32() == 4 && all.GetProperty("matches")[3].GetProperty("previewOffset").GetInt32() == 24, "preview offsets point at each match");
+        Assert(!all.GetProperty("truncated").GetBoolean() && all.GetProperty("filesSearched").GetInt32() == 4, "searched every file");
+        var far = Search("needle").GetProperty("matches")[0];
+        var farPreview = far.GetProperty("preview").GetString()!;
+        Assert(farPreview.Length == 241 && farPreview[0] == '…' && farPreview.Substring(far.GetProperty("previewOffset").GetInt32(), 6) == "needle", "a long line is cut around the match: " + farPreview.Length);
+        Assert(Search("Widget", matchCase: true).GetProperty("matches").GetArrayLength() == 2, "match case");
+        Assert(Search("widget", wholeWord: true).GetProperty("matches").GetArrayLength() == 3, "whole word excludes widgetCount");
+        Assert(Search("nothing-here").GetProperty("matches").GetArrayLength() == 0, "no match");
+        var many = Search("x");
+        Assert(many.GetProperty("matches").GetArrayLength() == 500 && many.GetProperty("truncated").GetBoolean(), "at most 500 matches, reported as truncated");
+        foreach (var bad in new object[] { "", new string('q', 201), "two\nlines" })
+            Assert(c.Code("SearchProject", ("projectId", project), ("query", bad), ("matchCase", false), ("wholeWord", false)) == "InvalidRequest", "bad query refused");
+        Assert(c.Code("SearchProject", ("projectId", project), ("query", "x"), ("matchCase", "yes"), ("wholeWord", false)) == "InvalidRequest", "flags must be booleans");
+        Assert(c.Code("SearchProject", ("projectId", Guid.NewGuid().ToString("D")), ("query", "x"), ("matchCase", false), ("wholeWord", false)) == "NotFound", "unknown project");
+    }
+});
+
 Console.WriteLine($"Endpoint tests: {passed} passed; synthetic workspace retained at {workspace}");
 return 0;
 

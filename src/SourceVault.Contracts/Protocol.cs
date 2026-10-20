@@ -109,7 +109,7 @@ public sealed class ProtocolCatalog
         "BeginSession", "ListProjects", "CreateProject", "ListFiles", "OpenDocument", "CreateFile",
         "ImportFiles", "DeleteProject", "RenameProject", "RenameFile", "RenameFolder", "DeleteFile", "ListHistory", "OpenRevision",
         "ListDeletedFiles", "RestoreFile", "ApplyEdits", "EndSession", "ListBuildTargets", "ListBuilds", "OpenBuildLog",
-        "RequestBuild", "GetBuildStatus", "GetImportRecipient", "BeginPackageImport", "PackageImportPart", "FinishPackageImport");
+        "RequestBuild", "GetBuildStatus", "GetImportRecipient", "BeginPackageImport", "PackageImportPart", "FinishPackageImport", "SearchProject");
 }
 
 /// <summary>

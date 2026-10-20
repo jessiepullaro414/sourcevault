@@ -97,6 +97,7 @@ internal sealed class VaultProtocol
                 "ListDeletedFiles" => ListDeletedFiles(request),
                 "RestoreFile" => RestoreFile(request, state),
                 "ApplyEdits" => ApplyEdits(request, state),
+                "SearchProject" => SearchProject(request),
                 "GetImportRecipient" or "BeginPackageImport" or "PackageImportPart" or "FinishPackageImport" when packages is null => Error(request, "Unavailable"),
                 "GetImportRecipient" => GetImportRecipient(request, packages!),
                 "BeginPackageImport" => BeginPackageImport(request, state, packages!),
@@ -598,6 +599,74 @@ internal sealed class VaultProtocol
             }
         }
         finally { state.OnClose?.Invoke(); state.OnClose = null; }
+    }
+
+    // ---- searching a project (the editor's "Search all files") ---------------------------------------------------
+
+    internal const int MaxSearchMatches = 500, MaxSearchQueryChars = 200, MaxSearchPreviewChars = 240;
+
+    /// <summary>
+    /// Plain-text search over every file of the project's current snapshot (no regular expressions). Returns up to 500
+    /// matches with the matching line as a short preview, in file-name order. Decrypts each file once, in this process.
+    /// </summary>
+    private ProtocolResponse SearchProject(ParsedRequest request)
+    {
+        Require(request.Body, "capability", "projectId", "query", "matchCase", "wholeWord");
+        var store = Project(request.Body);
+        var query = Text(request.Body, "query");
+        if (query.Length is 0 or > MaxSearchQueryChars || query.Contains('\n') || query.Contains('\r')) throw new RequestException("InvalidRequest");
+        bool Flag(string name) => request.Body.GetProperty(name).ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => throw new RequestException("InvalidRequest") };
+        bool matchCase = Flag("matchCase"), wholeWord = Flag("wholeWord");
+        var comparison = matchCase ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+        var found = new List<(Guid FileId, string Name, int Line, int Column, string Preview, int PreviewOffset)>();
+        bool truncated = false; int searched = 0;
+        var snapshot = store.List();
+        store.ReadSnapshot(snapshot.SnapshotId, (file, content) =>
+        {
+            searched++;
+            if (truncated) return;
+            var text = System.Text.Encoding.UTF8.GetString(content);
+            int lineNumber = 0;
+            foreach (var line in text.Split('\n'))
+            {
+                lineNumber++;
+                var trimmed = line.TrimEnd('\r');
+                for (int at = trimmed.IndexOf(query, comparison); at >= 0; at = trimmed.IndexOf(query, at + 1, comparison))
+                {
+                    if (wholeWord && (IsWordChar(trimmed, at - 1) || IsWordChar(trimmed, at + query.Length))) continue;
+                    if (found.Count == MaxSearchMatches) { truncated = true; return; }
+                    var (preview, offset) = Preview(trimmed, at);
+                    found.Add((file.FileId, file.LogicalName, lineNumber, at + 1, preview, offset));
+                }
+            }
+        });
+        found.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase) is var c && c != 0 ? c : a.Line != b.Line ? a.Line.CompareTo(b.Line) : a.Column.CompareTo(b.Column));
+        return Ok(request, w =>
+        {
+            w.WriteStartArray("matches");
+            foreach (var m in found)
+            {
+                w.WriteStartObject();
+                w.WriteString("fileId", m.FileId.ToString("D")); w.WriteString("name", m.Name);
+                w.WriteNumber("line", m.Line); w.WriteNumber("column", m.Column); w.WriteNumber("length", query.Length);
+                w.WriteString("preview", m.Preview); w.WriteNumber("previewOffset", m.PreviewOffset);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+            w.WriteBoolean("truncated", truncated);
+            w.WriteNumber("filesSearched", searched);
+        });
+
+        static bool IsWordChar(string s, int i) => i >= 0 && i < s.Length && (char.IsLetterOrDigit(s[i]) || s[i] == '_');
+        // The line around the match, at most 240 characters, leading whitespace removed, and where the match starts in it.
+        static (string Text, int Offset) Preview(string line, int at)
+        {
+            int start = Math.Max(0, Math.Min(at - 60, line.Length - MaxSearchPreviewChars));
+            var window = line.Substring(start, Math.Min(MaxSearchPreviewChars, line.Length - start));
+            if (start > 0) return ("…" + window, at - start + 1);
+            var trimmed = window.TrimStart();
+            return (trimmed, Math.Max(0, at - (window.Length - trimmed.Length)));
+        }
     }
 
     private ProtocolResponse ApplyEdits(ParsedRequest request, ConnectionState state)

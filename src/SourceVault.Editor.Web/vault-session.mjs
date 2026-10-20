@@ -7,6 +7,7 @@
 // memory behind the lock screen (owner decision) and are re-checked against the vault on unlock.
 
 import { merge3 } from './merge.mjs';
+import { withDrafts, validQuery, validSettings } from './workbench.mjs';
 
 export const REQUEST_TYPE = 'sourcevault.vault.request';
 export const RESPONSE_TYPE = 'sourcevault.vault.response';
@@ -15,7 +16,12 @@ const MAX_DIRTY = 32;          // host status-message bounds
 const MAX_REVISIONS = 1000000;
 
 const LANGUAGES = { ts: 'typescript', tsx: 'typescript', mts: 'typescript', js: 'javascript', mjs: 'javascript', jsx: 'javascript',
-  json: 'json', md: 'markdown', css: 'css', html: 'html', xml: 'xml', cs: 'csharp', py: 'python', sql: 'sql', yml: 'yaml', yaml: 'yaml' };
+  json: 'json', md: 'markdown', css: 'css', html: 'html', xml: 'xml', cs: 'csharp', py: 'python', sql: 'sql', yml: 'yaml', yaml: 'yaml',
+  // C and C++ (Monaco's C++ highlighting covers both); .h is treated as C++.
+  c: 'c', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', 'c++': 'cpp', cppm: 'cpp', ixx: 'cpp', h: 'cpp', hpp: 'cpp', hh: 'cpp', hxx: 'cpp', 'h++': 'cpp', inl: 'cpp', ipp: 'cpp', tpp: 'cpp',
+  // Build and project files.
+  csproj: 'xml', vcxproj: 'xml', props: 'xml', targets: 'xml', filters: 'xml', xaml: 'xml', config: 'xml', ps1: 'powershell', psm1: 'powershell',
+  psd1: 'powershell', sh: 'shell', bash: 'shell', bat: 'bat', cmd: 'bat', ini: 'ini', dockerfile: 'dockerfile' };
 export const languageFor = name => LANGUAGES[String(name).split('.').at(-1).toLowerCase()] ?? 'plaintext';
 
 /** A failed vault operation. `code` is a fixed protocol/bridge code, never text from a document. */
@@ -290,6 +296,25 @@ export class VaultSession {
     await this.#call('restoreFile', { projectId: this.project.projectId, fileId, newName: name });
     await this.#refreshFiles();
     if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + 1 };
+  }
+
+  /**
+   * Searches every file of the project for plain text (no regular expressions). The service searches the saved files;
+   * files with unsaved edits are searched here, in their draft. Returns { matches: [{ fileId, name, line, column, length,
+   * preview, previewOffset, draft? }], truncated, filesSearched, drafts }.
+   */
+  async search(query, { matchCase = false, wholeWord = false } = {}) {
+    if (!validQuery(query)) throw new VaultError('InvalidRequest');
+    const result = await this.#call('searchProject', { projectId: this.project.projectId, query, matchCase, wholeWord });
+    const drafts = this.dirtyIds.map(id => this.files.get(id)).map(f => ({ id: f.id, path: f.path, text: f.text }));
+    return withDrafts(result, drafts, query, { matchCase, wholeWord });
+  }
+
+  /** The editor's display preferences (kept by the host per Windows user; works while locked). */
+  async getSettings() { return (await this.#call('getSettings', {})).settings; }
+  async saveSettings(settings) {
+    if (!validSettings(settings)) throw new VaultError('InvalidRequest'); // the host would ignore it
+    await this.#call('saveSettings', { settings: { ...settings } });
   }
 
   // ---- builds: names of the administrator's build targets, queued builds of the saved project, and their logs -------

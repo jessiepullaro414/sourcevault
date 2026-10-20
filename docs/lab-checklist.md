@@ -30,6 +30,9 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | `SourceVault.Import.exe` on a synthetic folder with `--dry-run`, then a real import, then `--delete-source` (type `DELETE`) | — |
 | [~] | **Client hash pin (new):** after setup, the editor and importer connect (lab client connected 2026-10-18; editor and importer not yet run). Then, as admin, append one byte to a copy of `client\SourceVault.Import.dll`, swap it in, and check the importer is refused ("only accepts the installed…"). Restore it with `Setup-SourceVault.ps1 -Update` | admin |
 | [ ] | `Setup-SourceVault.ps1 -Status` reports everything OK | admin |
+| [ ] | **Editor features (new):** in the installed editor with a synthetic C++ project, on a real keyboard: Ctrl+P, Ctrl+E, Ctrl+Shift+F (a result in an unsaved file too), Ctrl+Shift+O and Alt+O on a `.cpp`, **Ctrl+\\** (split) and **Ctrl+,** (settings; the browser check could not send these two), Ctrl+K Ctrl+S opens the list without saving, Ctrl+K D then **Revert to saved** and Ctrl+Z, Ctrl+Alt+S, Ctrl+K Z | — |
+| [ ] | **Settings file (new):** after saving settings, `%LOCALAPPDATA%\SourceVault\editor-settings.json` holds only the eight display fields; the canary marker is not in it. Replace it with `{}`, then with 5 KiB of text: the editor starts with defaults | — |
+| [ ] | **Close warning (new):** with an unsaved edit, closing the window asks *Close anyway?*; **No** keeps it open with the edit; with nothing unsaved it closes without asking | — |
 
 ## Encrypted import from another computer (no sign-out or reboot)
 

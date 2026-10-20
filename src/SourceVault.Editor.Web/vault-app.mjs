@@ -3,6 +3,8 @@
 import { VaultSession, languageFor as languageOf } from './vault-session.mjs';
 import { resolve } from './merge.mjs';
 import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure } from './shell.mjs';
+import { touchRecent, counterpart, isCFamily, outline } from './workbench.mjs';
+import { createWorkbench } from './workbench-ui.mjs';
 
 const UNLOCK_FAILURES = {
   ServiceNotInstalled: 'The SourceVault service is not installed on this computer.',
@@ -59,7 +61,15 @@ export async function startVault(transport, metadata, onSession) {
   let merging = null; // the open merge view: { id, path, segments, conflicts, choices, theirsRevisionId }
   let showDeleted = false, deletedFiles = [], restoring = null; // the deleted-files view; restoring: { fileId, value } when the old path is taken
   let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
+  // Split editor: two Monaco editors share the models. `focused` is the side that has the keyboard; session.activeId
+  // is always the focused side's file and paneIds[other] the file on the other side.
+  let editor2 = null, split = false, focused = 0, paneIds = [null, null];
+  let recent = [], recentProject = null, lastActive = null; // recently opened files (ids, in memory only)
+  let comparing = null, compareDiff = null; // the open "compare with saved" view: { id, path, models }
+  let sidebar = 'explorer', chordUntil = 0;
+  const chordKeys = new WeakSet(); // second keys of Ctrl+K chords, which are not shortcuts of their own
   const active = () => (session.activeId ? session.files.get(session.activeId) : null);
+  const focusedEditor = () => (split && focused === 1 ? editor2 : editor);
 
   document.title = 'SourceVault — Vault editor';
   document.body.classList.add('mode-vault');
@@ -90,7 +100,10 @@ export async function startVault(transport, metadata, onSession) {
     $('unlock').disabled = busy;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
-    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging || !!buildsView;
+    $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging || !!buildsView || !!comparing;
+    if (session.project?.projectId !== recentProject) { recent = []; recentProject = session.project?.projectId ?? null; }
+    if (session.activeId && session.activeId !== lastActive) recent = touchRecent(recent, session.activeId);
+    lastActive = session.activeId;
     $('workspace-name').textContent = $('breadcrumb-root').textContent = session.project?.name ?? 'No project';
     $('project-heading').textContent = (session.project?.name ?? 'No project').toUpperCase();
     $('new-file').disabled = $('switch-project').disabled = $('deleted-files').disabled = $('builds').disabled = locked || busy || !hasProject;
@@ -132,12 +145,35 @@ export async function startVault(transport, metadata, onSession) {
     $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : 'Saved in vault';
     $('conflict-banner').hidden = locked || !f || !f.conflict || keepEditing.has(f.id);
     $('save').disabled = !editor || locked || busy || !f || !session.dirty(f.id);
+    const unsaved = locked ? 0 : session.dirtyIds.length;
+    $('save-all').hidden = unsaved < 2; $('save-all').disabled = busy;
+    $('unsaved-status').hidden = !unsaved; $('unsaved-status').textContent = `● ${unsaved} unsaved`; $('unsaved-status').disabled = busy;
+    $('compare-saved').hidden = locked || !f || !session.dirty(f.id) || !!comparing;
     $('revision-count').textContent = String(session.savedCount).padStart(2, '0');
     $('files-detail').textContent = hasProject ? `${session.files.size} in project` : '—';
     $('language-detail').textContent = $('language-status').textContent = f ? languageLabel(f.language) : '—';
     document.body.classList.toggle('locked', locked);
-    renderHistory(); renderDeleted(); renderMerge(); renderBuilds();
+    renderHistory(); renderDeleted(); renderMerge(); renderBuilds(); renderCompare(); updateStatusDetails();
+    $('editor-shell').classList.toggle('split', split);
+    $('editor-2').hidden = !split;
+    $('editor').classList.toggle('focused', split && focused === 0); $('editor-2').classList.toggle('focused', split && focused === 1);
     postStatus(session.metadata); // four numeric/boolean fields only; also drives the host's keep-alive
+  }
+
+  // Status bar: cursor and selection, indentation, line endings and size of the focused side's file.
+  function updateStatusDetails() {
+    const ed = focusedEditor(), model = ed?.getModel(), f = active();
+    if (model) {
+      const position = ed.getPosition(), selected = (ed.getSelections() ?? []).reduce((n, s) => n + model.getValueLengthInRange(s), 0);
+      $('cursor-position').textContent = position ? `Ln ${position.lineNumber}, Col ${position.column}${selected ? ` (${selected.toLocaleString()} selected)` : ''}` : '';
+      const options = model.getOptions();
+      $('indent-status').textContent = options.insertSpaces ? `Spaces: ${options.tabSize}` : `Tab size: ${options.tabSize}`;
+      $('eol-status').textContent = model.getEOL() === '\r\n' ? 'CRLF' : 'LF';
+    } else $('cursor-position').textContent = $('indent-status').textContent = $('eol-status').textContent = '';
+    const bytes = f?.loaded ? utf8Length(f.text) : null;
+    $('size-status').textContent = bytes == null ? '' : formatBytes(bytes);
+    $('size-status').classList.toggle('near-limit', bytes != null && bytes > 0.9 * 256 * 1024);
+    $('size-status').title = bytes != null && bytes > 0.9 * 256 * 1024 ? 'Close to the 256 KiB limit for one file' : 'Files can be up to 256 KiB';
   }
 
   function renderPicker() {
@@ -230,7 +266,7 @@ export async function startVault(transport, metadata, onSession) {
     act(async () => {
       const first = await session.listHistory(fileId, 0);
       const latestText = first.revisions.length ? await session.openRevision(fileId, first.revisions[0].revisionId) : '';
-      closeHistory();
+      closeHistory(); closeCompare();
       history = { fileId, path, language, deleted, revisions: first.revisions, more: first.more, page: 0, selected: null, latestText };
       fileMenu = null; showDeleted = false;
     }, () => renderHistory());
@@ -306,7 +342,7 @@ export async function startVault(transport, metadata, onSession) {
         keepEditing.delete(f.id);
         return `Merged their changes into ${f.path}; nothing overlapped. Review the result, then Save.`;
       }
-      closeHistory(); showDeleted = false;
+      closeHistory(); closeCompare(); showDeleted = false;
       merging = { id: f.id, path: f.path, ...result, choices: new Array(result.conflicts).fill(null) };
       return `${result.conflicts} place${result.conflicts === 1 ? '' : 's'} changed on both sides. Choose for each, then use the merged text.`;
     });
@@ -358,7 +394,7 @@ export async function startVault(transport, metadata, onSession) {
   // ---- builds: run the administrator's build targets on the saved project; output stays in the vault -------------
   function openBuilds() {
     act(async () => {
-      closeHistory(); showDeleted = false; merging = null;
+      closeHistory(); closeCompare(); showDeleted = false; merging = null;
       let targets = [], note = null;
       try { targets = await session.listBuildTargets(); }
       catch (e) { if (e?.code === 'Unavailable') note = 'Builds are not set up on this computer, or the build service is not running. Ask your administrator.'; else throw e; }
@@ -484,7 +520,7 @@ export async function startVault(transport, metadata, onSession) {
       return `Restored ${name}.`;
     });
   }
-  $('deleted-files').onclick = () => act(async () => { deletedFiles = await session.listDeleted(); closeHistory(); closeBuilds(); showDeleted = true; restoring = null; });
+  $('deleted-files').onclick = () => act(async () => { deletedFiles = await session.listDeleted(); closeHistory(); closeBuilds(); closeCompare(); showDeleted = true; restoring = null; });
   $('deleted-close').onclick = () => { showDeleted = false; restoring = null; render(); };
 
   // A rename keeps the model (and its undo history); only the language follows the new extension.
@@ -553,15 +589,35 @@ export async function startVault(transport, metadata, onSession) {
         models.set(id, model);
       } else if (model.getValue() !== file.text) { suppress = true; model.setValue(file.text); suppress = false; } // reload
     }
-    if (editor.getModel()) viewStates.set(editor.getModel().uri.toString(), editor.saveViewState());
-    const model = !session.locked && !picking && session.activeId ? models.get(session.activeId) ?? null : null;
-    if (editor.getModel() !== model) {
-      editor.setModel(model);
-      if (model) { const saved = viewStates.get(model.uri.toString()); if (saved) editor.restoreViewState(saved); editor.focus(); }
-    }
+    const visible = !session.locked && !picking;
+    paneIds[focused] = session.activeId;
+    const other = 1 - focused;
+    if (!session.openIds.includes(paneIds[other])) paneIds[other] = session.activeId; // its file was closed: show the same file
+    setPane(0, visible && paneIds[0] ? models.get(paneIds[0]) ?? null : null);
+    if (split) setPane(1, visible && paneIds[1] ? models.get(paneIds[1]) ?? null : null);
   }
-  function dropModel(id) { const model = models.get(id); if (model) { if (editor?.getModel() === model) editor.setModel(null); viewStates.delete(model.uri.toString()); model.dispose(); models.delete(id); } }
-  function disposeAllModels() { editor?.setModel(null); for (const id of [...models.keys()]) dropModel(id); }
+  // View states (scroll, cursor, folding) are kept per side and file.
+  function setPane(index, model) {
+    const ed = index === 0 ? editor : editor2, current = ed.getModel();
+    if (current === model) return;
+    if (current) viewStates.set(`${index}|${current.uri}`, ed.saveViewState());
+    ed.setModel(model);
+    if (model) { const saved = viewStates.get(`${index}|${model.uri}`); if (saved) ed.restoreViewState(saved); if (index === focused || !split) ed.focus(); }
+  }
+  function dropModel(id) {
+    const model = models.get(id);
+    if (!model) return;
+    for (const ed of [editor, editor2]) if (ed?.getModel() === model) ed.setModel(null);
+    for (const index of [0, 1]) viewStates.delete(`${index}|${model.uri}`);
+    model.dispose(); models.delete(id);
+  }
+  // Another project: no files carry over, so the split, the comparison and search results go too.
+  function disposeAllModels() {
+    editor?.setModel(null); editor2?.setModel(null);
+    for (const id of [...models.keys()]) dropModel(id);
+    split = false; focused = 0; paneIds = [null, null];
+    closeCompare(); wb.onLock();
+  }
 
   // ---- actions ---------------------------------------------------------------------------------------------------
   function unlock() {
@@ -570,7 +626,7 @@ export async function startVault(transport, metadata, onSession) {
       catch (e) { unlockError = UNLOCK_FAILURES[e?.code] ?? `Could not connect to the vault (${e?.code ?? 'InternalError'}).`; return 'Still locked.'; }
       for (const id of changed) keepEditing.delete(id);
       return changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : 'Connected to the vault.';
-    }, () => { if (!session.locked && !session.project) $('new-project-name').focus(); });
+    }, () => { wb.renderSearch(); if (!session.locked && !session.project) $('new-project-name').focus(); });
   }
   function save() {
     const f = active();
@@ -578,6 +634,209 @@ export async function startVault(transport, metadata, onSession) {
     if (f.deleted) { act(async () => { await session.saveAsNew(f.id); dropModel(f.id); return `${f.path} was deleted by someone else; saved your version as a new file.`; }); return; }
     act(async () => (await session.save(f.id)) ? `Saved ${f.path} to the vault as a new encrypted revision.` : 'No unsaved edits.');
   }
+  // ---- workbench: open and reveal, compare with saved, save all, split, focus mode, header/source --------------
+  const available = () => !!editor && !session.locked && !!session.project && !picking;
+  /** Opens a file on the focused side; `match` ({ line, column, length }) selects a search result in it. */
+  function openFile(id, match) {
+    if (!session.files.has(id)) { announce('That file is no longer in the project.'); return; }
+    closeHistory(); closeBuilds(); closeCompare(); showDeleted = false; fileMenu = null;
+    act(async () => { await session.open(id); }, () => {
+      const ed = focusedEditor();
+      if (!match || !ed?.getModel()) return;
+      const range = new monaco.Range(match.line, match.column, match.line, match.column + match.length);
+      ed.setSelection(range); ed.revealRangeInCenterIfOutsideViewport(range); ed.focus();
+    });
+  }
+  function goToLine(n) {
+    const ed = focusedEditor(), model = ed?.getModel();
+    if (!model) { announce('Open a file first.'); return; }
+    const line = Math.min(Math.max(1, n), model.getLineCount());
+    ed.setPosition({ lineNumber: line, column: 1 }); ed.revealLineInCenter(line); ed.focus();
+  }
+  function runEditorAction(id) {
+    const ed = focusedEditor(), f = active();
+    if (!ed?.getModel() || !f) { announce('Open a file first.'); return; }
+    ed.focus();
+    const action = ed.getAction(id);
+    if (!action?.isSupported()) { announce(unsupported(id, f.language)); return; }
+    action.run();
+  }
+  const unsupported = (id, language) => id === 'editor.action.formatDocument' ? `This editor has no formatter for ${languageLabel(language)} files.`
+    : id === 'editor.action.quickOutline' ? `This editor has no outline for ${languageLabel(language)} files.` : 'That command is not available here.';
+
+  function openCompare() {
+    const f = active();
+    if (!available() || !f) return;
+    if (!session.dirty(f.id)) { announce(`${f.path} has no unsaved edits.`); return; }
+    if (merging) { announce('Finish or cancel the merge first.'); return; }
+    closeHistory(); closeBuilds(); closeCompare(); showDeleted = false;
+    compareDiff ??= createDiffEditor($('compare-diff'), 'Saved version (left) compared with your unsaved edits (right)');
+    // TypeScript/JavaScript copies would join the language worker's project (duplicate declarations); show them as text.
+    const language = /^(typescript|javascript)$/.test(f.language) ? 'plaintext' : f.language;
+    const original = monaco.editor.createModel(f.saved ?? '', language), modified = monaco.editor.createModel(f.text ?? '', language);
+    compareDiff.setModel({ original, modified });
+    comparing = { id: f.id, path: f.path, models: [original, modified] };
+    render();
+  }
+  function closeCompare() {
+    if (!comparing) return;
+    compareDiff?.setModel(null);
+    for (const model of comparing.models) model.dispose();
+    comparing = null;
+  }
+  function renderCompare() {
+    const open = !!comparing && !session.locked && !picking && !!session.project;
+    $('compare-view').hidden = !open;
+    if (open) $('compare-title').textContent = comparing.path;
+  }
+  $('compare-saved').onclick = openCompare;
+  $('compare-close').onclick = () => { closeCompare(); render(); focusedEditor()?.focus(); };
+  $('compare-revert').onclick = () => {
+    const f = comparing && session.files.get(comparing.id), model = comparing && models.get(comparing.id);
+    if (!f || !model || session.locked) return;
+    // An edit, not setValue, so Ctrl+Z brings the unsaved edits back.
+    model.pushStackElement();
+    model.pushEditOperations([], [{ range: model.getFullModelRange(), text: f.saved }], () => null);
+    model.pushStackElement();
+    closeCompare(); render();
+    announce(`Reverted ${f.path} to the saved version. Ctrl+Z in the editor brings your edits back.`);
+  };
+
+  function saveAll() {
+    const ids = session.dirtyIds;
+    if (!available()) return;
+    if (!ids.length) { announce('No unsaved edits.'); return; }
+    act(async () => {
+      let saved = 0; const left = [];
+      for (const id of ids) {
+        const f = session.files.get(id);
+        if (!f) continue;
+        if (f.deleted || f.conflict) { left.push(f.path); continue; } // these need a choice: open each one
+        try { if (await session.save(id)) saved++; }
+        catch (e) { if (session.locked) throw e; if (e?.code === 'Conflict') keepEditing.delete(id); left.push(f.path); }
+      }
+      const done = `Saved ${saved} file${saved === 1 ? '' : 's'} to the vault.`;
+      return left.length ? `${done} Not saved (changed or deleted by someone else, or refused): ${left.join(', ')}.` : done;
+    });
+  }
+  $('save-all').onclick = $('unsaved-status').onclick = saveAll;
+
+  function toggleSplit() {
+    if (!available()) return;
+    if (!split) {
+      if (!session.activeId) { announce('Open a file first.'); return; }
+      if (!editor2) {
+        editor2 = createEditor('Vault source editor, right side. Saved changes become encrypted revisions in the vault.', $('editor-2'));
+        wireEditor(editor2, 1);
+      }
+      split = true; $('editor-2').hidden = false;
+      paneIds = [session.activeId, session.activeId]; focused = 1;
+      applySettings(wb.settings, false);
+      announce('Split editor. Click a side, then a tab, to choose its file. Ctrl+\\ goes back to one editor.');
+    } else {
+      setPane(1, null);
+      split = false; focused = 0; paneIds = [session.activeId, null];
+    }
+    syncModel(); render();
+    focusedEditor()?.focus();
+  }
+  function focusSide(index) {
+    if (!split || focused === index) return;
+    paneIds[focused] = session.activeId;
+    focused = index;
+    if (paneIds[index] && session.openIds.includes(paneIds[index])) session.activeId = paneIds[index];
+    render();
+  }
+
+  function toggleFocusMode() {
+    const on = document.body.classList.toggle('focus-mode');
+    announce(on ? 'Focus mode. Ctrl+K Z shows the panels again.' : 'Panels shown.');
+    focusedEditor()?.focus();
+  }
+
+  function switchHeaderSource() {
+    const f = active();
+    if (!available() || !f) return;
+    if (!isCFamily(f.path)) { announce('Switching between header and source is for C and C++ files.'); return; }
+    const files = [...session.files.values()];
+    const path = counterpart(f.path, files.map(x => x.path));
+    if (!path) { announce(`No matching header or source file for ${f.path}.`); return; }
+    openFile(files.find(x => x.path === path).id);
+  }
+
+  function showSidebar(name, toggle = false) {
+    sidebar = toggle && sidebar === name ? null : name;
+    $('explorer').hidden = sidebar !== 'explorer'; $('search-panel').hidden = sidebar !== 'search';
+    for (const [id, panel] of [['explorer-toggle', 'explorer'], ['find', 'search']]) { $(id).classList.toggle('selected', sidebar === panel); $(id).setAttribute('aria-pressed', String(sidebar === panel)); }
+    if (sidebar === 'search') wb.renderSearch();
+  }
+
+  const THEMES = { dark: 'sourcevault', light: 'vs', highContrast: 'hc-black' };
+  function applySettings(s, retab) {
+    if (!editor) return;
+    monaco.editor.setTheme(THEMES[s.theme] ?? 'sourcevault');
+    const options = { fontSize: s.fontSize, lineHeight: Math.round(s.fontSize * 1.75), wordWrap: s.wordWrap ? 'on' : 'off', minimap: { enabled: s.minimap },
+      renderWhitespace: s.renderWhitespace ? 'all' : 'selection', lineNumbers: s.lineNumbers ? 'on' : 'off', tabSize: s.tabSize, insertSpaces: s.insertSpaces };
+    for (const ed of [editor, editor2]) ed?.updateOptions(options);
+    if (retab) for (const model of models.values()) model.updateOptions({ tabSize: s.tabSize, insertSpaces: s.insertSpaces });
+    updateStatusDetails();
+  }
+
+  const wb = createWorkbench({
+    session, act, available, openFile, goToLine, runEditorAction, showSidebar, applySettings,
+    editor: focusedEditor, recent: () => recent, typeIcon,
+  });
+
+  // Every workbench command: a Monaco action (so it is in the F1 list and works inside the editor) and a key that also
+  // works outside the editor (explorer, search box). `code` is the KeyboardEvent.code, which is also Monaco's KeyCode name.
+  const COMMANDS = [
+    { id: 'quickOpen', label: 'Go to File…', key: { ctrl: true, code: 'KeyP' }, run: () => wb.openPalette('files') },
+    { id: 'recent', label: 'Open Recently Opened File…', key: { ctrl: true, code: 'KeyE' }, run: () => wb.openPalette('recent') },
+    { id: 'search', label: 'Search All Files', key: { ctrl: true, shift: true, code: 'KeyF' }, run: () => wb.showSearch() },
+    { id: 'saveAll', label: 'Save All', key: { ctrl: true, alt: true, code: 'KeyS' }, run: saveAll },
+    { id: 'compare', label: 'Compare with Saved', chord: { code: 'KeyD' }, run: openCompare },
+    { id: 'split', label: 'Split Editor / Back to One', key: { ctrl: true, code: 'Backslash' }, run: toggleSplit },
+    { id: 'focusMode', label: 'Toggle Focus Mode', chord: { code: 'KeyZ' }, run: toggleFocusMode },
+    { id: 'settings', label: 'Editor Settings…', key: { ctrl: true, code: 'Comma' }, run: () => wb.openSettings() },
+    { id: 'shortcuts', label: 'Keyboard Shortcuts', chord: { ctrl: true, code: 'KeyS' }, run: () => wb.openShortcuts() },
+    { id: 'switchHeaderSource', label: 'Switch Header/Source (C/C++)', key: { alt: true, code: 'KeyO' }, run: switchHeaderSource },
+  ];
+  function wireEditor(ed, index) {
+    ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
+    const { KeyMod, KeyCode } = monaco;
+    const binding = k => (k.ctrl ? KeyMod.CtrlCmd : 0) | (k.shift ? KeyMod.Shift : 0) | (k.alt ? KeyMod.Alt : 0) | KeyCode[k.code];
+    for (const c of COMMANDS) {
+      const keybindings = c.key ? [binding(c.key)] : [KeyMod.chord(KeyMod.CtrlCmd | KeyCode.KeyK, binding(c.chord))];
+      ed.addAction({ id: `sourcevault.${c.id}`, label: c.label, keybindings, run: () => c.run() });
+    }
+    ed.onDidChangeCursorSelection(() => { if (ed === focusedEditor()) updateStatusDetails(); });
+    ed.onDidChangeModel(() => { if (ed === focusedEditor()) updateStatusDetails(); });
+    ed.onDidFocusEditorWidget(() => focusSide(index));
+  }
+  // Keys outside the editor run the same commands; inside it Monaco does (and also completes Ctrl+K chords).
+  document.addEventListener('keydown', event => {
+    const inEditor = !!event.target?.closest?.('.monaco-editor');
+    const ctrl = event.ctrlKey || event.metaKey;
+    const same = k => !!k.ctrl === ctrl && !!k.alt === event.altKey && !!k.shift === event.shiftKey && k.code === event.code;
+    if (Date.now() < chordUntil && !['Control', 'Meta', 'Shift', 'Alt'].includes(event.key)) {
+      chordUntil = 0; chordKeys.add(event);
+      const command = COMMANDS.find(c => c.chord && !!c.chord.ctrl === ctrl && c.chord.code === event.code && !event.altKey && !event.shiftKey);
+      if (!inEditor) { event.preventDefault(); command?.run(); }
+      return;
+    }
+    if (ctrl && !event.altKey && !event.shiftKey && event.code === 'KeyK') { chordUntil = Date.now() + 2000; if (!inEditor) event.preventDefault(); return; }
+    if (inEditor) {
+      // Monaco ignores these when nothing provides them; say why instead of doing nothing.
+      const f = active();
+      if (f && event.shiftKey && event.altKey && !ctrl && event.code === 'KeyF' && !focusedEditor()?.getAction('editor.action.formatDocument')?.isSupported()) announce(unsupported('editor.action.formatDocument', f.language));
+      if (f && ctrl && event.shiftKey && !event.altKey && event.code === 'KeyO' && !focusedEditor()?.getAction('editor.action.quickOutline')?.isSupported()) announce(unsupported('editor.action.quickOutline', f.language));
+      return;
+    }
+    if (event.code === 'F1' && !ctrl && !event.altKey && !event.shiftKey) { event.preventDefault(); if (available()) runEditorAction('editor.action.quickCommand'); return; }
+    const command = COMMANDS.find(c => c.key && same(c.key));
+    if (command) { event.preventDefault(); command.run(); }
+  }, true);
+
   $('unlock').onclick = unlock;
   $('lock').onclick = () => act(async () => { await session.lock(); return 'Locked. The service session ended; unsaved edits are kept in this editor.'; });
   $('save').onclick = save;
@@ -602,16 +861,22 @@ export async function startVault(transport, metadata, onSession) {
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { closeHistory(); closeBuilds(); showDeleted = false; merging = null; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); showDeleted = false; merging = null; render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
-  wireChrome(() => editor, { onSave: save, isLocked: () => session.locked });
+  wireChrome(focusedEditor, { onSave: save, isLocked: () => session.locked, skipKey: event => chordKeys.has(event) });
+  // In vault mode the rail's search button searches all files (Ctrl+F still finds in the open file).
+  $('explorer-toggle').onclick = () => showSidebar('explorer', true);
+  $('find').onclick = () => { if (sidebar === 'search') showSidebar('search', true); else wb.showSearch(); };
+  $('settings-button').onclick = () => wb.openSettings();
+  $('shortcuts-button').onclick = () => wb.openShortcuts();
 
   render();
   try {
     await loadMonaco();
+    registerOutlines();
     editor = createEditor('Vault source editor. Saved changes become encrypted revisions in the vault.');
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, save);
-    editor.onDidChangeCursorPosition(e => { $('cursor-position').textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`; });
+    wireEditor(editor, 0);
+    await wb.loadSettings(); // display preferences: available before unlocking
     $('loading').hidden = true;
     $('footer-status').textContent = 'Vault editor';
     unlock();
@@ -620,12 +885,32 @@ export async function startVault(transport, metadata, onSession) {
   }
 }
 
-const typeIcon = language => ({ typescript: 'TS', javascript: 'JS', markdown: 'M↓', json: '{}', css: '#', html: '<>' })[language] ?? '··';
+const typeIcon = language => ({ typescript: 'TS', javascript: 'JS', markdown: 'M↓', json: '{}', css: '#', html: '<>', csharp: 'C#', cpp: 'C++', c: 'C',
+  python: 'PY', xml: '<>', powershell: 'PS', shell: '$', bat: '>_', yaml: 'YM', sql: 'SQL' })[language] ?? '··';
+const utf8Length = s => { let n = 0; for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xd800 && c < 0xdc00 && i + 1 < s.length ? (i++, 4) : 3; } return n; };
+
+// Outlines (Ctrl+Shift+O, @ in Go to File) for languages Monaco only highlights. workbench.mjs explains the limits.
+const SYMBOL_KINDS = { namespace: 'Namespace', class: 'Class', struct: 'Struct', interface: 'Interface', enum: 'Enum', function: 'Function', method: 'Method',
+  constructor: 'Constructor', property: 'Property', field: 'Field', macro: 'Constant' };
+function registerOutlines() {
+  const toSymbol = s => {
+    const start = Math.min(s.column, s.nameColumn), nameEnd = s.nameColumn + s.nameLength;
+    const endColumn = s.endLine > s.line ? s.endColumn : Math.max(s.endColumn, nameEnd);
+    return { name: s.name, detail: '', kind: monaco.languages.SymbolKind[SYMBOL_KINDS[s.kind]], tags: [],
+      range: new monaco.Range(s.line, start, Math.max(s.endLine, s.line), endColumn), selectionRange: new monaco.Range(s.line, s.nameColumn, s.line, nameEnd),
+      children: s.children.map(toSymbol) };
+  };
+  for (const language of ['csharp', 'cpp', 'c'])
+    monaco.languages.registerDocumentSymbolProvider(language, { displayName: 'SourceVault outline', provideDocumentSymbols: model => outline(language, model.getValue()).map(toSymbol) });
+}
 
 function relabel(metadata) {
   const fake = !!metadata.fake;
   $('mode-badge').textContent = fake ? 'Vault · fake host' : 'Vault';
   $('vault-explorer-actions').hidden = false;
+  $('settings-button').hidden = $('shortcuts-button').hidden = false;
+  $('find').title = 'Search all files (Ctrl+Shift+F). Ctrl+F finds in the open file.'; $('find').setAttribute('aria-label', 'Search all files');
+  $('new-file-name').placeholder = 'src/name.cpp';
   $('folder-row').hidden = true;
   $('explorer-note-label').textContent = fake ? 'FAKE HOST' : 'VAULT';
   $('explorer-note-text').textContent = fake
