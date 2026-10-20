@@ -6,5 +6,6 @@ public interface IKeyProtector
     byte[] UnwrapKey(ReadOnlySpan<byte> wrappedKey);
 }
 
-public enum RecordKind : byte { Document = 1, Manifest = 2 }
+/// <summary>Record kinds. ProjectKey (SVR2 only) holds a project key, TPM-wrapped (docs/vault-any-file-design.md).</summary>
+public enum RecordKind : byte { Document = 1, Manifest = 2, ProjectKey = 3 }
 public readonly record struct RecordContext(Guid ProjectId, Guid FileId, Guid RevisionId, RecordKind Kind);
