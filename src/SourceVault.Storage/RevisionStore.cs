@@ -35,6 +35,11 @@ public abstract record StoreChange
     public sealed record Delete(Guid FileId) : StoreChange;
     /// <summary>Brings a deleted file back under <paramref name="Name"/>, at the revision it had when deleted.</summary>
     public sealed record Restore(Guid FileId, string Name) : StoreChange;
+    /// <summary>Commits an upload staged by <see cref="RevisionStore.BeginUpload"/>: a new file under <paramref name="Name"/>
+    /// (create-only), or, with a null name, the new revision of the file the upload was begun for (its name is kept).</summary>
+    public sealed record Stage(StagedFile File, string? Name, string? Action = null) : StoreChange;
+    /// <summary>Makes a revision from the file's own history current again ("reverted"); nothing is re-encrypted.</summary>
+    public sealed record Revert(Guid FileId, Guid RevisionId) : StoreChange;
 }
 public sealed class RevisionConflictException : Exception
 {
@@ -175,7 +180,9 @@ public sealed partial class RevisionStore
         var renames = changes.OfType<StoreChange.Rename>().ToList();
         var deletes = changes.OfType<StoreChange.Delete>().ToList();
         var restores = changes.OfType<StoreChange.Restore>().ToList();
-        if (writes.Count + renames.Count + deletes.Count + restores.Count != changes.Count) throw new ArgumentException("Unknown change.");
+        var stages = changes.OfType<StoreChange.Stage>().ToList();
+        var reverts = changes.OfType<StoreChange.Revert>().ToList();
+        if (writes.Count + renames.Count + deletes.Count + restores.Count + stages.Count + reverts.Count != changes.Count) throw new ArgumentException("Unknown change.");
         ValidateActor(actor);
         foreach (var w in writes)
         {
@@ -184,10 +191,19 @@ public sealed partial class RevisionStore
             if (w.Content.LongLength > MaximumFileBytes) throw new StoreLimitException("A file is larger than 1 GiB.");
             if (w.Action is not (null or "created" or "edited" or "imported")) throw new ArgumentException("Invalid action.");
         }
+        foreach (var s in stages)
+        {
+            ArgumentNullException.ThrowIfNull(s.File);
+            if (s.Name is not null) ValidateName(s.Name);
+            if ((s.Name is null) == s.File.NewFile) throw new ArgumentException("A new file needs a name; a replacement keeps its own.");
+            if (s.Action is not (null or "created" or "edited" or "imported")) throw new ArgumentException("Invalid action.");
+        }
         foreach (var r in renames) ValidateName(r.NewName);
         foreach (var r in restores) ValidateName(r.Name);
-        if (writes.Select(w => w.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() != writes.Count) throw new ArgumentException("Duplicate names in one commit.");
-        var targeted = renames.Select(r => r.FileId).Concat(deletes.Select(d => d.FileId)).Concat(restores.Select(r => r.FileId)).ToList();
+        var newNames = writes.Select(w => w.Name).Concat(stages.Where(s => s.Name is not null).Select(s => s.Name!)).ToList();
+        if (newNames.Distinct(StringComparer.OrdinalIgnoreCase).Count() != newNames.Count) throw new ArgumentException("Duplicate names in one commit.");
+        var targeted = renames.Select(r => r.FileId).Concat(deletes.Select(d => d.FileId)).Concat(restores.Select(r => r.FileId))
+            .Concat(reverts.Select(r => r.FileId)).Concat(stages.Where(s => s.Name is null).Select(s => s.File.FileId)).ToList();
         if (targeted.Contains(Guid.Empty) || targeted.Distinct().Count() != targeted.Count) throw new ArgumentException("A file can change only once per commit.");
         using var lease = AcquireLock();
         var manifest = ReadCurrent();
@@ -195,8 +211,19 @@ public sealed partial class RevisionStore
         if (current.SnapshotId != expectedSnapshotId) throw new RevisionConflictException();
         var byId = current.Files.ToDictionary(f => f.FileId);
         var deletedById = manifest.Deleted.ToDictionary(d => d.File.FileId);
-        foreach (var id in renames.Select(r => r.FileId).Concat(deletes.Select(d => d.FileId))) if (!byId.ContainsKey(id)) throw new KeyNotFoundException("Document not found.");
+        foreach (var id in renames.Select(r => r.FileId).Concat(deletes.Select(d => d.FileId)).Concat(reverts.Select(r => r.FileId))
+            .Concat(stages.Where(s => s.Name is null).Select(s => s.File.FileId))) if (!byId.ContainsKey(id)) throw new KeyNotFoundException("Document not found.");
         foreach (var r in restores) if (!deletedById.ContainsKey(r.FileId)) throw new KeyNotFoundException("Deleted document not found.");
+        using var keys = new KeyScope(this, manifest);
+        // Reverts: the revision must be in the file's own history (or be its current one), and its record still present.
+        var revertTo = new Dictionary<Guid, (StoreFile File, byte[] RecordSha256)>();
+        foreach (var r in reverts)
+        {
+            var found = FindRevision(manifest, r.FileId, r.RevisionId, keys);
+            if (!File.Exists(BlobPath(found.File.RevisionId)) || new FileInfo(BlobPath(found.File.RevisionId)).Length != RecordSize(found.File))
+                throw new InvalidDataException("A record does not match the history.");
+            revertTo[r.FileId] = found;
+        }
         var now = Now();
         var history = new Dictionary<Guid, HistoryRef?>(manifest.History);
         var deleted = manifest.Deleted.Where(d => !restores.Any(r => r.FileId == d.File.FileId)).ToList();
@@ -209,51 +236,85 @@ public sealed partial class RevisionStore
         foreach (var r in renames) byId[r.FileId] = byId[r.FileId] with { LogicalName = r.NewName };
         var byName = new Dictionary<string, StoreFile>(StringComparer.OrdinalIgnoreCase);
         foreach (var f in byId.Values) if (!byName.TryAdd(f.LogicalName, f)) throw new NameExistsException(); // renamed or restored onto another file
-        // Every name, count, size and space check happens before any record is written.
+        // Uploads committed as new files are create-only, like ImportFiles.
+        foreach (var s in stages) if (s.Name is not null && byName.ContainsKey(s.Name)) throw new NameExistsException();
+        // Every name, count, size and space check happens before any record is written or moved.
         var planned = writes.Select(w => (Write: w, Existing: byName.GetValueOrDefault(w.Name))).ToList();
-        var kept = byId.Values.Where(f => !planned.Any(p => p.Existing?.FileId == f.FileId)).ToList();
-        var finalNames = kept.Select(f => f.LogicalName).Concat(writes.Select(w => w.Name)).ToList();
+        var changedIds = planned.Where(p => p.Existing is not null).Select(p => p.Existing!.FileId)
+            .Concat(stages.Where(s => s.Name is null).Select(s => s.File.FileId)).Concat(reverts.Select(r => r.FileId)).ToHashSet();
+        var kept = byId.Values.Where(f => !changedIds.Contains(f.FileId)).ToList();
+        var finalNames = kept.Select(f => f.LogicalName).Concat(writes.Select(w => w.Name))
+            .Concat(stages.Select(s => s.Name ?? byId[s.File.FileId].LogicalName)).Concat(reverts.Select(r => byId[r.FileId].LogicalName)).ToList();
         if (finalNames.Count > FileLimit) throw new StoreLimitException("Document count exceeded.");
         if (!IsValidTree(finalNames)) throw new NameExistsException(); // a file where a folder is, or vice versa
         long written = writes.Sum(w => w.Content.LongLength);
-        if (kept.Sum(f => f.ByteLength) + written > ProjectByteLimit) throw new StoreLimitException("Project size exceeded.");
-        EnsureFreeSpace(written + writes.Count * 4096L + (1L << 20));
+        long finalBytes = kept.Sum(f => f.ByteLength) + written + stages.Sum(s => s.File.Length) + revertTo.Values.Sum(r => r.File.ByteLength);
+        if (finalBytes > ProjectByteLimit) throw new StoreLimitException("Project size exceeded.");
+        EnsureFreeSpace(written + changes.Count * 4096L + (1L << 20)); // staged records are already on this volume
+        foreach (var s in stages) CheckStaged(s.File, manifest);
 
-        using var keys = new KeyScope(this, manifest);
-        var replaced = new HashSet<Guid>();
         var added = new List<StoreFile>();
         var hashes = new Dictionary<Guid, byte[]>();
         var appends = new List<(Guid FileId, HistoryRef? Prior, HistoryEntry? Legacy, HistoryEntry Entry)>();
-        foreach (var (write, existing) in planned)
+        void Produced(StoreFile entry, byte[] recordSha256, StoreFile? existing, string action)
         {
-            if (existing is not null) replaced.Add(existing.FileId);
-            var entry = new StoreFile(existing?.FileId ?? Guid.NewGuid(), write.Name, Guid.NewGuid(), write.Content.LongLength, KindOf(write.Content), SHA256.HashData(write.Content));
-            var record = SegmentedRecord.Encrypt(new(projectId, entry.FileId, entry.RevisionId, RecordKind.Document), write.Content, null, keys.Get());
-            WriteBlob(entry.RevisionId, record);
-            hashes[entry.RevisionId] = SHA256.HashData(record);
+            hashes[entry.RevisionId] = recordSha256;
             added.Add(entry);
             var prior = existing is null ? null : history.GetValueOrDefault(existing.FileId);
             // A file saved before history existed starts its history with the revision it had then.
             var legacy = existing is not null && prior is null ? HistoryEntryFor(existing, manifest.DocumentSha256[existing.RevisionId], null, null, "before-history") : null;
-            appends.Add((entry.FileId, prior, legacy, HistoryEntryFor(entry, hashes[entry.RevisionId], now, actor, write.Action ?? (existing is null ? "created" : "edited"))));
+            appends.Add((entry.FileId, prior, legacy, HistoryEntryFor(entry, recordSha256, now, actor, action)));
+        }
+        foreach (var (write, existing) in planned)
+        {
+            var entry = new StoreFile(existing?.FileId ?? Guid.NewGuid(), write.Name, Guid.NewGuid(), write.Content.LongLength, KindOf(write.Content), SHA256.HashData(write.Content));
+            var record = SegmentedRecord.Encrypt(new(projectId, entry.FileId, entry.RevisionId, RecordKind.Document), write.Content, null, keys.Get());
+            WriteBlob(entry.RevisionId, record);
+            Produced(entry, SHA256.HashData(record), existing, write.Action ?? (existing is null ? "created" : "edited"));
+        }
+        foreach (var s in stages)
+        {
+            var existing = s.Name is null ? byId[s.File.FileId] : null;
+            var target = BlobPath(s.File.RevisionId);
+            CheckAncestors(target);
+            File.Move(s.File.Path, target, overwrite: false); // same volume: the vault root's staging folder
+            Produced(new StoreFile(s.File.FileId, s.Name ?? existing!.LogicalName, s.File.RevisionId, s.File.Length, s.File.Kind, s.File.Sha256),
+                s.File.RecordSha256, existing, s.Action ?? (existing is null ? "created" : "edited"));
+        }
+        foreach (var r in reverts)
+        {
+            var existing = byId[r.FileId];
+            var (file, recordSha256) = revertTo[r.FileId];
+            Produced(file with { FileId = r.FileId, LogicalName = existing.LogicalName }, recordSha256, existing, "reverted");
         }
         foreach (var r in restores)
         {
             var file = byId[r.FileId];
             appends.Add((r.FileId, history.GetValueOrDefault(r.FileId), null, HistoryEntryFor(file, manifest.DocumentSha256[file.RevisionId], now, actor, "restored")));
         }
-        if (writes.Count > 0) FaultInjection?.Invoke(CommitStage.DocumentFlushed);
+        if (writes.Count + stages.Count > 0) FaultInjection?.Invoke(CommitStage.DocumentFlushed);
         foreach (var (fileId, prior, legacy, entry) in appends) history[fileId] = AppendHistory(fileId, prior, legacy, entry, keys);
-        var entries = byId.Values.Where(f => !replaced.Contains(f.FileId)).Concat(added).ToArray();
+        // Sets, not nested scans: a project can have 25,000 files.
+        var addedIds = added.Select(a => a.FileId).ToHashSet();
+        var entries = byId.Values.Where(f => !changedIds.Contains(f.FileId) && !addedIds.Contains(f.FileId)).Concat(added).ToArray();
         foreach (var f in entries.Concat(deleted.Select(d => d.File))) if (!hashes.ContainsKey(f.RevisionId)) hashes[f.RevisionId] = manifest.DocumentSha256[f.RevisionId];
         if (deleted.Count > MaximumDeleted) deleted = deleted.Skip(deleted.Count - MaximumDeleted).ToList(); // oldest drop off the list; their records stay
-        foreach (var id in history.Keys.Where(id => !entries.Any(f => f.FileId == id)).ToList()) history.Remove(id);
+        var liveIds = entries.Select(f => f.FileId).ToHashSet();
+        foreach (var id in history.Keys.Where(id => !liveIds.Contains(id)).ToList()) history.Remove(id);
         var next = Snapshot(Guid.NewGuid(), entries);
+        return PublishNext(manifest, next, hashes, history, deleted, keys);
+    }
+
+    // Writes the next manifest (the first commit on an old store creates the project key), publishes it, and prunes.
+    private StoreSnapshot PublishNext(Manifest manifest, StoreSnapshot next, IReadOnlyDictionary<Guid, byte[]> hashes,
+        IReadOnlyDictionary<Guid, HistoryRef?> history, IReadOnlyList<DeletedEntry> deleted, KeyScope keys)
+    {
+        var current = manifest.Snapshot;
         var previousPointer = TryReadPointer("PREVIOUS");
-        var written2 = WriteManifest(next, hashes, history, deleted, keys.Reference()); // the first commit on an old store creates the project key
+        var written = WriteManifest(next, hashes, history, deleted, keys.Reference());
         FaultInjection?.Invoke(CommitStage.ManifestFlushed);
-        Publish(next.SnapshotId, previousId: current.SnapshotId); // current was authenticated above, under the lock
-        cache = written2;
+        Publish(next.SnapshotId, previousId: current.SnapshotId); // current was authenticated by the caller, under the lock
+        cache = written;
         // Decision C5: nothing reads a manifest older than PREVIOUS, so the one PREVIOUS named before this commit goes.
         // Plain deletion of ciphertext; a failure only leaves a stray record.
         if (previousPointer is { } stale && stale != next.SnapshotId && stale != current.SnapshotId) TryDeleteRecord(stale);

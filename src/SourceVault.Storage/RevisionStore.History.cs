@@ -7,13 +7,13 @@ namespace SourceVault.Storage;
 
 /// <summary>One saved version of a file. <see cref="SavedAt"/> and <see cref="SavedBy"/> are null for the revision a file
 /// had when history began ("before-history").</summary>
-public sealed record FileRevision(Guid RevisionId, long ByteLength, string Name, DateTimeOffset? SavedAt, string? SavedBy, string Action, FileKind Kind = FileKind.Text);
+public sealed record FileRevision(Guid RevisionId, long ByteLength, string Name, DateTimeOffset? SavedAt, string? SavedBy, string Action, FileKind Kind = FileKind.Text, byte[]? Sha256 = null);
 
 /// <summary>A page of a file's history, newest first. <see cref="More"/>: older pages exist.</summary>
 public sealed record HistoryPage(IReadOnlyList<FileRevision> Revisions, bool More);
 
 /// <summary>A deleted file that can be restored.</summary>
-public sealed record DeletedFile(Guid FileId, string LogicalName, long ByteLength, DateTimeOffset DeletedAt, string? DeletedBy, FileKind Kind = FileKind.Text);
+public sealed record DeletedFile(Guid FileId, string LogicalName, long ByteLength, DateTimeOffset DeletedAt, string? DeletedBy, FileKind Kind = FileKind.Text, byte[]? Sha256 = null);
 
 // Per-file history (manifest schema 3, docs/files-history-builds-design.md section 2).
 //
@@ -54,7 +54,7 @@ public sealed partial class RevisionStore
         var manifest = ReadCurrent();
         var (file, historyRef) = Locate(manifest, fileId);
         if (historyRef is null)
-            return page == 0 ? new([new FileRevision(file.RevisionId, file.ByteLength, file.LogicalName, null, null, "before-history", file.Kind)], false) : new([], false);
+            return page == 0 ? new([new FileRevision(file.RevisionId, file.ByteLength, file.LogicalName, null, null, "before-history", file.Kind, file.Sha256)], false) : new([], false);
         using var keys = new KeyScope(this, manifest);
         var chunk = LoadChunk(fileId, historyRef, keys);
         for (int i = 0; i < page; i++)
@@ -62,7 +62,7 @@ public sealed partial class RevisionStore
             if (chunk.Older is null) return new([], false);
             chunk = LoadChunk(fileId, chunk.Older, keys);
         }
-        return new(chunk.Entries.Reverse().Select(e => new FileRevision(e.RevisionId, e.ByteLength, e.Name, e.SavedAt, e.SavedBy, e.Action, e.Kind)).ToList(), chunk.Older is not null);
+        return new(chunk.Entries.Reverse().Select(e => new FileRevision(e.RevisionId, e.ByteLength, e.Name, e.SavedAt, e.SavedBy, e.Action, e.Kind, e.Sha256)).ToList(), chunk.Older is not null);
     }
 
     /// <summary>Decrypts any revision in a live or deleted file's history. The caller zeroes the result.</summary>
@@ -87,7 +87,7 @@ public sealed partial class RevisionStore
     public IReadOnlyList<DeletedFile> ListDeleted()
     {
         using var lease = AcquireLock();
-        return ReadCurrent().Deleted.Reverse().Select(d => new DeletedFile(d.File.FileId, d.File.LogicalName, d.File.ByteLength, d.DeletedAt, d.DeletedBy, d.File.Kind)).ToList();
+        return ReadCurrent().Deleted.Reverse().Select(d => new DeletedFile(d.File.FileId, d.File.LogicalName, d.File.ByteLength, d.DeletedAt, d.DeletedBy, d.File.Kind, d.File.Sha256)).ToList();
     }
 
     private static (StoreFile File, HistoryRef? History) Locate(Manifest manifest, Guid fileId)

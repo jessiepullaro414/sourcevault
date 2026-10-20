@@ -29,9 +29,11 @@ string self = Environment.ProcessPath!;
 VaultPipe.AllowServiceToIdentifyThisProcess(me);
 using var key = new CountingProtector();
 
+string lastVault = ""; // the vault of the most recent StartServer, for tests that look at its folders
 (VaultPipeServer Server, string Pipe) StartServer(PipePeerPolicy? policy = null, TimeProvider? clock = null)
 {
     var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
+    lastVault = vault;
     Directory.CreateDirectory(vault);
     var catalog = new ProjectCatalog(vault, key);
     var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
@@ -316,9 +318,10 @@ Test("strict bodies, unknown projects, limits and unavailable builds", () =>
         Assert(c.Code("CreateProject", ("name", " padded")) == "InvalidRequest", "bad project name");
         Assert(c.Code("CreateFile", ("projectId", project), ("name", "a//b.ts"), ("expectedSnapshotId", s0), ("contentBase64", B64("x"))) == "InvalidRequest", "bad file name");
         Assert(c.Code("CreateFile", ("projectId", project), ("name", "big.ts"), ("expectedSnapshotId", s0), ("contentBase64", Convert.ToBase64String(new byte[262145]))) == "LimitExceeded", "content limit");
-        Assert(c.Code("CreateFile", ("projectId", project), ("name", "bin.ts"), ("expectedSnapshotId", s0), ("contentBase64", Convert.ToBase64String(new byte[] { 0xff }))) == "InvalidRequest", "invalid UTF-8");
         Assert(c.Code("CreateFile", ("projectId", project), ("name", "b64.ts"), ("expectedSnapshotId", s0), ("contentBase64", "@@@")) == "InvalidRequest", "invalid base64");
         Assert(c.Code("CreateFile", ("projectId", project), ("name", "max.ts"), ("expectedSnapshotId", s0), ("contentBase64", Convert.ToBase64String(new byte[262144]))) == "Ok", "exactly 256 KiB fits a frame");
+        var s1 = c.Ok("ListFiles", ("projectId", project)).GetProperty("snapshotId").GetString()!;
+        Assert(c.Code("CreateFile", ("projectId", project), ("name", "bin.ts"), ("expectedSnapshotId", s1), ("contentBase64", Convert.ToBase64String(new byte[] { 0xff }))) == "Ok", "any bytes inline (stored as binary)");
         Assert(c.Code("RequestBuild", ("projectId", project)) == "Unavailable", "builds unavailable");
     }
 });
@@ -1146,6 +1149,129 @@ Test("SearchProject: plain-text matches with line, column and preview; case, who
             Assert(c.Code("SearchProject", ("projectId", project), ("query", bad), ("matchCase", false), ("wholeWord", false)) == "InvalidRequest", "bad query refused");
         Assert(c.Code("SearchProject", ("projectId", project), ("query", "x"), ("matchCase", "yes"), ("wholeWord", false)) == "InvalidRequest", "flags must be booleans");
         Assert(c.Code("SearchProject", ("projectId", Guid.NewGuid().ToString("D")), ("query", "x"), ("matchCase", false), ("wholeWord", false)) == "NotFound", "unknown project");
+    }
+});
+
+// ---- Any file (docs/vault-any-file-design.md section 3): uploads in parts, NotText, text in parts, revert, verify ----
+string Hex(byte[] data) => Convert.ToHexStringLower(SHA256.HashData(data));
+(string UploadId, string FileId) UploadFile(Client c, string project, string? fileId, byte[] data, string? sha = null)
+{
+    var begun = c.Ok("BeginUpload", ("projectId", project), ("fileId", (object)fileId!), ("length", data.LongLength), ("sha256", sha ?? Hex(data)));
+    Assert(begun.GetProperty("partBytes").GetInt32() == 524288, "part size");
+    var id = begun.GetProperty("uploadId").GetString()!;
+    for (int at = 0; at < data.Length; at += 524288)
+    {
+        var part = data.AsSpan(at, Math.Min(524288, data.Length - at)).ToArray();
+        var code = c.Code("UploadPart", ("uploadId", id), ("offset", (long)at), ("dataBase64", Convert.ToBase64String(part)));
+        if (code != "Ok") return (code, "");
+    }
+    return (id, begun.GetProperty("fileId").GetString()!);
+}
+JsonElement CommitUploads(Client c, string project, string snapshot, params (string UploadId, string? Name)[] files) =>
+    c.Ok("CommitUploads", ("projectId", project), ("expectedSnapshotId", snapshot),
+        ("files", files.Select(f => new Dictionary<string, object?> { ["uploadId"] = f.UploadId, ["name"] = f.Name }).ToArray()));
+JsonElement FileEntry(Client c, string project, string fileId) =>
+    c.Ok("ListFiles", ("projectId", project)).GetProperty("files").EnumerateArray().Single(f => f.GetProperty("fileId").GetString() == fileId);
+
+Test("any file: binary and large uploads in parts, NotText, text in parts, replacement, wrong hash, conflict keeps the upload", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var created = c.Ok("CreateProject", ("name", "AnyFile"));
+        var project = created.GetProperty("projectId").GetString()!;
+        string s = created.GetProperty("snapshotId").GetString()!;
+        var blob = new byte[700 * 1024]; new Random(7).NextBytes(blob); blob[0] = 0; // binary, two parts
+        var (blobUpload, blobId) = UploadFile(c, project, null, blob);
+        var committed = CommitUploads(c, project, s, (blobUpload, "lib/blob.bin"));
+        s = committed.GetProperty("snapshotId").GetString()!;
+        Assert(committed.GetProperty("files")[0].GetProperty("kind").GetString() == "binary", "store decides binary");
+        var entry = FileEntry(c, project, blobId);
+        Assert(entry.GetProperty("kind").GetString() == "binary" && entry.GetProperty("sha256").GetString() == Hex(blob) && entry.GetProperty("byteLength").GetInt64() == blob.Length, "listing kind and hash");
+        var firstRevision = entry.GetProperty("revisionId").GetString()!;
+        Assert(c.Code("OpenDocument", ("projectId", project), ("fileId", blobId), ("expectedSnapshotId", s)) == "NotText", "binary never opens inline");
+        Assert(c.Code("ReadTextPart", ("projectId", project), ("fileId", blobId), ("revisionId", firstRevision), ("offset", 0L)) == "NotText", "no binary in parts either");
+
+        // Large text: LimitExceeded inline, readable in 512 KiB parts up to the editor's 1 MiB.
+        var text = Encoding.UTF8.GetBytes(string.Concat(Enumerable.Repeat("synthetic line λ\n", 600 * 1024 / 18)));
+        var (textUpload, textId) = UploadFile(c, project, null, text);
+        s = CommitUploads(c, project, s, (textUpload, "src/big.txt")).GetProperty("snapshotId").GetString()!;
+        var textRevision = FileEntry(c, project, textId).GetProperty("revisionId").GetString()!;
+        Assert(c.Code("OpenDocument", ("projectId", project), ("fileId", textId), ("expectedSnapshotId", s)) == "LimitExceeded", "large text not inline");
+        var part0 = c.Ok("ReadTextPart", ("projectId", project), ("fileId", textId), ("revisionId", textRevision), ("offset", 0L));
+        var part1 = c.Ok("ReadTextPart", ("projectId", project), ("fileId", textId), ("revisionId", textRevision), ("offset", 524288L));
+        Assert(part0.GetProperty("length").GetInt64() == text.Length, "whole length");
+        Assert(part0.GetProperty("dataBase64").GetBytesFromBase64().Concat(part1.GetProperty("dataBase64").GetBytesFromBase64()).SequenceEqual(text), "parts reassemble");
+        Assert(c.Code("ReadTextPart", ("projectId", project), ("fileId", textId), ("revisionId", textRevision), ("offset", 1L)) == "InvalidRequest", "part-aligned offsets only");
+        Assert(c.Code("ReadTextPart", ("projectId", project), ("fileId", textId), ("revisionId", textRevision), ("offset", 2L * 524288)) == "InvalidRequest", "past the end");
+
+        // Replacement keeps the file id and name and adds to its history; a name on a replacement is refused.
+        var blob2 = new byte[] { 0, 1, 2, 3 };
+        var (replace, sameId) = UploadFile(c, project, blobId, blob2);
+        Assert(sameId == blobId, "replacement keeps the id");
+        Assert(c.Code("CommitUploads", ("projectId", project), ("expectedSnapshotId", s), ("files", new[] { new Dictionary<string, object?> { ["uploadId"] = replace, ["name"] = "x.bin" } })) == "InvalidRequest", "replacement keeps its name");
+        s = CommitUploads(c, project, s, (replace, null)).GetProperty("snapshotId").GetString()!;
+        var history = c.Ok("ListHistory", ("projectId", project), ("fileId", blobId), ("page", 0)).GetProperty("revisions");
+        Assert(history.GetArrayLength() == 2 && history[0].GetProperty("action").GetString() == "edited" && history[1].GetProperty("kind").GetString() == "binary", "history of a binary file");
+        Assert(FileEntry(c, project, blobId).GetProperty("name").GetString() == "lib/blob.bin", "name kept");
+
+        // A wrong SHA-256 is refused at the last byte and the upload is gone.
+        var (bad, _) = UploadFile(c, project, null, [1, 2, 3], sha: new string('0', 64));
+        Assert(bad == "InvalidRequest", "wrong hash");
+        // A stale snapshot conflicts and keeps the staged upload; the retry needs no second upload.
+        var (kept, _) = UploadFile(c, project, null, [9, 0, 7]); // a NUL byte: binary
+        Assert(c.Code("CommitUploads", ("projectId", project), ("expectedSnapshotId", created.GetProperty("snapshotId").GetString()!),
+            ("files", new[] { new Dictionary<string, object?> { ["uploadId"] = kept, ["name"] = "k.bin" } })) == "RevisionConflict", "conflict");
+        s = CommitUploads(c, project, s, (kept, "k.bin")).GetProperty("snapshotId").GetString()!;
+        // A taken name is AlreadyExists (create-only).
+        var (dup, _) = UploadFile(c, project, null, [5]);
+        Assert(c.Code("CommitUploads", ("projectId", project), ("expectedSnapshotId", s), ("files", new[] { new Dictionary<string, object?> { ["uploadId"] = dup, ["name"] = "K.BIN" } })) == "AlreadyExists", "create-only");
+        Assert(c.Code("CancelUpload", ("uploadId", dup)) == "Ok" && c.Code("CancelUpload", ("uploadId", dup)) == "InvalidRequest", "cancel once");
+
+        // Revert makes the first binary revision current again; verify decrypts every file.
+        s = c.Ok("RevertFile", ("projectId", project), ("fileId", blobId), ("revisionId", firstRevision), ("expectedSnapshotId", s)).GetProperty("snapshotId").GetString()!;
+        Assert(FileEntry(c, project, blobId).GetProperty("revisionId").GetString() == firstRevision, "reverted");
+        Assert(c.Ok("ListHistory", ("projectId", project), ("fileId", blobId), ("page", 0)).GetProperty("revisions")[0].GetProperty("action").GetString() == "reverted", "history says reverted");
+        Assert(c.Code("RevertFile", ("projectId", project), ("fileId", blobId), ("revisionId", Guid.NewGuid().ToString("D")), ("expectedSnapshotId", s)) == "NotFound", "unknown revision");
+        var verify = c.Ok("VerifyProject", ("projectId", project));
+        Assert(verify.GetProperty("filesVerified").GetInt32() == 3 && verify.GetProperty("filesFailed").GetInt32() == 0, "verify");
+
+        // Inline: CreateFile takes any bytes; ApplyEdits only text; search skips binary files and says so.
+        var bytes = Enumerable.Range(0, 256).Select(i => (byte)i).ToArray();
+        var inline = c.Ok("CreateFile", ("projectId", project), ("name", "inline.bin"), ("expectedSnapshotId", s), ("contentBase64", Convert.ToBase64String(bytes)));
+        s = inline.GetProperty("snapshotId").GetString()!;
+        Assert(FileEntry(c, project, inline.GetProperty("fileId").GetString()!).GetProperty("kind").GetString() == "binary", "inline binary");
+        Assert(c.Code("ApplyEdits", ("projectId", project), ("fileId", textId), ("expectedSnapshotId", s), ("contentBase64", Convert.ToBase64String(bytes))) == "InvalidRequest", "edits are text");
+        var search = c.Ok("SearchProject", ("projectId", project), ("query", "synthetic line"), ("matchCase", false), ("wholeWord", false));
+        Assert(search.GetProperty("filesSkipped").GetInt32() == 3 && search.GetProperty("filesSearched").GetInt32() == 1 && search.GetProperty("matches").GetArrayLength() > 0, "search skips binaries");
+
+        // One receiving upload per connection.
+        var begun = c.Ok("BeginUpload", ("projectId", project), ("fileId", (object)null!), ("length", 10L), ("sha256", Hex(new byte[10])));
+        Assert(c.Code("BeginUpload", ("projectId", project), ("fileId", (object)null!), ("length", 10L), ("sha256", Hex(new byte[10]))) == "InvalidRequest", "one receiving at a time");
+        Assert(c.Code("BeginUpload", ("projectId", project), ("fileId", (object)null!), ("length", (1L << 30) + 1), ("sha256", Hex(new byte[10]))) is "InvalidRequest" or "LimitExceeded", "1 GiB limit");
+        Assert(c.Code("UploadPart", ("uploadId", begun.GetProperty("uploadId").GetString()!), ("offset", 0L), ("dataBase64", Convert.ToBase64String(new byte[11]))) == "LimitExceeded", "past the length");
+    }
+    // Closing the connection discards its uploads: nothing is left in staging.
+    Thread.Sleep(200);
+    Assert(!Directory.EnumerateFiles(Path.Combine(lastVault, "staging"), "*", SearchOption.AllDirectories).Any(), "staging emptied on close");
+});
+
+Test("any file: an upload idle for 2 minutes is discarded; the vault root accepts staging\\", () =>
+{
+    var clock = new ManualClock();
+    var (server, pipe) = StartServer(clock: clock);
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        var created = c.Ok("CreateProject", ("name", "Idle"));
+        var project = created.GetProperty("projectId").GetString()!;
+        var begun = c.Ok("BeginUpload", ("projectId", project), ("fileId", (object)null!), ("length", 4L), ("sha256", Hex([1, 2, 3, 4])));
+        clock.Advance(TimeSpan.FromMinutes(3));
+        Assert(c.Code("UploadPart", ("uploadId", begun.GetProperty("uploadId").GetString()!), ("offset", 0L), ("dataBase64", Convert.ToBase64String(new byte[] { 1, 2, 3, 4 }))) == "InvalidRequest", "idle upload discarded");
+        Assert(new ProjectCatalog(lastVault, key).OpenAndVerify().Count == 1, "staging is part of the vault layout");
     }
 });
 

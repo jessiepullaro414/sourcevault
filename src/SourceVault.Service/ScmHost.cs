@@ -168,6 +168,8 @@ internal sealed class ScmHost
             }
             // Finish any deletion a crash or a file in use interrupted. Best effort: a pending tombstone stays allowed.
             try { catalog.PurgeDeleted(); } catch (Exception e) when (e is not OutOfMemoryException) { }
+            // Uploads never survive a restart (decision C6): their staging folders hold ciphertext nobody will commit.
+            try { catalog.ClearStaging(); } catch (Exception e) when (e is not OutOfMemoryException) { }
             return (key, catalog, projects);
         }
         catch { key.Dispose(); throw; }
