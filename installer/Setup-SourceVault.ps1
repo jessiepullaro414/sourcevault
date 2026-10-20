@@ -378,6 +378,12 @@ function Register-Sender([string]$senderFile) {
 
 # ---- guided mode -----------------------------------------------------------------------------------------------------
 function Read-Choice([string]$prompt) { (Read-Host $prompt).Trim() }
+# Setup-Builds.ps1 (in the package): engines, build containers, build.json, Docker access. It runs setup -Update
+# -WithBuilds itself, in its own PowerShell, so it runs after (never inside) this setup's own changes.
+function Invoke-BuildSetup {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $package 'Setup-Builds.ps1') | Out-Host
+    if ($LASTEXITCODE -ne 0) { Warn 'Build setup did not finish (see above). Run it again from SourceVault Setup, option 6; finished steps are skipped.' }
+}
 function Start-Guided {
     if (!(Test-Admin)) { Fail 'Setup needs administrator rights: double-click "SourceVault Setup.cmd", or right-click PowerShell > Run as administrator.' }
     $installed = [bool](Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
@@ -392,7 +398,7 @@ function Start-Guided {
         $script:Operators = if ($who) { @($who -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @($me) }
         $where = Read-Choice "   Where should the vault live? [Enter = $defaultVaultRoot, or a folder on another internal drive, e.g. K:\SourceVault\vault]"
         if ($where -and $where -ne $defaultVaultRoot) { $script:VaultRoot = $where }
-        $builds = Read-Choice '   Set up Docker builds now? (you can do it later) [y/N]'
+        $builds = Read-Choice '   Set up Docker builds after installing? (downloads Docker and build images; you can do it later) [y/N]'
         $script:WithBuilds = [switch]($builds -match '^(y|yes)$')
         Write-Host "`n   Install for: $($script:Operators -join ', ')"
         Write-Host "   Vault:       $(if ($script:VaultRoot) { $script:VaultRoot } else { $defaultVaultRoot })"
@@ -407,7 +413,7 @@ function Start-Guided {
         Write-Host '   3  Stop people using SourceVault'
         Write-Host '   4  Allow packages from another computer (SourceVault Pack)'
         Write-Host '   7  Reset someone''s SourceVault password (forgotten, or locked out)'
-        if ($hasPayload) { Write-Host '   5  Update SourceVault from this setup package'; Write-Host '   6  Set up or refresh Docker builds' }
+        if ($hasPayload) { Write-Host '   5  Update SourceVault from this setup package'; Write-Host '   6  Set up Docker builds (engines, build containers, targets)' }
         Write-Host '   Q  Quit'
         switch (Read-Choice '   Choose') {
             '1' { Step 'Status'; Show-StatusSummary }
@@ -416,7 +422,7 @@ function Start-Guided {
             '4' { Step 'Allow packages from another computer'; $f = Read-Choice '   Path of its SourceVault-sender-<computer>.json file'; if ($f) { Register-Sender $f.Trim('"') } }
             '7' { Step 'Reset a SourceVault password'; Reset-Passwords ((Read-Choice '   Windows accounts, comma-separated (e.g. PC\alice)') -split ',') }
             '5' { if ($hasPayload) { $script:Update = [switch]$true; return } }
-            '6' { if ($hasPayload) { $script:Update = [switch]$true; $script:WithBuilds = [switch]$true; return } }
+            '6' { if ($hasPayload) { Step 'Set up Docker builds'; Invoke-BuildSetup } }
             { $_ -in 'q', 'Q', '' } { exit 0 }
         }
     }
@@ -682,6 +688,8 @@ $adminLink.WorkingDirectory = $adminDir
 $adminLink.Description = 'Check SourceVault, add or remove people, allow Pack computers (asks for administrator rights)'
 $adminLink.Save()
 Ok "'SourceVault Administration' added to the Start menu (for administrators)"
+
+if ($guided -and $WithBuilds -and (Test-Path -LiteralPath (Join-Path $package 'Setup-Builds.ps1'))) { Step 'Set up Docker builds'; Invoke-BuildSetup }
 
 Write-Host "`nSetup complete." -ForegroundColor Green
 Write-Host 'Next:' -ForegroundColor White
