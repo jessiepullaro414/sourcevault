@@ -216,6 +216,8 @@ Expected output: `x86\CppHello.exe` and `x64\CppHello.exe` (Windows), and `cpp-h
 
 ## 5. The vault must hold any file (owner, 2026-10-19; separate design task)
 
+> **Update 2026-10-20:** designed, approved and built in [vault-any-file-design.md](vault-any-file-design.md) (merged with PR #2). This section is the original problem statement.
+
 Today the vault holds **strict UTF-8 text only: at most 256 KiB per file and 1,024 files per project** (`revision-store.md`). The importer and Pack skip everything else and list it. A build sees only what is in the vault, so real C++ code would fail to build:
 - `.rc` files that Visual Studio saved as UTF-16;
 - icons, bitmaps and other binary resources;

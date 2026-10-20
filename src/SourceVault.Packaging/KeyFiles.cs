@@ -25,10 +25,15 @@ public sealed record PublicKeyFile(string Format, string Computer, byte[] Subjec
     /// <summary>Eight groups of eight hex digits, for people to compare on two screens.</summary>
     public string FingerprintText => Display(Fingerprint);
 
+    /// <summary>
+    /// The check code people compare on two screens (owner request 2026-10-20: shorter than the 64 hex digits): the
+    /// first 96 bits of the fingerprint as six groups of four, "4F2A-91C0-77DE-0B13-AA42-9C5E". Making a key whose code
+    /// matches a given one takes about 2^96 tries. Software always compares the full 256-bit fingerprint.
+    /// </summary>
     public static string Display(ReadOnlySpan<byte> fingerprint)
     {
-        var hex = Convert.ToHexStringLower(fingerprint);
-        return string.Join(' ', Enumerable.Range(0, hex.Length / 8).Select(i => hex.Substring(i * 8, 8)));
+        var hex = Convert.ToHexString(fingerprint[..12]);
+        return string.Join('-', Enumerable.Range(0, 6).Select(i => hex.Substring(i * 4, 4)));
     }
 
     public static PublicKeyFile Create(string format, string computer, byte[] subjectPublicKeyInfo)

@@ -454,6 +454,13 @@ Test("catalog: tampered index and tampered project fail closed with their own ca
     var u = TwoProjects();
     FlipLiveManifest(Path.Combine(u.Vault, "projects", u.A.ProjectId.ToString("D")));
     RejectCatalog(CatalogFailure.Project, () => new ProjectCatalog(u.Vault, counting).OpenAndVerify());
+    // The service's check (owner decision 2026-10-20): the tampered project is offline, the other one is fine.
+    var check = new ProjectCatalog(u.Vault, counting).Verify();
+    Assert(check.Projects.Select(p => p.Name).SequenceEqual(["Beta"]) && check.Offline.Single() == (u.A.ProjectId, "Alpha")); // one offline, the rest verified
+    new ProjectCatalog(u.Vault, counting).DeleteProject(u.A.ProjectId, "Alpha"); // an offline project can still be deleted
+    Assert(new ProjectCatalog(u.Vault, counting).OpenAndVerify().Single().Name == "Beta"); // after deleting it the vault verifies again
+    // A damaged index or layout still fails the whole vault in the lenient check too.
+    RejectCatalog(CatalogFailure.Index, () => new ProjectCatalog(t.Vault, counting).Verify());
 });
 
 Test("catalog: delete needs the exact name, removes the files, and frees the name", () =>

@@ -54,8 +54,8 @@ internal static class PackageImport
         client.Call("EndSession");
         using (var file = new FileStream(full, FileMode.CreateNew, FileAccess.Write)) file.Write(recipient.ToJson());
         output.WriteLine($"Wrote the recipient file for \"{recipient.Computer}\": {full}");
-        output.WriteLine($"Fingerprint: {recipient.FingerprintText}");
-        output.WriteLine("It holds no secrets. Copy it to the other computer, and check that SourceVault Pack shows this same fingerprint.");
+        output.WriteLine($"Check code: {recipient.FingerprintText}");
+        output.WriteLine("It holds no secrets. Copy it to the other computer, and check that SourceVault Pack shows this same check code.");
         return 0;
     }
 

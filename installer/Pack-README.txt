@@ -12,9 +12,9 @@ THE WINDOW: double-click pack\SourceVaultPack.exe
 
   1. This computer   - "Set up this computer" once: creates the signing key in the TPM and saves this computer's
                        sender file. Give that file to the vault PC's administrator, who registers it with
-                       Setup-SourceVault.ps1 -RegisterSender <file> and compares the fingerprint shown here.
+                       Setup-SourceVault.ps1 -RegisterSender <file> and compares the check code shown here.
   2. The vault PC    - "Choose recipient file": the file an operator there made with
-                       SourceVault.Import.exe --export-recipient <file>. Check its fingerprint matches the vault PC's.
+                       SourceVault.Import.exe --export-recipient <file>. Check its check code matches the vault PC's.
   3. Project folder  - "Choose project folder": every subfolder is included. The Included and Skipped tabs show
                        exactly what goes in and why the rest is left out.
   Then "Create encrypted package", choose where to save it, and confirm.

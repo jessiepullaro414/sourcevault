@@ -18,6 +18,8 @@ SourceVault keeps source code encrypted on disk with a key that never leaves thi
 
 ### Install
 
+**The easy way:** copy the zip, unblock and extract it (steps 1–2), then double-click **SourceVault Setup.cmd** in the extracted folder. It asks for administrator rights, then asks who will use SourceVault, where the vault should live and whether to set up builds, shows a summary, and installs after you type `YES`. The steps below do the same from PowerShell, with every option.
+
 1. Copy `SourceVault-Setup-<date>.zip` to the computer.
 2. Right-click the zip → **Properties** → tick **Unblock** (if shown) → **OK**. Then extract it.
 3. Open **Windows PowerShell as administrator** (Start → type *PowerShell* → *Run as administrator*) and go to the **extracted package folder**, the one containing `Setup-SourceVault.ps1` and `payload`:
@@ -48,24 +50,34 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
 | TPM key | The service creates its own **decrypt-only, non-exportable** key in the TPM, then tests it. |
 | Vault folder | Creates `C:\ProgramData\SourceVault\vault`, or the `-VaultRoot` folder, readable only by the service, SYSTEM and Administrators. Operators can't open it directly. |
 | Start | Starts the service and confirms it verified the vault and is listening. |
-| Shortcut | Adds **SourceVault Editor** to the Start menu for everyone. |
+| Shortcuts | Adds **SourceVault Editor** to the Start menu for everyone, and **SourceVault Administration** (for administrators: the guided menu below). |
 
 6. **Every operator must sign out of Windows and back in once.** Until they do, the editor reports "not in SourceVault Operators", because Windows applies group membership only at sign-in.
 
 ### Check, update, add people, remove
 
+**The easy way:** Start menu → **SourceVault Administration** (it asks for administrator rights). Its menu checks SourceVault, lets people use it or stops them, allows a Pack computer, and (from a new setup package) updates SourceVault or sets up builds. The commands below do the same from PowerShell.
+
 - **Health check** (as administrator):
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Status
   ```
-  Reports the service account and state, whether installed files still match their hashes, the operators, where the vault is, what kind of drive it is on, and whether the vault folder's permissions are trusted.
+  Reports the service account and state, whether installed files still match their hashes, the operators, where the vault is, what kind of drive it is on, whether the vault folder's permissions are trusted, and any **offline projects**. It ends with one line: *All good*, or how many things need attention (each `NOTE` line says what to do).
+- **A project that fails its integrity check** (damage or tampering) is taken **offline** when the service starts; the rest of the vault keeps working. Operators see it struck through in the project list, with the reason, and can only delete it; `-Status` lists its id. Until 2026-10-20 one such project stopped the whole service. A damaged project index or an unexpected file in the vault folder still stops the service, because then nothing can be trusted.
 - **Installed files are checked on every connection.** The service accepts the editor and importer only while every file in their folders matches `install-manifest.sha256`. If a file was changed, added or removed, they are refused ("only accepts the installed…"); run `-Update` from the package to restore them.
 - **Update to a newer package.** Close all editors, then from the new package:
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update
   ```
   Program files are replaced. The key, the vault, its location and the settings are kept.
-- **Add or remove an operator:** *Computer Management → Local Users and Groups → Groups → SourceVault Operators*, or `Add-LocalGroupMember -Group "SourceVault Operators" -Member "COMPUTER\name"`. The person signs out and in afterwards.
+- **Let people use SourceVault, or stop them:**
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -AddOperator "COMPUTER\alice"
+  powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -RemoveOperator "COMPUTER\alice"
+  ```
+  Windows reads group membership at sign-in, in both directions:
+  - **someone added** must sign out and back in once before the editor can unlock;
+  - **someone removed** keeps access until they sign out. To cut it at once, sign them off (Task Manager → Users → *Sign off*) or restart the PC.
 - **Uninstall** (as administrator, from the package):
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Uninstall-SourceVault.ps1
@@ -261,6 +273,8 @@ To show SourceVault to people on a PC without the vault, run **Start SourceVault
 
 - **Choose a project** from the list, or type a name and **Create project**. Names are 1–64 characters.
 - **Open a file** from the Explorer. Only files you open are decrypted; closing a tab removes its text from the editor.
+- **Import a folder:** in the project list, **Import a folder…**. Choose the folder; the editor lists how many files it found and what it skips (links, `.git`, `bin`, `obj` and the like, names the vault can't hold), with reasons. Type the project name and click **Import**. Every file is checked afterwards, as with the importer. If anything fails, the new project is removed again.
+- **Drag files in:** drop files or folders from Explorer onto the Explorer panel to add them (dropped on a file, they go into that file's folder). Folders keep their name and follow the same skip rules. Dropping anywhere else does nothing.
 - **Any kind of file** can be in a project: images, icons, DLLs and `.lib` files, UTF-16 resource files, big logs. The editor opens **text up to 1 MiB**. Other files are marked **binary** or **large** in the Explorer; clicking one shows its details instead: kind, size, last change (when, who) and its SHA-256. From there you can rename, delete, see its history, or **Replace from disk…**. Their content never comes back out of the vault to you: no download, no preview. A build is the only way it is used.
 - **Add files from disk:** **+ Add from disk** in the Explorer (to the project's top level), or **⋯ → Add files from disk to *folder*/** on a file in that folder. Windows' own *Open* dialog appears; you can choose several files. The editor's window program reads them and sends them to the service, which encrypts them; the editor page itself never sees the path or the bytes. Windows may remember the folder you last chose in that dialog.
 - **Replace from disk…** (in the details, or **⋯** on any file without unsaved edits) replaces a file's content with a file you choose, keeping its name and history.
@@ -371,7 +385,7 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
    ```powershell
    pack\SourceVault.Pack.exe C:\code\my-app --to recipient.json --out my-app.svpkg
    ```
-   - It shows the recipient's fingerprint: check it matches this PC's.
+   - It shows the recipient's **check code** (six groups of four characters, such as `4F2A-91C0-77DE-0B13-AA42-9C5E`): check it matches this PC's.
    - Type `YES` to write the package.
    - The same rules as a folder import apply: any file up to 1 GiB, at most 25,000 files and 8 GiB, and `.git`, `bin`, `obj` and the like skipped. Pack reads the files as it writes, so it stops if one changes in the meantime.
 2. **Import it here** (operator):
@@ -390,7 +404,7 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
 
 - Pick a **target** and click **Build saved files**. The build uses the files **as saved in the vault**; unsaved edits are not included. One build per target runs at a time; up to 4 more wait.
 - The list shows each build with when, who and how long. It refreshes while a build is queued or running.
-- Click a build to see its result, its **output folder** on this PC (*Output (N files)*), and its **log**. The log is stored encrypted in the vault and shown read-only here, like files; copying is blocked.
+- Click a build to see its result, its **output folder** on this PC (*Output (N files)*, with **Open folder** to show it in Explorer), and its **log**. The log is stored encrypted in the vault and shown read-only here, like files; copying from it stays inside the editor.
 - **Output files are ordinary, unencrypted files** in that folder, readable by every operator. That is their purpose.
 - **Left out:** source maps, debug symbols and similar files are not published. The result says how many, and the end of the log lists them. Your administrator can allow a kind.
 - Common results:
@@ -420,7 +434,9 @@ Different files never conflict: two people can edit different files of the same 
 
 ### What the editor deliberately blocks
 
-**Copy, cut, paste, drag-and-drop, right-click menus, printing, developer tools and browser shortcuts are all disabled.** This is intentional, to make accidental copying out harder. Type code in; don't paste it.
+**Nothing you copy in the editor reaches the Windows clipboard.** Copy and cut work inside SourceVault: paste them anywhere in the editor, in any file. What the Windows clipboard gets instead is a short notice, *"Copied inside SourceVault…"*, so pasting into another program shows that notice, not your code. **Pasting from other programs into the editor works.**
+
+**Still disabled, on purpose:** dragging anything out, right-click menus, printing, developer tools and browser shortcuts. Dropping files works only on the Explorer panel (see *Projects and files*). Locking forgets what you copied.
 
 ---
 

@@ -734,6 +734,25 @@ Check("bridge: info panel, from disk, keep mine/theirs and revert carry ids only
         Req("addFromDisk", $"{{\"projectId\":\"{P}\",\"folder\":\"res\",\"files\":[\"C:\\\\a.png\"]}}"));
 });
 
+Check("bridge: openBuildFolder carries a project and a build number only, never a path", () =>
+{
+    var open = Parsed(Req("openBuildFolder", $"{{\"projectId\":\"{P}\",\"buildNumber\":3}}"));
+    Assert(open.Operation == VaultOperation.OpenBuildFolder && open.BuildNumber == 3 && open.Name is null, "parsed");
+    Rejects(Vault, Req("openBuildFolder", $"{{\"projectId\":\"{P}\",\"buildNumber\":0}}"),
+        Req("openBuildFolder", $"{{\"projectId\":\"{P}\",\"buildNumber\":3,\"path\":\"C:\\x\"}}"));
+});
+
+Check("bridge: import a folder and dropped files carry names only; the dropped items come as host objects", () =>
+{
+    Assert(Parsed(Req("chooseImportFolder", "{}")).Operation == VaultOperation.ChooseImportFolder, "choose");
+    Assert(Parsed(Req("importFolder", "{\"name\":\"From disk\"}")) is { Operation: VaultOperation.ImportFolder, Name: "From disk" }, "import");
+    Assert(Parsed(Req("cancelImport", "{}")).Operation == VaultOperation.CancelImport, "cancel");
+    Assert(Parsed(Req("dropFiles", $"{{\"projectId\":\"{P}\",\"folder\":\"res\"}}")) is { Operation: VaultOperation.DropFiles, Folder: "res" }, "drop");
+    Rejects(Vault, Req("chooseImportFolder", "{\"path\":\"x\"}"), Req("importFolder", "{}"), Req("importFolder", "{\"name\":\"\"}"),
+        Req("dropFiles", $"{{\"projectId\":\"{P}\"}}"), Req("dropFiles", $"{{\"projectId\":\"{P}\",\"folder\":\"res\",\"paths\":[]}}"));
+    Assert(BridgePolicy.BuildProgress(Guid.Parse(Guid1), 5, 10) == $"{{\"type\":\"sourcevault.vault.progress\",\"requestId\":\"{Guid1}\",\"done\":5,\"total\":10}}", "progress carries bytes only");
+});
+
 Check("bridge: settings carry exactly eight bounded display preferences", () =>
 {
     Assert(Parsed(Req("getSettings", "{}")).Operation == VaultOperation.GetSettings, "getSettings");

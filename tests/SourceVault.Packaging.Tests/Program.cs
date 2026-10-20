@@ -49,7 +49,8 @@ Test("key files: round trip, fingerprint display, and the expected format only",
 {
     var parsed = PublicKeyFile.Parse(recipient.ToJson(), PublicKeyFile.RecipientFormat);
     Assert(parsed.Computer == "VAULT-PC" && parsed.Fingerprint.AsSpan().SequenceEqual(recipient.Fingerprint), "round trip");
-    Assert(parsed.FingerprintText.Split(' ').Length == 8 && parsed.FingerprintText.Split(' ').All(g => g.Length == 8), "eight groups of eight");
+    Assert(parsed.FingerprintText.Split('-').Length == 6 && parsed.FingerprintText.Split('-').All(g => g.Length == 4 && g.All(Uri.IsHexDigit) && g == g.ToUpperInvariant()), "a check code of six groups of four");
+    Assert(parsed.FingerprintText.Replace("-", "") == Convert.ToHexString(parsed.Fingerprint)[..24], "the first 96 bits of the fingerprint");
     Throws<KeyFileException>(() => PublicKeyFile.Parse(recipient.ToJson(), PublicKeyFile.SenderFormat), "recipient file used as a sender file");
 });
 

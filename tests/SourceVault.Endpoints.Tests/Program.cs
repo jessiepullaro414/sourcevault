@@ -759,6 +759,90 @@ Test("controller: a text draft conflicting with a binary version is not mergeabl
     }
 });
 
+// ---- "Import a folder" and dropped files from the editor (owner request 2026-10-20) ----
+DiskFile Scanned(string name, byte[] bytes) => new(name, bytes.Length, () => new MemoryStream(bytes, writable: false), SHA256.HashData(bytes));
+
+Test("controller: importing a folder makes a verified new project; any failure removes it again", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var icon = new byte[600 * 1024]; new Random(7).NextBytes(icon); icon[0] = 0;
+        var files = new List<(string, DiskFile)> { ("README.md", Scanned("README.md", Encoding.UTF8.GetBytes("# imported\n"))), ("res/app.ico", Scanned("app.ico", icon)) };
+        long last = 0;
+        var imported = Run(ctl.ImportProjectAsync("From a folder", files, done => last = done));
+        Assert(imported is { Ok: true, Value.Imported: 2, Value.Verified: 2 }, "imported and verified: " + imported.Code);
+        Assert(last == icon.Length + 11, "progress reached every byte: " + last);
+        var listed = Run(ctl.ListFilesAsync(imported.Value!.ProjectId)).Value!;
+        Assert(listed.Single(f => f.Name == "res/app.ico").Sha256 == Convert.ToHexStringLower(SHA256.HashData(icon)), "byte-exact");
+        Assert(Run(ctl.ImportProjectAsync("From a folder", files)).Code == "AlreadyExists", "a taken name");
+        // A file that changed after the scan: refused at its last byte, and the new project is gone again.
+        var changed = new List<(string, DiskFile)> { ("a.txt", Scanned("a.txt", Encoding.UTF8.GetBytes("one\n"))),
+            ("b.txt", new DiskFile("b.txt", 4, () => new MemoryStream(Encoding.UTF8.GetBytes("two\n")), SHA256.HashData(Encoding.UTF8.GetBytes("TWO\n")))) };
+        Assert(Run(ctl.ImportProjectAsync("Half imported", changed)).Code == "SourceChanged", "changed after the scan");
+        Assert(Run(ctl.ListProjectsAsync()).Value!.All(p => p.Name != "Half imported"), "nothing half-imported is left");
+    }
+});
+
+Test("controller: adding many dropped files commits in batches; a clash part-way keeps what was added", () =>
+{
+    var (server, pipe) = StartServer();
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Run(ctl.UnlockAsync());
+        var project = Run(ctl.CreateProjectAsync("Dropped")).Value!.ProjectId;
+        var many = Enumerable.Range(0, EditorVaultController.MaxAddFiles + 44).Select(i => ($"drop/f{i:D3}.txt", Scanned($"f{i:D3}.txt", Encoding.UTF8.GetBytes($"file {i}\n")))).ToList();
+        var added = Run(ctl.AddManyAsync(project, many));
+        Assert(added is { Ok: true, Value.Stopped: null } && added.Value.Added.Count == many.Count, "two commits, all added");
+        Assert(Run(ctl.ListFilesAsync(project)).Value!.Count == many.Count, "listed");
+        var clash = Enumerable.Range(0, EditorVaultController.MaxAddFiles).Select(i => ($"more/g{i:D3}.txt", Scanned($"g{i:D3}.txt", [1, 2, 3]))).Append(("drop/f000.txt", Scanned("f000.txt", [4]))).ToList();
+        var partial = Run(ctl.AddManyAsync(project, clash));
+        Assert(partial is { Ok: true, Value.Stopped: "AlreadyExists" } && partial.Value.Added.Count == EditorVaultController.MaxAddFiles, "the first batch stays; the clash stops the rest: " + partial.Value?.Stopped);
+        Assert(Run(ctl.AddManyAsync(project, [("drop/f001.txt", Scanned("f001.txt", [5]))])).Code == "AlreadyExists", "nothing added: a plain failure");
+    }
+});
+
+// ---- a project that fails its check is offline, not fatal (owner decision 2026-10-20) ----
+Test("offline project: listed as unavailable, refuses everything but deletion; the status file has ids only", () =>
+{
+    var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(vault);
+    var setup = new ProjectCatalog(vault, key);
+    var good = setup.CreateProject("Healthy");
+    var bad = setup.CreateProject("Broken project");
+    var store = Path.Combine(vault, "projects", bad.ProjectId.ToString("D"));
+    var live = Path.Combine(store, File.ReadAllText(Path.Combine(store, "HEAD")) + ".svr");
+    var raw = File.ReadAllBytes(live); raw[^1] ^= 1; File.WriteAllBytes(live, raw);
+    var catalog = new ProjectCatalog(vault, key);
+    var check = catalog.Verify();
+    Assert(check.Offline.Single().ProjectId == bad.ProjectId, "found at startup");
+    var statusFolder = Path.Combine(workspace, "status-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(statusFolder);
+    SourceVault.Service.VaultStatus.WriteTo(statusFolder, check.Projects.Count, check.Offline.Select(o => o.ProjectId), DateTimeOffset.UnixEpoch);
+    var status = File.ReadAllText(Path.Combine(statusFolder, "vault.json"));
+    Assert(status.Contains(bad.ProjectId.ToString("D")) && status.Contains("\"projectsAvailable\": 1") && !status.Contains("Broken") && !status.Contains("Healthy"), "ids and counts only: " + status);
+    var reported = new List<Guid>();
+    var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
+    using var server = new VaultPipeServer(name, me, new PipePeerPolicy(authenticatedUsers, [self]),
+        new VaultProtocol(catalog, check.Projects, offline: check.Offline, status: (_, offline) => { reported.Clear(); reported.AddRange(offline); }));
+    server.Start();
+    using var c = new Client(name, me);
+    c.Begin();
+    var listing = c.Ok("ListProjects");
+    Assert(listing.GetProperty("projects").EnumerateArray().Single().GetProperty("name").GetString() == "Healthy", "available projects");
+    Assert(listing.GetProperty("unavailable").EnumerateArray().Single().GetProperty("projectId").GetString() == bad.ProjectId.ToString("D"), "offline projects are named, so they can be found and deleted");
+    Assert(c.Code("ListFiles", ("projectId", bad.ProjectId.ToString("D"))) == "Unavailable", "nothing in it opens");
+    Assert(c.Code("ListFiles", ("projectId", good.ProjectId.ToString("D"))) == "Ok", "the rest of the vault works");
+    Assert(c.Code("DeleteProject", ("projectId", bad.ProjectId.ToString("D")), ("confirmName", "Broken project")) == "Ok", "an offline project can be deleted");
+    Assert(reported.Count == 0, "the status file no longer lists it");
+    Assert(!c.Ok("ListProjects").GetProperty("unavailable").EnumerateArray().Any(), "gone");
+    using var ctl = Controller(name);
+    Run(ctl.UnlockAsync());
+    Assert(Run(ctl.ListProjectsAsync()).Value!.All(p => p.Available), "the editor's view");
+});
+
 Test("controller: unlock failures are reported as fixed, explainable codes", () =>
 {
     foreach (var (failure, expected) in new (Exception, string)[]

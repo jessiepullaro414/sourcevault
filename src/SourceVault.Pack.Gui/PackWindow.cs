@@ -94,7 +94,7 @@ internal sealed class PackWindow : Window
         {
             using var key = SenderKey.Open();
             var sender = PackCore.SenderFile(key);
-            senderText.Text = $"Signing as \"{sender.Computer}\". Sender fingerprint:\n{sender.FingerprintText}\nThe vault PC's administrator registers this computer once with its sender file (Setup-SourceVault.ps1 -RegisterSender).";
+            senderText.Text = $"Signing as \"{sender.Computer}\". Sender check code:\n{sender.FingerprintText}\nThe vault PC's administrator registers this computer once with its sender file (Setup-SourceVault.ps1 -RegisterSender).";
             setupButton.Content = "Save sender file again…";
             senderReady = true;
         }
@@ -125,7 +125,7 @@ internal sealed class PackWindow : Window
         recipient = null;
         UpdateCreate();
         recipient = PackCore.ReadRecipient(dialog.FileName);
-        recipientText.Text = $"Encrypting for the vault PC \"{recipient.Computer}\". Recipient fingerprint:\n{recipient.FingerprintText}\nCheck that this matches the fingerprint shown on the vault PC when the file was exported.";
+        recipientText.Text = $"Encrypting for the vault PC \"{recipient.Computer}\". Recipient check code:\n{recipient.FingerprintText}\nCheck that this matches the check code shown on the vault PC when the file was exported.";
         UpdateCreate();
     }
 

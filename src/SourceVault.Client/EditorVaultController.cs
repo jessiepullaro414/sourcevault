@@ -6,7 +6,8 @@ namespace SourceVault.Client;
 
 public enum LockReason { User, Closed, Expired }
 
-public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount);
+/// <summary>A project. Not <c>Available</c>: it failed its integrity check and is offline (it can only be deleted).</summary>
+public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount, bool Available = true);
 /// <summary>A live file. <c>Kind</c> is "text" or "binary"; <c>Sha256</c> (hex) is null for a legacy text record.</summary>
 public sealed record FileSummary(Guid FileId, string Name, Guid RevisionId, long ByteLength, string Kind = "text", string? Sha256 = null)
 {
@@ -24,8 +25,15 @@ public sealed record DeletedSummary(Guid FileId, string Name, long ByteLength, D
 /// <c>Mergeable</c> (texts null) when either side is binary or over 1 MiB: the editor then offers keep mine / keep theirs.
 /// </summary>
 public sealed record MergeSources(string? BaseText, string? TheirsText, Guid TheirsRevision, bool Mergeable = true);
-/// <summary>A file the host read from disk (chosen in its own dialog). The renderer never sees the path or the bytes.</summary>
-public sealed record DiskFile(string Name, long Length, Func<Stream> Open);
+/// <summary>
+/// A file the host read from disk (chosen in its own dialog, or dropped). The renderer never sees the path or the bytes.
+/// <c>Sha256</c>, when known from a scan, saves the first read; the service still checks it against the uploaded bytes.
+/// </summary>
+public sealed record DiskFile(string Name, long Length, Func<Stream> Open, byte[]? Sha256 = null);
+/// <summary>Files added in several commits: what was added, and the code that stopped it part-way (null: all of it).</summary>
+public sealed record BatchAdd(IReadOnlyList<FileSummary> Added, string? Stopped);
+/// <summary>A folder imported as a new project: files imported, and the service's full check (decrypted and verified).</summary>
+public sealed record ImportOutcome(Guid ProjectId, int Imported, int Verified);
 public sealed record BuildSummary(int Number, string Target, string State, string? Reason, int? ExitCode, string? RequestedBy, DateTimeOffset RequestedAt,
     DateTimeOffset? FinishedAt, string? ArtifactFolder, int ArtifactFiles, long ArtifactBytes, bool LogAvailable, bool LogTruncated, int ArtifactsDropped = 0);
 
@@ -122,6 +130,9 @@ public sealed class EditorVaultController : IDisposable
         if (!r.Ok) return Fail<IReadOnlyList<ProjectSummary>>(r.Code);
         return new("Ok", r.Body.GetProperty("projects").EnumerateArray()
             .Select(p => new ProjectSummary(Guid.Parse(p.GetProperty("projectId").GetString()!), p.GetProperty("name").GetString()!, p.GetProperty("fileCount").GetInt32()))
+            .Concat(r.Body.TryGetProperty("unavailable", out var offline) // absent from an older service
+                ? offline.EnumerateArray().Select(p => new ProjectSummary(Guid.Parse(p.GetProperty("projectId").GetString()!), p.GetProperty("name").GetString()!, 0, Available: false))
+                : [])
             .ToList());
     });
 
@@ -578,6 +589,70 @@ public sealed class EditorVaultController : IDisposable
     });
 
     /// <summary>
+    /// Adds any number of files (dropped files and folders) in commits of up to <see cref="MaxAddFiles"/>. A failure
+    /// part-way keeps what was already committed and reports it with the code that stopped it.
+    /// <paramref name="progress"/> receives the bytes uploaded so far.
+    /// </summary>
+    public Task<VaultResult<BatchAdd>> AddManyAsync(Guid projectId, IReadOnlyList<(string Name, DiskFile File)> files, Action<long>? progress = null, CancellationToken ct = default) => Guarded(() =>
+        AddManyCoreAsync(projectId, files, progress, ct));
+
+    private async Task<VaultResult<BatchAdd>> AddManyCoreAsync(Guid projectId, IReadOnlyList<(string Name, DiskFile File)> files, Action<long>? progress, CancellationToken ct)
+    {
+        if (files.Count == 0 || files.Any(f => f.File.Length > MaxFileBytes)) return Fail<BatchAdd>("LimitExceeded");
+        var added = new List<FileSummary>();
+        long done = 0;
+        foreach (var batch in files.Chunk(MaxAddFiles))
+        {
+            var result = await AddCoreAsync(projectId, batch, n => progress?.Invoke(done + n), ct).ConfigureAwait(false);
+            if (!result.Ok) return added.Count == 0 ? Fail<BatchAdd>(result.Code) : new("Ok", new BatchAdd(added, result.Code));
+            added.AddRange(result.Value!);
+            done += batch.Sum(f => f.File.Length);
+        }
+        return new("Ok", new BatchAdd(added, null));
+    }
+
+    /// <summary>
+    /// Imports scanned files as a new project named <paramref name="projectName"/>, like the importer: every file
+    /// uploaded, every stored SHA-256 compared with the scan, then the service decrypts and checks every record
+    /// (VerifyProject). Any failure deletes the new project again, so nothing half-imported is left behind.
+    /// </summary>
+    public Task<VaultResult<ImportOutcome>> ImportProjectAsync(string projectName, IReadOnlyList<(string Name, DiskFile File)> files, Action<long>? progress = null, CancellationToken ct = default) => Guarded(async () =>
+    {
+        if (files.Count == 0) return Fail<ImportOutcome>("InvalidRequest");
+        var created = await client!.CallAsync("CreateProject", w => w.WriteString("name", projectName), null, ct).ConfigureAwait(false);
+        if (!created.Ok) return Fail<ImportOutcome>(created.Code);
+        var projectId = Guid.Parse(created.Body.GetProperty("projectId").GetString()!);
+        string? failure;
+        int verified = 0;
+        var added = await AddManyCoreAsync(projectId, files, progress, ct).ConfigureAwait(false);
+        if (!added.Ok) failure = added.Code;
+        else if (added.Value!.Stopped is { } stopped) failure = stopped;
+        else
+        {
+            failure = null;
+            var listing = await ListFilesCoreAsync(projectId, ct).ConfigureAwait(false);
+            if (!listing.Ok) failure = listing.Code;
+            else
+            {
+                var stored = listing.Value!.Files.ToDictionary(f => f.Name, f => f.Sha256, StringComparer.OrdinalIgnoreCase);
+                foreach (var (name, file) in files)
+                    if (file.Sha256 is { } sha && (!stored.TryGetValue(name, out var hex) || hex != Convert.ToHexStringLower(sha))) { failure = "Unavailable"; break; }
+            }
+            if (failure is null)
+            {
+                var check = await client!.CallAsync("VerifyProject", w => w.WriteString("projectId", projectId.ToString("D")), null, ct).ConfigureAwait(false);
+                if (!check.Ok) failure = check.Code;
+                else if (check.Body.GetProperty("filesFailed").GetInt32() > 0) failure = "Unavailable";
+                else verified = check.Body.GetProperty("filesVerified").GetInt32();
+            }
+        }
+        if (failure is null) return new("Ok", new ImportOutcome(projectId, files.Count, verified));
+        // All or nothing for the user: remove the half-imported project (its name is the confirmation).
+        await client!.CallAsync("DeleteProject", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteString("confirmName", projectName); }, null, ct).ConfigureAwait(false);
+        return Fail<ImportOutcome>(failure);
+    });
+
+    /// <summary>
     /// Makes a revision from the file's history current again (nothing is re-encrypted or sent here). <c>Conflict</c>:
     /// the editor shows this file and someone else changed it since.
     /// </summary>
@@ -605,12 +680,16 @@ public sealed class EditorVaultController : IDisposable
     // A file read failure on disk, kept apart from pipe failures (IOException), which lock the session.
     private sealed class DiskReadException : Exception;
 
-    private async Task<VaultResult<Upload>> UploadFromDiskAsync(Guid projectId, Guid? fileId, DiskFile source, CancellationToken ct)
+    private async Task<VaultResult<Upload>> UploadFromDiskAsync(Guid projectId, Guid? fileId, DiskFile source, CancellationToken ct, Action<long>? progress = null)
     {
         byte[] sha256;
-        try { sha256 = await Task.Run(() => HashDisk(source), ct).ConfigureAwait(false); }
-        catch (DiskReadException) { return Fail<Upload>("FileUnreadable"); }
-        return await UploadAsync(projectId, fileId, source.Length, sha256, source.Open, ct).ConfigureAwait(false);
+        if (source.Sha256 is { Length: 32 } known) sha256 = known; // from the scan; the service checks the uploaded bytes against it
+        else
+        {
+            try { sha256 = await Task.Run(() => HashDisk(source), ct).ConfigureAwait(false); }
+            catch (DiskReadException) { return Fail<Upload>("FileUnreadable"); }
+        }
+        return await UploadAsync(projectId, fileId, source.Length, sha256, source.Open, ct, progress).ConfigureAwait(false);
     }
 
     // First pass over the file: its SHA-256, which the service checks against the bytes of the second pass.
@@ -649,7 +728,7 @@ public sealed class EditorVaultController : IDisposable
     }
 
     // BeginUpload and its parts. The service checks the SHA-256 at the last byte; a file changed meanwhile is SourceChanged.
-    private async Task<VaultResult<Upload>> UploadAsync(Guid projectId, Guid? fileId, long length, byte[] sha256, Func<Stream> open, CancellationToken ct)
+    private async Task<VaultResult<Upload>> UploadAsync(Guid projectId, Guid? fileId, long length, byte[] sha256, Func<Stream> open, CancellationToken ct, Action<long>? progress = null)
     {
         var hex = Convert.ToHexStringLower(sha256);
         var begun = await client!.CallAsync("BeginUpload", w =>
@@ -682,6 +761,7 @@ public sealed class EditorVaultController : IDisposable
                     return Fail<Upload>(sent.Code == "InvalidRequest" && at + n == length ? "SourceChanged" : sent.Code);
                 }
                 offset += n;
+                progress?.Invoke(n);
             }
             return new("Ok", new Upload(uploadId, length, hex));
         }
@@ -717,14 +797,19 @@ public sealed class EditorVaultController : IDisposable
     }
 
     // Uploads every file, then commits them as new files in one snapshot. Any failure discards all the uploads.
-    private async Task<VaultResult<List<FileSummary>>> AddCoreAsync(Guid projectId, IReadOnlyList<(string Name, DiskFile File)> files, CancellationToken ct)
+    private async Task<VaultResult<List<FileSummary>>> AddCoreAsync(Guid projectId, IReadOnlyList<(string Name, DiskFile File)> files, CancellationToken ct) =>
+        await AddCoreAsync(projectId, files, null, ct).ConfigureAwait(false);
+
+    // progress: bytes uploaded so far in this call.
+    private async Task<VaultResult<List<FileSummary>>> AddCoreAsync(Guid projectId, IReadOnlyList<(string Name, DiskFile File)> files, Action<long>? progress, CancellationToken ct)
     {
         var uploads = new List<Upload>();
+        long sent = 0;
         try
         {
             foreach (var (_, file) in files)
             {
-                var upload = await UploadFromDiskAsync(projectId, null, file, ct).ConfigureAwait(false);
+                var upload = await UploadFromDiskAsync(projectId, null, file, ct, n => progress?.Invoke(sent += n)).ConfigureAwait(false);
                 if (!upload.Ok) return Fail<List<FileSummary>>(upload.Code);
                 uploads.Add(upload.Value!);
             }

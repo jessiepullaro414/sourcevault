@@ -12,6 +12,7 @@ import { withDrafts, validQuery, validSettings } from './workbench.mjs';
 export const REQUEST_TYPE = 'sourcevault.vault.request';
 export const RESPONSE_TYPE = 'sourcevault.vault.response';
 export const LOCKED_TYPE = 'sourcevault.vault.locked';
+export const PROGRESS_TYPE = 'sourcevault.vault.progress';
 const MAX_DIRTY = 32;          // host status-message bounds
 const MAX_REVISIONS = 1000000;
 
@@ -49,14 +50,20 @@ export class BridgeClient {
       const { resolve, timer } = this.#pending.get(message.requestId);
       this.#pending.delete(message.requestId); clearTimeout(timer);
       resolve({ code: String(message.code), result: message.result ?? null });
+    } else if (message?.type === PROGRESS_TYPE && this.#pending.has(message.requestId)) {
+      // A long request (import, drop) is still working: restart its timeout and report bytes done.
+      const pending = this.#pending.get(message.requestId);
+      clearTimeout(pending.timer); pending.timer = pending.arm();
+      pending.onProgress?.(Number(message.done) || 0, Number(message.total) || 0);
     } else if (message?.type === LOCKED_TYPE) this.#onLocked(String(message.reason));
   }
-  request(operation, args = {}) {
+  /** `objects`: File objects passed to the host unread (dropped files). `onProgress(done, total)`: bytes uploaded. */
+  request(operation, args = {}, { objects = null, onProgress = null, timeoutMs = this.#timeoutMs } = {}) {
     const requestId = crypto.randomUUID();
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.#pending.delete(requestId); reject(new VaultError('Timeout')); }, this.#timeoutMs);
-      this.#pending.set(requestId, { resolve, timer });
-      this.#transport.send({ type: REQUEST_TYPE, requestId, operation, args });
+      const arm = () => setTimeout(() => { this.#pending.delete(requestId); reject(new VaultError('Timeout')); }, timeoutMs);
+      this.#pending.set(requestId, { resolve, timer: arm(), arm, onProgress });
+      this.#transport.send({ type: REQUEST_TYPE, requestId, operation, args }, objects);
     });
   }
   dispose() { this.#unsubscribe?.(); for (const { timer } of this.#pending.values()) clearTimeout(timer); this.#pending.clear(); }
@@ -81,8 +88,8 @@ export class VaultSession {
   #emit() { for (const listener of this.#listeners) listener(); }
   #setLocked(reason) { this.locked = true; this.lockReason = reason; }
 
-  async #call(operation, args) {
-    const { code, result } = await this.#bridge.request(operation, args);
+  async #call(operation, args, options) {
+    const { code, result } = await this.#bridge.request(operation, args, options);
     if (code === 'Ok') return result ?? {};
     if (code === 'Locked') this.#setLocked(this.locked ? this.lockReason : 'closed');
     throw new VaultError(code);
@@ -135,7 +142,7 @@ export class VaultSession {
   async deleteProject(projectId, confirmName) {
     const target = this.projects.find(p => p.projectId === projectId);
     if (!target) throw new VaultError('NotFound');
-    if (confirmName !== target.name) throw new VaultError('NameMismatch');
+    if (confirmName !== target.name) throw new VaultError('NameMismatch'); // an offline project can still be deleted
     const current = this.project?.projectId === projectId;
     if (current && this.dirtyIds.length) throw new VaultError('UnsavedChanges');
     const result = await this.#call('deleteProject', { projectId, name: confirmName });
@@ -150,6 +157,7 @@ export class VaultSession {
     if (this.project) for (const id of [...this.openIds]) await this.#call('closeDocument', { projectId: this.project.projectId, fileId: id });
     this.project = this.projects.find(p => p.projectId === projectId) ?? null;
     if (!this.project) throw new VaultError('NotFound');
+    if (this.project.available === false) { this.project = null; throw new VaultError('Unavailable'); } // offline: failed its integrity check
     this.files = new Map(); this.openIds = []; this.activeId = null;
     await this.#refreshFiles();
   }
@@ -355,6 +363,41 @@ export class VaultSession {
   }
 
   /**
+   * "Import a folder": the host shows its folder dialog and scans the folder with the importer's rules. Returns
+   * { folder, files, bytes, problem, skippedCount, skipped: [{ path, reason }] }, or null if the dialog was cancelled.
+   * Nothing is imported until importFolder.
+   */
+  async chooseImportFolder() {
+    try { return await this.#call('chooseImportFolder', {}, { timeoutMs: 10 * 60 * 1000 }); } // the dialog and a large scan take a while
+    catch (e) { if (e.code === 'Cancelled') return null; throw e; }
+  }
+
+  /**
+   * Imports the chosen folder as a new project named `name`, verified by the service; a failure removes the new
+   * project again. Returns { projectId, imported, verified } and opens the project (unless drafts are open).
+   */
+  async importFolder(name, onProgress) {
+    const result = await this.#call('importFolder', { name }, { onProgress, timeoutMs: 15 * 60 * 1000 });
+    await this.refreshProjects();
+    if (!this.dirtyIds.length) await this.selectProject(result.projectId);
+    return result;
+  }
+
+  async cancelImport() { await this.#call('cancelImport', {}); }
+
+  /**
+   * Adds files and folders dropped on the explorer under `folder` ('' for the root). The File objects go to the host
+   * unread. Returns { added, skipped, names, stopped } (stopped: the code that ended it part-way, or null).
+   */
+  async dropFiles(folder, files, onProgress) {
+    const result = await this.#call('dropFiles', { projectId: this.project.projectId, folder }, { objects: files, onProgress, timeoutMs: 15 * 60 * 1000 });
+    await this.#refreshFiles();
+    if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + result.added };
+    this.savedCount += result.added;
+    return result;
+  }
+
+  /**
    * Makes an older version current again (any kind of file; nothing is decrypted here). Refused with unsaved edits;
    * Conflict if someone else changed the file since the editor showed it.
    */
@@ -449,6 +492,9 @@ export class VaultSession {
 
   /** A finished build's output text. It can contain source, so it is shown only in the editor, like files. */
   async openBuildLog(buildNumber) { return (await this.#call('openBuildLog', { projectId: this.project.projectId, buildNumber })).text; }
+
+  /** Opens a finished build's output folder in Explorer (the host gets the folder from the service). */
+  async openBuildFolder(buildNumber) { await this.#call('openBuildFolder', { projectId: this.project.projectId, buildNumber }); }
 
   #forget(id) {
     this.files.delete(id);

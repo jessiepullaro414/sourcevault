@@ -15,6 +15,9 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="[1.0.4258.31]" />
     <ProjectReference Include="../SourceVault.Client/SourceVault.Client.csproj" />
+    <ProjectReference Include="../SourceVault.Storage/SourceVault.Storage.csproj" />
+    <!-- The importer's scan rules, shared as source so "Import a folder" and dropped folders pick exactly the files the importer would. -->
+    <Compile Include="../SourceVault.Import/ImportPlan.cs" Link="ImportPlan.cs" />
     <!-- dev/ is for development-only files, never shipped. (The demo vault, demo-host.mjs, is shipped: demo mode uses it.) -->
     <Content Include="../SourceVault.Editor.Web/**/*" Exclude="../SourceVault.Editor.Web/dev/**">
       <Link>assets/%(RecursiveDir)%(Filename)%(Extension)</Link>

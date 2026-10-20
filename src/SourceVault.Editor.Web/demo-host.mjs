@@ -22,6 +22,7 @@ const ARGS = {
   lock: [], unlock: [],
   fileInfo: ['projectId', 'fileId'], replaceFromDisk: ['projectId', 'fileId'], keepMine: ['projectId', 'fileId'], keepTheirs: ['projectId', 'fileId'],
   addFromDisk: ['projectId', 'folder'], revertFile: ['projectId', 'fileId', 'revisionId'],
+  chooseImportFolder: [], importFolder: ['name'], cancelImport: [], dropFiles: ['projectId', 'folder'],
 };
 const isQuery = q => typeof q === 'string' && q.length > 0 && q.length <= 200 && ![...q].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
 const MAX_TEXT_BYTES = 1024 * 1024; // the editor's text limit
@@ -69,6 +70,7 @@ export class DemoVaultHost {
                            // file: { name, text, kind, length, sha256, rev, history: [{ revisionId, rev, text, kind, length, sha256, savedAt, savedBy, action, name }] }
                            // text is null for binary content; sha256 is a promise of the hex digest
   #pending = new Map();    // `${projectId}/${fileId}` -> made-up content staged by a replacement that conflicted
+  #importPlan = null;      // "Import a folder": the made-up folder chosen, waiting for importFolder
   #madeUp = 0;
   actor = 'DEMO\\operator';
   #opened = new Map();     // `${projectId}/${fileId}` -> rev the editor's copy is based on
@@ -153,10 +155,11 @@ export class DemoVaultHost {
     if (this.locked) return reply('Locked');
     const project = 'projectId' in args ? this.#projects.get(args.projectId) : null;
     if ('projectId' in args && !project) return reply('NotFound');
+    if (project?.offline && operation !== 'deleteProject') return reply('Unavailable'); // like the service: offline projects can only be deleted
     const key = `${args.projectId}/${args.fileId}`;
     switch (operation) {
       case 'listProjects':
-        return reply('Ok', { projects: [...this.#projects].map(([projectId, p]) => ({ projectId, name: p.name, fileCount: p.files.size })) });
+        return reply('Ok', { projects: [...this.#projects].map(([projectId, p]) => ({ projectId, name: p.name, fileCount: p.offline ? 0 : p.files.size, available: !p.offline })) });
       case 'createProject': {
         if ([...this.#projects.values()].some(p => p.name.toLowerCase() === args.name.toLowerCase())) return reply('AlreadyExists');
         const projectId = crypto.randomUUID();
@@ -353,6 +356,35 @@ export class DemoVaultHost {
         matches.sort((a, b) => (a.name.toUpperCase() < b.name.toUpperCase() ? -1 : a.name.toUpperCase() > b.name.toUpperCase() ? 1 : 0) || a.line - b.line || a.column - b.column);
         return reply('Ok', { matches, truncated, filesSearched: project.files.size - skipped, filesSkipped: skipped });
       }
+      // "Import a folder" and dropped files: the real host reads them from disk; the demo makes them up.
+      case 'chooseImportFolder': {
+        this.#madeUp++;
+        const files = [['README.md', `# Imported demo folder ${this.#madeUp}\n\nMade-up files: nothing was read from this computer.\n`],
+          ['src/app.cpp', '#include <cstdio>\n\nint main() {\n    std::puts("made up");\n    return 0;\n}\n'], ['res/app.ico', this.#madeUpFile()]];
+        this.#importPlan = { folder: `demo-folder-${this.#madeUp}`, files };
+        const size = c => typeof c === 'string' ? bytes(c) : c.length;
+        return reply('Ok', { folder: this.#importPlan.folder, files: files.length, bytes: files.reduce((n, [, c]) => n + size(c), 0), problem: null,
+          skippedCount: 2, skipped: [{ path: '.git/', reason: 'excluded folder' }, { path: 'bin/', reason: 'excluded folder' }] });
+      }
+      case 'importFolder': {
+        const plan = this.#importPlan;
+        this.#importPlan = null;
+        if (!plan) return reply('NotFound');
+        if (args.name.length > 64 || args.name.trim() !== args.name) return reply('InvalidRequest');
+        if ([...this.#projects.values()].some(p => p.name.toLowerCase() === args.name.toLowerCase())) return reply('AlreadyExists');
+        const projectId = crypto.randomUUID();
+        this.#projects.set(projectId, { name: args.name, files: new Map(plan.files.map(([name, content]) => [crypto.randomUUID(), this.#newFile(name, content, 'imported')])), deleted: new Map() });
+        return reply('Ok', { projectId, imported: plan.files.length, verified: plan.files.length });
+      }
+      case 'cancelImport': this.#importPlan = null; return reply('Ok', {});
+      case 'dropFiles': {
+        const folder = args.folder;
+        if (typeof folder !== 'string' || (folder && (!isName(folder) || folder.startsWith('/') || folder.endsWith('/')))) return;
+        const name = `${folder ? folder + '/' : ''}dropped-demo-${++this.#madeUp}.bin`;
+        if ([...project.files.values()].some(f => f.name.toLowerCase() === name.toLowerCase())) return reply('AlreadyExists');
+        project.files.set(crypto.randomUUID(), this.#newFile(name, this.#madeUpFile(), 'created'));
+        return reply('Ok', { added: 1, skipped: 0, names: [name], stopped: null });
+      }
       case 'listFiles':
         return reply('Ok', { files: await Promise.all([...project.files].map(([fileId, f]) => this.#listed(fileId, f))) });
       case 'openDocument': {
@@ -389,6 +421,9 @@ export class DemoVaultHost {
     const set = new Set(names);
     return set.size === names.length && !names.some(n => n.split('/').slice(0, -1).some((_, i, parts) => set.has(parts.slice(0, i + 1).join('/'))));
   }
+  /** Simulates a project failing its integrity check at the service's start (it goes offline). */
+  takeOffline(projectId) { const project = this.#projects.get(projectId); if (!project) return false; project.offline = true; return true; }
+
   /** Someone else deletes a file (another editor). */
   externalDelete(projectId, fileId) {
     const project = this.#projects.get(projectId), file = project?.files.get(fileId);
@@ -434,6 +469,7 @@ export function installDemoPanel(demo, getActive) {
     ['Session expiry', () => { demo.simulateLock('expired'); return 'Simulated the 30-minute expiry.'; }],
     ['Next unlock fails', () => { demo.failNextUnlock = 'ServiceNotRunning'; return 'The next unlock reports the service as not running.'; }],
     ['Next build fails', () => { demo.buildFails = !demo.buildFails; return demo.buildFails ? 'Builds now fail (click again to undo).' : 'Builds succeed again.'; }],
+    ['A project fails its integrity check', () => { const id = demo.projectIdByName('Synthetic C# demo'); return id && demo.takeOffline(id) ? '"Synthetic C# demo" is offline. Switch project to see it; it can only be deleted.' : 'Already offline or deleted.'; }],
   ];
   const note = document.createElement('em');
   for (const [label, act] of actions) {

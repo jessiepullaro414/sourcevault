@@ -83,7 +83,7 @@ File names, sizes and contents are all inside the encrypted body. The readable h
 **Recipient and sender files** are UTF-8 JSON, at most 8 KiB, with no unknown or duplicate fields:
 - shape: `{"format": "sourcevault-recipient" | "sourcevault-sender", "version": 1, "computer": "<name>", "publicKey": "<base64 SubjectPublicKeyInfo>", "fingerprint": "<hex SHA-256 of that SubjectPublicKeyInfo>"}`;
 - the key must be RSA-2048, and the fingerprint must match the key;
-- fingerprints are shown as eight groups of eight hex digits.
+- people compare a check code: the first 96 bits of the fingerprint as six groups of four hex digits (`4F2A-91C0-77DE-0B13-AA42-9C5E`; was eight groups of eight until 2026-10-20). Software compares the full fingerprint.
 
 **Package file v1**, binary, integers little-endian:
 

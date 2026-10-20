@@ -8,6 +8,7 @@ using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using SourceVault.Client;
+using SourceVault.Import;
 
 namespace SourceVault.Editor.Host;
 
@@ -58,6 +59,7 @@ internal sealed class EditorWindow : Window
     private bool captureExcluded;
     private DateTime lastVaultActivity = DateTime.UtcNow;
     private int unsavedFiles; // from the renderer's status messages (a count only)
+    private ImportPlan? pendingImport; // "Import a folder": scanned, waiting for the name and a confirmation
     private bool closeConfirmed;
     private string? lockReasonOverride;
 
@@ -166,7 +168,10 @@ internal sealed class EditorWindow : Window
             core.Settings.IsPinchZoomEnabled = false;
             core.Settings.IsSwipeNavigationEnabled = false;
             core.Settings.IsReputationCheckingRequired = false; // SmartScreen would send visited URLs to Microsoft
-            webView.AllowExternalDrop = false;
+            // Drops reach only the page's explorer drop zone (shell.mjs); everything else is refused there, and a dropped
+            // file can never navigate (NavigationStarting allows only the app). The page passes dropped files to this host
+            // as WebView2 objects, without reading them; the host reads them.
+            webView.AllowExternalDrop = mode != EditorMode.SyntheticPreview;
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
@@ -242,7 +247,10 @@ internal sealed class EditorWindow : Window
         string json = e.WebMessageAsJson;
         if (vault is not null && BridgePolicy.TryParseVaultRequest(json, out var request))
         {
-            _ = HandleVaultRequestAsync(request);
+            var dropped = DroppedPaths(e);
+            // Dropped items only with dropFiles, and dropFiles only with dropped items; anything else is ignored.
+            if (dropped is { Count: 0 } == (request.Operation == VaultOperation.DropFiles) || dropped is null) return;
+            _ = HandleVaultRequestAsync(request, dropped);
             return;
         }
         if (!PreviewPolicy.TryParseMessage(json, out var message)) return;
@@ -270,7 +278,22 @@ internal sealed class EditorWindow : Window
         }
     }
 
-    private async Task HandleVaultRequestAsync(VaultBridgeRequest request)
+    // The paths of files and folders dropped with this message (empty when none); null when anything else came with it.
+    private static List<string>? DroppedPaths(CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        var objects = e.AdditionalObjects;
+        if (objects is null || objects.Count == 0) return [];
+        if (objects.Count > BridgePolicy.MaxDroppedItems) return null;
+        var paths = new List<string>();
+        for (int i = 0; i < objects.Count; i++)
+        {
+            if (objects[i] is not CoreWebView2File file || !Path.IsPathFullyQualified(file.Path)) return null;
+            paths.Add(file.Path);
+        }
+        return paths;
+    }
+
+    private async Task HandleVaultRequestAsync(VaultBridgeRequest request, List<string> dropped)
     {
         var controller = vault!;
         lastVaultActivity = DateTime.UtcNow;
@@ -282,7 +305,7 @@ internal sealed class EditorWindow : Window
                 VaultOperation.ListProjects => Respond(request, await controller.ListProjectsAsync(), (w, projects) =>
                 {
                     w.WriteStartArray("projects");
-                    foreach (var p in projects) { w.WriteStartObject(); w.WriteString("projectId", p.ProjectId.ToString("D")); w.WriteString("name", p.Name); w.WriteNumber("fileCount", p.FileCount); w.WriteEndObject(); }
+                    foreach (var p in projects) { w.WriteStartObject(); w.WriteString("projectId", p.ProjectId.ToString("D")); w.WriteString("name", p.Name); w.WriteNumber("fileCount", p.FileCount); w.WriteBoolean("available", p.Available); w.WriteEndObject(); }
                     w.WriteEndArray();
                 }),
                 VaultOperation.CreateProject => Respond(request, await controller.CreateProjectAsync(request.Name!), (w, p) =>
@@ -387,6 +410,11 @@ internal sealed class EditorWindow : Window
                         { w.WriteStartArray("files"); foreach (var f in added) { w.WriteStartObject(); WriteFile(w, f); w.WriteEndObject(); } w.WriteEndArray(); })
                     : BridgePolicy.BuildResponse(request.RequestId, "Cancelled", null),
                 VaultOperation.RevertFile => Respond(request, await controller.RevertFileAsync(request.ProjectId, request.FileId, request.RevisionId), (w, _) => { }),
+                VaultOperation.OpenBuildFolder => OpenBuildFolder(request, await controller.GetBuildStatusAsync(request.ProjectId, request.BuildNumber)),
+                VaultOperation.ChooseImportFolder => await ChooseImportFolderAsync(request),
+                VaultOperation.ImportFolder => await ImportFolderAsync(request, controller),
+                VaultOperation.CancelImport => CancelImport(request),
+                VaultOperation.DropFiles => await DropFilesAsync(request, dropped, controller),
                 // Display preferences only (EditorSettings); they never contain names or text and need no vault session.
                 VaultOperation.GetSettings => BridgePolicy.BuildResponse(request.RequestId, "Ok", w => { w.WriteStartObject("settings"); EditorSettings.Load(EditorSettings.FilePath).Write(w); w.WriteEndObject(); }),
                 VaultOperation.SaveSettings => SaveSettings(request),
@@ -401,6 +429,127 @@ internal sealed class EditorWindow : Window
             response = BridgePolicy.BuildResponse(request.RequestId, "InternalError", null); // never reflect details
         }
         if (!closing) webView.CoreWebView2?.PostWebMessageAsJson(response);
+    }
+
+    // ---- import a folder, and dropped files (owner request 2026-10-20) -----------------------------------------------
+
+    /// <summary>
+    /// Shows the host's folder dialog and scans the folder with the importer's rules (each file is read once to hash it).
+    /// The scan stays in the host; the page gets the folder's name, counts and the skipped names with reasons.
+    /// </summary>
+    private async Task<string> ChooseImportFolderAsync(VaultBridgeRequest request)
+    {
+        pendingImport = null;
+        var dialog = new Microsoft.Win32.OpenFolderDialog { Title = "Import a folder as a new project", Multiselect = false, AddToRecent = false };
+        if (dialog.ShowDialog(this) != true) return BridgePolicy.BuildResponse(request.RequestId, "Cancelled", null);
+        ImportPlan plan;
+        try { plan = await Task.Run(() => ImportPlan.Scan(dialog.FolderName)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return BridgePolicy.BuildResponse(request.RequestId, "FileUnreadable", null); }
+        pendingImport = plan;
+        return BridgePolicy.BuildResponse(request.RequestId, "Ok", w =>
+        {
+            w.WriteString("folder", Path.GetFileName(Path.TrimEndingDirectorySeparator(plan.Root)));
+            w.WriteNumber("files", plan.Files.Count); w.WriteNumber("bytes", plan.TotalBytes);
+            if (plan.LimitProblem is { } problem) w.WriteString("problem", problem); else w.WriteNull("problem");
+            w.WriteNumber("skippedCount", plan.Skipped.Count);
+            w.WriteStartArray("skipped");
+            foreach (var s in plan.Skipped.Take(200)) { w.WriteStartObject(); w.WriteString("path", s.Path); w.WriteString("reason", s.Reason); w.WriteEndObject(); }
+            w.WriteEndArray();
+        });
+    }
+
+    private async Task<string> ImportFolderAsync(VaultBridgeRequest request, EditorVaultController controller)
+    {
+        var plan = pendingImport;
+        pendingImport = null;
+        if (plan is null) return BridgePolicy.BuildResponse(request.RequestId, "NotFound", null);
+        if (plan.LimitProblem is not null || plan.Files.Count == 0) return BridgePolicy.BuildResponse(request.RequestId, "LimitExceeded", null);
+        var files = plan.Files.Select(f => (f.Path, new DiskFile(Path.GetFileName(f.FullPath), f.Length, Opener(f.FullPath), f.Sha256))).ToList();
+        var result = await controller.ImportProjectAsync(request.Name!, files, Progress(request.RequestId, plan.TotalBytes));
+        return Respond(request, result, (w, r) => { w.WriteString("projectId", r.ProjectId.ToString("D")); w.WriteNumber("imported", r.Imported); w.WriteNumber("verified", r.Verified); });
+    }
+
+    private string CancelImport(VaultBridgeRequest request)
+    {
+        pendingImport = null;
+        return BridgePolicy.BuildResponse(request.RequestId, "Ok", _ => { });
+    }
+
+    /// <summary>
+    /// Adds dropped files and folders under <c>folder</c>. A dropped folder keeps its name and is scanned with the
+    /// importer's rules (links never followed; .git, bin, obj and the like skipped). Nothing is replaced: a taken name
+    /// stops the add, keeping what was already committed.
+    /// </summary>
+    private async Task<string> DropFilesAsync(VaultBridgeRequest request, List<string> paths, EditorVaultController controller)
+    {
+        var prefix = request.Folder!.Length == 0 ? "" : request.Folder + "/";
+        List<(string Name, DiskFile File)> files;
+        int skipped;
+        try
+        {
+            (files, skipped) = await Task.Run(() =>
+            {
+                var found = new List<(string, DiskFile)>();
+                int left = 0;
+                foreach (var path in paths)
+                {
+                    var leaf = Path.GetFileName(Path.TrimEndingDirectorySeparator(path));
+                    var attributes = File.GetAttributes(path);
+                    if ((attributes & FileAttributes.ReparsePoint) != 0) { left++; continue; } // links are never followed
+                    if ((attributes & FileAttributes.Directory) != 0)
+                    {
+                        var plan = ImportPlan.Scan(path);
+                        left += plan.Skipped.Count;
+                        found.AddRange(plan.Files.Select(f => (prefix + leaf + "/" + f.Path, new DiskFile(Path.GetFileName(f.FullPath), f.Length, Opener(f.FullPath), f.Sha256))));
+                    }
+                    else if (SourceVault.Storage.RevisionStore.IsValidLogicalName(prefix + leaf))
+                        found.Add((prefix + leaf, new DiskFile(leaf, new FileInfo(path).Length, Opener(path))));
+                    else left++;
+                }
+                return (found, left);
+            });
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return BridgePolicy.BuildResponse(request.RequestId, "FileUnreadable", null); }
+        if (files.Count == 0) return BridgePolicy.BuildResponse(request.RequestId, "NothingToAdd", null);
+        var result = await controller.AddManyAsync(request.ProjectId, files, Progress(request.RequestId, files.Sum(f => f.File.Length)));
+        return Respond(request, result, (w, r) =>
+        {
+            w.WriteNumber("added", r.Added.Count); w.WriteNumber("skipped", skipped);
+            w.WriteStartArray("names"); foreach (var f in r.Added.Take(20)) w.WriteStringValue(f.Name); w.WriteEndArray();
+            if (r.Stopped is { } stopped) w.WriteString("stopped", stopped); else w.WriteNull("stopped");
+        });
+    }
+
+    private static Func<Stream> Opener(string path) => () => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1, FileOptions.SequentialScan);
+
+    // Upload progress for the page, at most four times a second (bytes only, never names or content).
+    private Action<long> Progress(Guid requestId, long total)
+    {
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        long last = -1000;
+        return done =>
+        {
+            long now = clock.ElapsedMilliseconds;
+            if (now - Interlocked.Read(ref last) < 250 && done < total) return;
+            Interlocked.Exchange(ref last, now);
+            Dispatcher.InvokeAsync(() => { if (!closing) webView.CoreWebView2?.PostWebMessageAsJson(BridgePolicy.BuildProgress(requestId, done, total)); });
+        };
+    }
+
+    /// <summary>
+    /// Opens a finished build's output folder in Explorer. The folder comes from the service's build record, never from
+    /// the renderer; output files are ordinary plaintext files by design, so this shows nothing new.
+    /// </summary>
+    private static string OpenBuildFolder(VaultBridgeRequest request, VaultResult<BuildSummary> status)
+    {
+        if (!status.Ok) return BridgePolicy.BuildResponse(request.RequestId, status.Code, null);
+        var folder = status.Value!.ArtifactFolder;
+        if (folder is null || !Path.IsPathFullyQualified(folder) || folder.StartsWith(@"\\", StringComparison.Ordinal) || folder.Contains('"') || !Directory.Exists(folder))
+            return BridgePolicy.BuildResponse(request.RequestId, "NotFound", null);
+        var explorer = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(explorer, $"\"{folder}\"") { UseShellExecute = false })?.Dispose(); }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or IOException) { return BridgePolicy.BuildResponse(request.RequestId, "Unavailable", null); }
+        return BridgePolicy.BuildResponse(request.RequestId, "Ok", _ => { });
     }
 
     // A file as the renderer sees it: no revision id (it stays in the host).

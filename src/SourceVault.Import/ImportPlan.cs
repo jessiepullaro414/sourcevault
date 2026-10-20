@@ -1,3 +1,4 @@
+using System.IO; // also compiled into the WPF editor host, which has no implicit System.IO
 using System.Security.Cryptography;
 using SourceVault.Storage;
 

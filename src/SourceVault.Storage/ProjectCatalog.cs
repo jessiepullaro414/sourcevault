@@ -6,6 +6,8 @@ using System.Text.Json;
 namespace SourceVault.Storage;
 
 public sealed record ProjectInfo(Guid ProjectId, string Name, StoreSnapshot Snapshot);
+/// <summary>A vault check: the projects that authenticated, and those that did not (offline until an administrator looks).</summary>
+public sealed record VaultCheck(IReadOnlyList<ProjectInfo> Projects, IReadOnlyList<(Guid ProjectId, string Name)> Offline);
 
 /// <summary>A project or file name is already taken (case-insensitive). Carries no name.</summary>
 public sealed class NameExistsException() : Exception("Name already exists.");
@@ -92,8 +94,21 @@ public sealed class ProjectCatalog
     /// </summary>
     public IReadOnlyList<ProjectInfo> OpenAndVerify()
     {
+        var check = Verify();
+        if (check.Offline.Count > 0) throw new VaultCatalogException(CatalogFailure.Project);
+        return check.Projects;
+    }
+
+    /// <summary>
+    /// Like <see cref="OpenAndVerify"/>, but a project that does not authenticate is returned in
+    /// <see cref="VaultCheck.Offline"/> instead of failing the whole vault (owner decision 2026-10-20): the service
+    /// starts without it, and it stays unusable until an administrator has looked. An unexpected entry in the vault
+    /// root or a damaged index still fails closed, because then no project can be trusted.
+    /// </summary>
+    public VaultCheck Verify()
+    {
         var state = ReadIndex(); // null: fresh vault
-        if (state is null) return [];
+        if (state is null) return new([], []);
         var expected = state.Projects.Select(e => e.ProjectId.ToString("D")).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var tombstoned = state.Deleted.Select(id => id.ToString("D")).ToHashSet(StringComparer.OrdinalIgnoreCase);
         string[] present;
@@ -112,12 +127,13 @@ public sealed class ProjectCatalog
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new VaultCatalogException(CatalogFailure.Layout); }
         if (!logs.All(p => expected.Contains(p) || tombstoned.Contains(p))) throw new VaultCatalogException(CatalogFailure.Layout);
         var result = new List<ProjectInfo>();
+        var offline = new List<(Guid, string)>();
         foreach (var (id, name) in state.Projects)
         {
             try { result.Add(new(id, name, Store(id).List())); }
-            catch (Exception e) when (e is not OutOfMemoryException) { throw new VaultCatalogException(CatalogFailure.Project); }
+            catch (Exception e) when (e is not OutOfMemoryException) { offline.Add((id, name)); }
         }
-        return result;
+        return new(result, offline);
     }
 
     /// <summary>
