@@ -46,6 +46,39 @@ const LOCK_SCREENS = {
   closed: ['DISCONNECTED', 'The vault connection closed', KEPT],
 };
 const ACTIONS = { created: 'Created', edited: 'Saved', imported: 'Imported', restored: 'Restored', reverted: 'Reverted', 'before-history': 'Version when history began' };
+// Build steps (owner request 2026-10-20): the administrator's build.json runs build.cmd (Windows targets) or build.sh
+// (Linux targets) from the project's top folder; these files say what to build. They are ordinary project files:
+// encrypted, versioned, and edited and saved like any other. Templates are only a starting point.
+const BUILD_SCRIPTS = { windows: 'build.cmd', linux: 'build.sh' };
+const CMD_HEADER = ['@echo off', 'rem What the Windows build runs: in the Windows build container, in this project\'s folder, with no network.',
+  'rem Whatever this writes to C:\\sourcevault\\out is published (source maps and .pdb files are left out).',
+  'rem Builds use the saved files: save this file before building.'];
+const SH_HEADER = ['#!/bin/sh', '# What the Linux build runs: in the Linux build container, in this project\'s folder, with no network.',
+  '# Whatever this writes to /sourcevault/out is published (source maps and .pdb files are left out).',
+  '# Builds use the saved files: save this file before building.', 'set -eu'];
+const cmd = lines => [...CMD_HEADER, ...lines].join('\r\n') + '\r\n';
+const sh = lines => [...SH_HEADER, ...lines].join('\n') + '\n';
+const BUILD_TEMPLATES = {
+  windows: [
+    { label: '.NET (dotnet publish)', text: cmd(['rem If this folder has more than one project or solution, name one: dotnet publish MyApp.csproj ...',
+      'dotnet publish -c Release -o C:\\sourcevault\\out --nologo', 'if errorlevel 1 exit /b 1']) },
+    { label: 'C++ with MSBuild (needs an image with Visual Studio Build Tools)', text: cmd(['rem The standard SourceVault build image has only the .NET SDK; C++ needs your own image with Build Tools.',
+      'msbuild YourSolution.sln -p:Configuration=Release -p:Platform=x64 -p:OutDir=C:\\sourcevault\\out\\ -nologo', 'if errorlevel 1 exit /b 1']) },
+    { label: 'CMake (needs an image with CMake and a compiler)', text: cmd(['rem The standard SourceVault build image has only the .NET SDK; CMake needs your own image.',
+      'rem _build is inside the project folder, so it is emptied with it after the build.',
+      'cmake -S . -B _build -DCMAKE_BUILD_TYPE=Release || exit /b 1', 'cmake --build _build --config Release || exit /b 1',
+      'cmake --install _build --config Release --prefix C:\\sourcevault\\out || exit /b 1']) },
+    { label: 'Empty: write your own steps', text: cmd(['rem Your build commands go here. Add  || exit /b 1  after each one so a failed step fails the build.']) },
+  ],
+  linux: [
+    { label: '.NET (dotnet publish)', text: sh(['# If this folder has more than one project or solution, name one: dotnet publish MyApp.csproj ...',
+      'dotnet publish -c Release -o /sourcevault/out --nologo']) },
+    { label: 'CMake (needs an image with CMake and a compiler)', text: sh(['# The standard SourceVault build image has only the .NET SDK; CMake needs your own image.',
+      '# _build is inside the project folder, so it is emptied with it after the build.',
+      'cmake -S . -B _build -DCMAKE_BUILD_TYPE=Release', 'cmake --build _build', 'cmake --install _build --prefix /sourcevault/out']) },
+    { label: 'Empty: write your own steps', text: sh(['# Your build commands go here. set -eu (above) stops the build at the first failing command.']) },
+  ],
+};
 const STATE_TEXT = { queued: 'queued', running: 'running', succeeded: 'succeeded', failed: 'failed', timedOut: 'timed out', rejected: 'refused', unavailable: 'could not run' };
 const BUILD_REASONS = {
   ContainerNotRunning: 'the build container is not running', ContainerNotFound: 'the build container does not exist',
@@ -609,10 +642,11 @@ export async function startVault(transport, metadata, onSession) {
   function openBuilds() {
     act(async () => {
       closeHistory(); closeCompare(); showDeleted = false; merging = null;
-      let targets = [], note = null;
-      try { targets = await session.listBuildTargets(); }
+      let details = [], note = null;
+      try { details = await session.listBuildTargetDetails(); }
       catch (e) { if (e?.code === 'Unavailable') note = 'Builds are not set up on this computer, or the build service is not running. Ask your administrator.'; else throw e; }
-      buildsView = { targets, note, builds: targets.length ? await session.listBuilds() : [], selected: null, logText: null };
+      const targets = details.map(t => t.name), platforms = new Map(details.map(t => [t.name, t.platform]));
+      buildsView = { targets, platforms, note, builds: targets.length ? await session.listBuilds() : [], selected: null, logText: null, steps: null };
       pollBuilds();
     }, () => renderBuilds());
   }
@@ -659,6 +693,11 @@ export async function startVault(transport, metadata, onSession) {
       select.replaceChildren(...buildsView.targets.map(t => { const o = document.createElement('option'); o.value = o.textContent = t; return o; }));
     }
     select.disabled = $('build-start').disabled = busy || !buildsView.targets.length;
+    const script = scriptFor(select.value);
+    $('build-steps').disabled = busy || !buildsView.targets.length || !script;
+    $('build-steps').title = script ? `Open or create ${script}: what the ${select.value} build runs`
+      : 'This build service does not say which platform the target uses; open build.cmd (Windows) or build.sh (Linux) from the file list.';
+    renderBuildSteps();
     const list = $('builds-list'); list.replaceChildren();
     if (!buildsView.builds.length) { const empty = document.createElement('li'); empty.className = 'project-empty'; empty.textContent = buildsView.targets.length ? 'No builds yet.' : ''; list.append(empty); }
     for (const build of buildsView.builds) {
@@ -691,11 +730,71 @@ export async function startVault(transport, metadata, onSession) {
       if (selected.logTruncated) line('Log', 'only the end of the output was kept');
     } else summary.textContent = buildsView.builds.length ? 'Choose a build to see its result and output.' : '';
   }
+  // ---- build steps: the target's build.cmd or build.sh, opened, or created from a template ------------------------
+  function scriptFor(target) { return BUILD_SCRIPTS[buildsView?.platforms?.get(target)] ?? null; }
+  // The script in the vault (saved at least once): the top folder only, exact case on Linux.
+  function savedScript(name) {
+    const windows = name.endsWith('.cmd');
+    return [...session.files.values()].find(f => !f.deleted && !f.pendingCreate && (windows ? f.path.toLowerCase() === name : f.path === name));
+  }
+  function showBuildSteps(target, missing) {
+    const platform = buildsView.platforms.get(target), script = BUILD_SCRIPTS[platform];
+    buildsView.steps = { target, platform, script, missing, template: 0 };
+    renderBuilds();
+    $('build-steps-template').focus();
+  }
+  function renderBuildSteps() {
+    const steps = buildsView?.steps, panel = $('build-steps-panel');
+    panel.hidden = !steps;
+    if (!steps) return;
+    const templates = BUILD_TEMPLATES[steps.platform];
+    $('build-steps-text').textContent = steps.missing
+      ? `This project has no ${steps.script} in its top folder, so the ${steps.target} build has nothing to run and will fail. Create it from a template, then edit and save it.`
+      : `The ${steps.target} build runs ${steps.script} from the project's top folder. Create it from a template, then edit and save it like any file.`;
+    const select = $('build-steps-template');
+    if (select.dataset.platform !== steps.platform) {
+      select.replaceChildren(...templates.map((t, i) => { const o = document.createElement('option'); o.value = String(i); o.textContent = t.label; return o; }));
+      select.dataset.platform = steps.platform;
+    }
+    select.value = String(steps.template);
+    $('build-steps-preview').textContent = templates[steps.template].text.replace(/\r\n/g, '\n');
+    $('build-steps-create').textContent = `Create ${steps.script}`;
+    $('build-steps-anyway').hidden = !steps.missing;
+    for (const id of ['build-steps-template', 'build-steps-create', 'build-steps-anyway', 'build-steps-cancel']) $(id).disabled = busy;
+  }
+  $('build-target').onchange = () => { if (buildsView) { buildsView.steps = null; renderBuilds(); } };
+  $('build-steps').onclick = () => {
+    const target = $('build-target').value, script = scriptFor(target);
+    if (!target || !script) return;
+    const existing = savedScript(script) ?? [...session.files.values()].find(f => f.path === script && f.pendingCreate);
+    if (existing) { announce(`Opened ${existing.path}: what the ${target} build runs. Save your changes before building.`); openFile(existing.id); return; }
+    showBuildSteps(target, false);
+  };
+  $('build-steps-template').onchange = () => { if (buildsView?.steps) { buildsView.steps.template = Number($('build-steps-template').value); renderBuildSteps(); } };
+  $('build-steps-cancel').onclick = () => { if (buildsView) { buildsView.steps = null; renderBuilds(); } };
+  $('build-steps-anyway').onclick = () => { const steps = buildsView?.steps; if (steps) { buildsView.steps = null; startBuild(steps.target); } };
+  $('build-steps-panel').onsubmit = event => {
+    event.preventDefault();
+    const steps = buildsView?.steps;
+    if (!steps) return;
+    const { script, target } = steps, text = BUILD_TEMPLATES[steps.platform][steps.template].text;
+    act(async () => {
+      await session.createFile(script, text);
+      closeBuilds();
+      return `Created ${script} in the vault from the template. Edit it, save it, then build on ${target}.`;
+    });
+  };
+
   $('builds').onclick = openBuilds;
   $('builds-close').onclick = () => { closeBuilds(); render(); };
   $('build-start').onclick = () => {
     const target = $('build-target').value;
     if (!target || !buildsView) return;
+    const script = scriptFor(target);
+    if (script && !savedScript(script)) { showBuildSteps(target, true); return; } // it would fail: offer to create it
+    startBuild(target);
+  };
+  function startBuild(target) {
     act(async () => {
       const number = await session.requestBuild(target);
       buildsView.builds = await session.listBuilds();
@@ -703,7 +802,7 @@ export async function startVault(transport, metadata, onSession) {
       pollBuilds();
       return `Build #${number} queued on ${target}. It uses the saved files${session.dirtyIds.length ? '; your unsaved edits are not included' : ''}.`;
     });
-  };
+  }
 
   // ---- deleted files ---------------------------------------------------------------------------------------------
   function renderDeleted() {

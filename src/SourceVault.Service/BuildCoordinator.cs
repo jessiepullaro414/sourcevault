@@ -27,24 +27,24 @@ internal sealed class BuildCoordinator(ProjectCatalog catalog, IBuildService ser
     private readonly ConcurrentDictionary<(Guid Project, int Number), BuildRecord> active = new();
     private readonly ConcurrentDictionary<string, SemaphoreSlim> slots = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<Guid, object> numbering = new();
-    private (DateTimeOffset At, IReadOnlyList<string> Names)? targets;
+    private (DateTimeOffset At, IReadOnlyList<BuildTargetInfo> Targets)? targets;
 
     /// <summary>Raised when a build finishes (tests).</summary>
     internal event Action<Guid, BuildRecord>? Finished;
 
-    internal IReadOnlyList<string> Targets()
+    internal IReadOnlyList<BuildTargetInfo> Targets()
     {
         var cached = targets;
-        if (cached is { } c && time.GetUtcNow() - c.At < TimeSpan.FromSeconds(30)) return c.Names;
-        var names = service.TargetsAsync(CancellationToken.None).GetAwaiter().GetResult();
-        targets = (time.GetUtcNow(), names);
-        return names;
+        if (cached is { } c && time.GetUtcNow() - c.At < TimeSpan.FromSeconds(30)) return c.Targets;
+        var list = service.TargetsAsync(CancellationToken.None).GetAwaiter().GetResult();
+        targets = (time.GetUtcNow(), list);
+        return list;
     }
 
     /// <summary>Queues a build. Throws KeyNotFoundException for an unknown target, InvalidOperationException when the queue is full.</summary>
     internal int Request(Guid projectId, string target, string? actor)
     {
-        var name = Targets().FirstOrDefault(t => t.Equals(target, StringComparison.OrdinalIgnoreCase)) ?? throw new KeyNotFoundException();
+        var name = Targets().FirstOrDefault(t => t.Name.Equals(target, StringComparison.OrdinalIgnoreCase))?.Name ?? throw new KeyNotFoundException();
         if (active.Values.Count(r => r.Target.Equals(name, StringComparison.OrdinalIgnoreCase)) > MaxWaiting) throw new InvalidOperationException("Queue full.");
         BuildRecord record;
         lock (numbering.GetOrAdd(projectId, _ => new object()))

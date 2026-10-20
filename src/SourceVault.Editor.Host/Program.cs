@@ -360,7 +360,10 @@ internal sealed class EditorWindow : Window
                 VaultOperation.SaveMerged => Respond(request, await controller.SaveMergedAsync(request.ProjectId, request.FileId, request.Text!, request.RevisionId), (w, f) =>
                     w.WriteNumber("byteLength", f.ByteLength)),
                 VaultOperation.ListBuildTargets => Respond(request, await controller.ListBuildTargetsAsync(), (w, targets) =>
-                    { w.WriteStartArray("targets"); foreach (var t in targets) w.WriteStringValue(t); w.WriteEndArray(); }),
+                {
+                    w.WriteStartArray("targets"); foreach (var t in targets) w.WriteStringValue(t.Name); w.WriteEndArray();
+                    w.WriteStartArray("platforms"); foreach (var t in targets) w.WriteStringValue(t.Platform); w.WriteEndArray();
+                }),
                 VaultOperation.RequestBuild => Respond(request, await controller.RequestBuildAsync(request.ProjectId, request.Name!), (w, number) =>
                     w.WriteNumber("buildNumber", number)),
                 VaultOperation.ListBuilds => Respond(request, await controller.ListBuildsAsync(request.ProjectId), (w, builds) =>

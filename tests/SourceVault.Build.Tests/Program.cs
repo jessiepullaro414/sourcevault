@@ -332,7 +332,7 @@ Test("channel: targets and a whole build cross the pipe; bad names and unknown t
         }
     });
     var client = new BuildChannel.Client(async ct => { var p = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous); await p.ConnectAsync(5000, ct); return p; });
-    Assert(Run(client.TargetsAsync(default)).SequenceEqual(["linux"]), "targets");
+    Assert(Run(client.TargetsAsync(default)).SequenceEqual([new BuildTargetInfo("linux", "linux")]), "targets, each with its platform");
     var project = Guid.NewGuid();
     var reply = Run(client.RunAsync("LINUX", project, 3, new InMemoryBuildSource(Source()), default));
     Assert(reply.State == "Succeeded" && reply.ArtifactFiles == 1 && Encoding.UTF8.GetString(reply.Log) == "ok\n", "build reply");

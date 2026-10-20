@@ -227,6 +227,17 @@ test('builds: targets, queue a build, it finishes with a log and an output folde
   await rejectsWith(session.listBuildTargets(), 'Unavailable');
 });
 
+test('build targets carry their platform, so the editor knows which script each runs; an older service gives none', async () => {
+  const { host, session } = await opened();
+  assert.deepEqual(await session.listBuildTargetDetails(), [{ name: 'linux', platform: 'linux' }, { name: 'windows', platform: 'windows' }]);
+  const { send, subscribe } = host.transport; // a vault service from before platforms[]: names only
+  const older = new VaultSession({ send, subscribe: handler => subscribe(m => { if (m?.result) delete m.result.platforms; handler(m); }) }, { timeoutMs: 500 });
+  await older.unlock();
+  assert.deepEqual(await older.listBuildTargetDetails(), [{ name: 'linux', platform: null }, { name: 'windows', platform: null }]);
+  assert.deepEqual(await older.listBuildTargets(), ['linux', 'windows']);
+  session.dispose(); older.dispose();
+});
+
 test('user lock keeps drafts hidden; unlock reports files changed meanwhile as conflicts', async () => {
   const { host, session, projectId, byName } = await opened();
   const main = byName('main.ts');

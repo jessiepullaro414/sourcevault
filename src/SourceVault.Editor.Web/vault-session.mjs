@@ -573,7 +573,12 @@ export class VaultSession {
   }
 
   // ---- builds: names of the administrator's build targets, queued builds of the saved project, and their logs -------
-  async listBuildTargets() { return (await this.#call('listBuildTargets', {})).targets ?? []; }
+  async listBuildTargets() { return (await this.listBuildTargetDetails()).map(t => t.name); }
+  /** The administrator's build targets in order, each with its platform: 'windows', 'linux', or null (an older service). */
+  async listBuildTargetDetails() {
+    const body = await this.#call('listBuildTargets', {});
+    return (body.targets ?? []).map((name, i) => ({ name, platform: body.platforms?.[i] || null }));
+  }
 
   /** Queues a build of the project's saved files (unsaved edits are not included). Returns the build number. */
   async requestBuild(target) {

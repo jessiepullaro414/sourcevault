@@ -424,7 +424,17 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
 
 **Builds** in the Explorer opens the build view (only if your administrator set up builds).
 
-- Pick a **target** and click **Build saved files**. The build uses the files **as saved in the vault**; unsaved edits are not included. One build per target runs at a time; up to 4 more wait.
+- **What a build runs:** the project's own build script, in its top folder. A **Windows** target runs `build.cmd` and a **Linux** target runs `build.sh`. Put your build commands there, and have them write the output to `C:\sourcevault\out` (Windows) or `/sourcevault/out` (Linux).
+- **Build steps:** pick a target, then click **Build steps**.
+  - **If the script exists,** it opens in the editor.
+  - **If it doesn't,** you can create it from a template: .NET, C++ with MSBuild (Windows), CMake, or empty. Then edit it and **save** it like any file.
+
+  The script is encrypted and versioned like the rest of the project, so build changes show in its history.
+- **The standard build images have only the .NET SDK.** The C++ and CMake templates need build images that include those tools.
+- **Building:** pick a **target** and click **Build saved files**.
+  - If the project has no script for that target, the editor says so first. You can create it there, or build anyway.
+  - The build uses the files **as saved in the vault**; unsaved edits are not included.
+  - One build per target runs at a time; up to 4 more wait.
 - The list shows each build with when, who and how long. It refreshes while a build is queued or running.
 - Click a build to see its result, its **output folder** on this PC (*Output (N files)*, with **Open folder** to show it in Explorer), and its **log**. The log is stored encrypted in the vault and shown read-only here, like files; copying from it stays inside the editor.
 - **Output files are ordinary, unencrypted files** in that folder, readable by every operator. That is their purpose.

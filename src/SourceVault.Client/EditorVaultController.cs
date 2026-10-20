@@ -8,6 +8,8 @@ public enum LockReason { User, Closed, Expired }
 
 /// <summary>A project. Not <c>Available</c>: it failed its integrity check and is offline (it can only be deleted).</summary>
 public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount, bool Available = true);
+/// <summary>A build target: its name and platform ("windows", "linux", or "" from an older service).</summary>
+public sealed record BuildTargetSummary(string Name, string Platform);
 /// <summary>A live file. <c>Kind</c> is "text" or "binary"; <c>Sha256</c> (hex) is null for a legacy text record.</summary>
 public sealed record FileSummary(Guid FileId, string Name, Guid RevisionId, long ByteLength, string Kind = "text", string? Sha256 = null)
 {
@@ -330,10 +332,14 @@ public sealed class EditorVaultController : IDisposable
     });
 
     // ---- builds ---------------------------------------------------------------------------------------------------
-    public Task<VaultResult<IReadOnlyList<string>>> ListBuildTargetsAsync(CancellationToken ct = default) => Guarded(async () =>
+    public Task<VaultResult<IReadOnlyList<BuildTargetSummary>>> ListBuildTargetsAsync(CancellationToken ct = default) => Guarded(async () =>
     {
         var r = await client!.CallAsync("ListBuildTargets", null, null, ct).ConfigureAwait(false);
-        return r.Ok ? new VaultResult<IReadOnlyList<string>>("Ok", r.Body.GetProperty("targets").EnumerateArray().Select(t => t.GetString()!).ToList()) : Fail<IReadOnlyList<string>>(r.Code);
+        if (!r.Ok) return Fail<IReadOnlyList<BuildTargetSummary>>(r.Code);
+        var names = r.Body.GetProperty("targets").EnumerateArray().Select(t => t.GetString()!).ToList();
+        var platforms = r.Body.TryGetProperty("platforms", out var p) && p.ValueKind == JsonValueKind.Array
+            ? p.EnumerateArray().Select(x => x.ValueKind == JsonValueKind.String ? x.GetString()! : "").ToList() : [];
+        return new VaultResult<IReadOnlyList<BuildTargetSummary>>("Ok", names.Select((n, i) => new BuildTargetSummary(n, i < platforms.Count ? platforms[i] : "")).ToList());
     });
 
     /// <summary>Queues a build of the project's current saved files. Returns the build number.</summary>
