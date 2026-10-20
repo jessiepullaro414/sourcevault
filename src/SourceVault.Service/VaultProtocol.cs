@@ -611,6 +611,8 @@ internal sealed class VaultProtocol
         if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out long length) || length < Package.HeaderBytes + Package.SignatureBytes || state.PackageSpool is not null)
             throw new RequestException("InvalidRequest");
         if (length > Package.MaxPackageBytes) throw new RequestException("LimitExceeded");
+        // The spool and then the project's records each take about the package's size; keep the reserve free after both.
+        catalog.EnsureFreeSpace(2 * length);
         if (!packages.TryEnter()) throw new RequestException("Unavailable"); // another package import is running
         int released = 0; // the connection closing (another thread) and FinishPackageImport may both release it
         state.OnClose = () =>
