@@ -68,6 +68,9 @@ const BUILD_TEMPLATES = {
       'rem _build is inside the project folder, so it is emptied with it after the build.',
       'cmake -S . -B _build -DCMAKE_BUILD_TYPE=Release || exit /b 1', 'cmake --build _build --config Release || exit /b 1',
       'cmake --install _build --config Release --prefix C:\\sourcevault\\out || exit /b 1']) },
+    { label: 'Ant, kept in the project (needs an image with a JDK)', text: cmd(['rem Runs the Ant in this project\'s ant folder; the build image needs a JDK (java on PATH or JAVA_HOME).',
+      'rem Change "dist" to your build target and the folder it writes.',
+      'call ant\\bin\\ant.bat -noinput dist || exit /b 1', 'xcopy /e /i /q /y dist C:\\sourcevault\\out >nul || exit /b 1']) },
     { label: 'Empty: write your own steps', text: cmd(['rem Your build commands go here. Add  || exit /b 1  after each one so a failed step fails the build.']) },
   ],
   linux: [
@@ -76,6 +79,9 @@ const BUILD_TEMPLATES = {
     { label: 'CMake (needs an image with CMake and a compiler)', text: sh(['# The standard SourceVault build image has only the .NET SDK; CMake needs your own image.',
       '# _build is inside the project folder, so it is emptied with it after the build.',
       'cmake -S . -B _build -DCMAKE_BUILD_TYPE=Release', 'cmake --build _build', 'cmake --install _build --prefix /sourcevault/out']) },
+    { label: 'Ant, kept in the project (needs an image with a JDK)', text: sh(['# Runs the Ant in this project\'s ant folder; the build image needs a JDK (for example eclipse-temurin).',
+      '# Change "dist" to your build target and the folder it writes.',
+      'sh ant/bin/ant -noinput dist', 'cp -r dist/. /sourcevault/out/']) },
     { label: 'Empty: write your own steps', text: sh(['# Your build commands go here. set -eu (above) stops the build at the first failing command.']) },
   ],
 };
