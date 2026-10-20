@@ -1,8 +1,8 @@
-# Design: the vault holds any file (approved 2026-10-19)
+# Design: the vault holds any file (proposal, 2026-10-19; needs coordinator review)
 
 **Owner decision (2026-10-19):** the vault must hold **any file a user adds**: binary files (icons, bitmaps, `.lib`/`.dll`), other encodings (UTF-16 `.rc` files, Windows code pages), larger files and more files per project. In the owner's words: "I can't control what someone might upload". Real C++/MFC projects also can't build without these files (`docs/cpp-build-design.md`, section 5, on branch `claude/hopeful-pasteur-d204a1`).
 
-Status: **approved and built (2026-10-19), in process tested;** the lab items in section 10 are still to run. It changes the record format, the manifest schema, the package format and the protocol. The coordinator reviewed all of these (AGENTS.md) and the owner made every owner decision on 2026-10-19; section 12 records both, including two review additions. Synthetic inputs only.
+Status: **design only. Nothing here is built.** It changes the record format, the manifest schema, the package format and the protocol. AGENTS.md requires the coordinator's review for all of these. Synthetic inputs only. The decisions it needs are at the end.
 
 **Unchanged:**
 - the TPM vault key, the import key and sender keys;
@@ -63,7 +63,7 @@ Why a new format is needed:
 
 **Then the wrapped data key:**
 - **Wrap mode 1:** the 32-byte data key, RSA-OAEP-SHA256-wrapped by the TPM key (256 bytes), as in `SVR1`.
-- **Wrap mode 2:** project key id (16) ‖ random nonce (12) ‖ AES-256-GCM(project key, data key; AAD = the 68-byte prefix ‖ project key id) (32 + 16 tag) = 76 bytes. The key id is bound in the AAD (coordinator review), so a wrapped key presented with another key id fails authentication rather than relying on a wrong key to fail.
+- **Wrap mode 2:** project key id (16) ‖ random nonce (12) ‖ AES-256-GCM(project key, data key; AAD = the 68-byte prefix) (32 + 16 tag) = 76 bytes.
 
 **Then the segments:**
 - The plaintext is split into segments of 512 KiB; the last one may be shorter. An empty plaintext is one empty segment, so a truncated record can always be detected.
@@ -466,27 +466,32 @@ Each step is tested and committed before the next:
 6. Editor: info panel, replace and add from disk, binary history and merge, search counts.
 7. Documentation (`storage-v1.md`, `protocol-v2.md`, `user-guide.md`, the lab checklist) and the lab runs.
 
-## 12. Decisions (made 2026-10-19)
+## 12. Decisions needed
 
-### Coordinator review (format and security, per AGENTS.md)
+### Coordinator (format and security review, per AGENTS.md)
 
-- **C1. Record format `SVR2`: approved, with one addition.** Wrap mode 2 binds the project key id in the AAD (section 2.2). The construction is the one already approved for package format v1, applied per record, with no new primitives.
-- **C2. Project key hierarchy: approved (owner confirmed the trade-off).** A TPM-wrapped project key wraps every content record's data key. It is unwrapped at most once per store operation, zeroed when the operation ends and never cached between operations, logged or sent. The manifest and the project-key record stay TPM-wrapped. Accepted cost: during a build, search or verify, one key in service memory decrypts the whole project, so a memory dump taken then exposes the project, not one file. Only an administrator can take such a dump, and the design already trusts administrators.
-- **C3. Manifest schema 4 and history v2: approved,** including the plaintext `sha256` (the manifest is encrypted at rest; `ListFiles` returns it only to operators, who can open the file anyway).
-- **C4. Verification: approved, with one addition.** Existence, exact size and no reparse point on every operation; the record hash on every content read; `VerifyProject` for a full check. Addition: the service's startup check of every project uses the same existence-and-size check, not a full decryption.
-- **C5. Pruning superseded manifests: approved,** keeping `HEAD` and `PREVIOUS`. Ordinary deletion of ciphertext, not secure deletion.
-- **C6. `staging\` folder: approved.** Ciphertext only, under the vault root's ACL, emptied at service start.
-- **C7. Package format v2 and the spooled two-pass import: approved.** Same cryptography as v1, new limits.
-- **C8. Build pipe v2 with streaming: approved.** The build service still never opens the vault or the TPM key.
-- **C9. Protocol additions and `NotText`: approved.**
+- **C1. Record format `SVR2`:** segmented AES-256-GCM with index nonces, header-bound AAD and a last-segment flag (section 2.2). Approve, or ask for changes.
+- **C2. Project key hierarchy:**
+  - a TPM-wrapped project key wraps every content record's data key;
+  - it is unwrapped once per operation and never cached between operations;
+  - the manifest stays TPM-wrapped.
 
-### Owner (2026-10-19)
+  This trades "every record needs the TPM" for builds and searches that scale (section 2.3). Without it, the 25,000-file limit isn't practical; the alternative is to keep per-record TPM keys and a much lower file limit.
+- **C3. Manifest schema 4 and history v2,** including the plaintext `sha256` in the manifest and its return by `ListFiles`.
+- **C4. Verification:** check existence and exact size on every operation, and the hash on every read, plus `VerifyProject` (recommended). The alternative is to keep full hashing every time, at a cost that grows with project size.
+- **C5. Pruning superseded manifests** after a commit, keeping `HEAD` and `PREVIOUS` (recommended). The alternative is to keep them all, which costs disk on every save.
+- **C6. The `staging\` folder** in the vault root, and its startup cleanup.
+- **C7. Package format v2** and the spooled two-pass import.
+- **C8. Build pipe v2** with streaming.
+- **C9. The protocol additions** and the new `NotText` code.
 
-- **O1. Limits: accepted.** 1 GiB per file, 25,000 files and 8 GiB per project, 1 MiB for the editor, 16 MiB per searched file, 4 GiB of free space kept.
-- **O2. UTF-16 and code-page files:** stored and built exactly, not opened in the editor in this change.
-- **O3. Adding and replacing files from disk in the editor: yes,** through a native file dialog in the host.
-- **O4. No download** of binary or large files; their only way out is a build.
-- **O5. History keeps every version** of binary files, as for text, with the free-space guard.
-- **O6. The one-way upgrade is accepted.**
-- **O7. Path limits stay** at 260 characters and 32 segments; longer paths are skipped and listed.
-- **O8. No image preview** in this change.
+### Owner
+
+- **O1. Limits:** 1 GiB per file, 25,000 files and 8 GiB per project, 1 MiB for the editor, 16 MiB per searched file, 4 GiB of free space kept. Accept, or name other values. Bigger values raise the build and search times and the manifest size.
+- **O2. UTF-16 and code-page files:** stored and built exactly, but not opened in the editor (recommended for this change). Or, later, editing for UTF-16 files with a BOM, which round-trip safely.
+- **O3. Adding and replacing files from disk in the editor**, through a native file dialog in the host. This is a new way into the vault besides the importer. Yes (recommended: it is the only way to update a binary file short of a new import) or no.
+- **O4. No way to download binary or large files from the vault** (recommended). Their only way out is a build. Or allow an export, which would be a new export path.
+- **O5. History for large binary files:** keep every version, as for text (recommended, consistent with D2), with the free-space guard. Or keep only the last *N* versions of binary files, which would be the first deletion of history.
+- **O6. The upgrade is one-way:** after it, older SourceVault versions can't open the vault.
+- **O7. Path limits stay** at 260 characters and 32 segments. Longer paths are skipped and listed.
+- **O8. No image preview** for icons and bitmaps in this change.
