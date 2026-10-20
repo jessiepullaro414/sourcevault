@@ -805,6 +805,44 @@ Test("controller: adding many dropped files commits in batches; a clash part-way
     }
 });
 
+// ---- a project that fails its check is offline, not fatal (owner decision 2026-10-20) ----
+Test("offline project: listed as unavailable, refuses everything but deletion; the status file has ids only", () =>
+{
+    var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(vault);
+    var setup = new ProjectCatalog(vault, key);
+    var good = setup.CreateProject("Healthy");
+    var bad = setup.CreateProject("Broken project");
+    var store = Path.Combine(vault, "projects", bad.ProjectId.ToString("D"));
+    var live = Path.Combine(store, File.ReadAllText(Path.Combine(store, "HEAD")) + ".svr");
+    var raw = File.ReadAllBytes(live); raw[^1] ^= 1; File.WriteAllBytes(live, raw);
+    var catalog = new ProjectCatalog(vault, key);
+    var check = catalog.Verify();
+    Assert(check.Offline.Single().ProjectId == bad.ProjectId, "found at startup");
+    var statusFolder = Path.Combine(workspace, "status-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(statusFolder);
+    SourceVault.Service.VaultStatus.WriteTo(statusFolder, check.Projects.Count, check.Offline.Select(o => o.ProjectId), DateTimeOffset.UnixEpoch);
+    var status = File.ReadAllText(Path.Combine(statusFolder, "vault.json"));
+    Assert(status.Contains(bad.ProjectId.ToString("D")) && status.Contains("\"projectsAvailable\": 1") && !status.Contains("Broken") && !status.Contains("Healthy"), "ids and counts only: " + status);
+    var reported = new List<Guid>();
+    var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
+    using var server = new VaultPipeServer(name, me, new PipePeerPolicy(authenticatedUsers, [self]),
+        new VaultProtocol(catalog, check.Projects, offline: check.Offline, status: (_, offline) => { reported.Clear(); reported.AddRange(offline); }));
+    server.Start();
+    using var c = new Client(name, me);
+    c.Begin();
+    var listing = c.Ok("ListProjects");
+    Assert(listing.GetProperty("projects").EnumerateArray().Single().GetProperty("name").GetString() == "Healthy", "available projects");
+    Assert(listing.GetProperty("unavailable").EnumerateArray().Single().GetProperty("projectId").GetString() == bad.ProjectId.ToString("D"), "offline projects are named, so they can be found and deleted");
+    Assert(c.Code("ListFiles", ("projectId", bad.ProjectId.ToString("D"))) == "Unavailable", "nothing in it opens");
+    Assert(c.Code("ListFiles", ("projectId", good.ProjectId.ToString("D"))) == "Ok", "the rest of the vault works");
+    Assert(c.Code("DeleteProject", ("projectId", bad.ProjectId.ToString("D")), ("confirmName", "Broken project")) == "Ok", "an offline project can be deleted");
+    Assert(reported.Count == 0, "the status file no longer lists it");
+    Assert(!c.Ok("ListProjects").GetProperty("unavailable").EnumerateArray().Any(), "gone");
+    using var ctl = Controller(name);
+    Run(ctl.UnlockAsync());
+    Assert(Run(ctl.ListProjectsAsync()).Value!.All(p => p.Available), "the editor's view");
+});
+
 Test("controller: unlock failures are reported as fixed, explainable codes", () =>
 {
     foreach (var (failure, expected) in new (Exception, string)[]

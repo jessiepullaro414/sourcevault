@@ -214,7 +214,10 @@ export async function startVault(transport, metadata, onSession) {
       const row = document.createElement('div'); row.className = 'project-row';
       const button = document.createElement('button'); button.className = 'project-option'; button.disabled = busy;
       const name = document.createElement('strong'); name.textContent = project.name;
-      const count = document.createElement('span'); count.textContent = `${project.fileCount} file${project.fileCount === 1 ? '' : 's'}`;
+      const count = document.createElement('span');
+      const offline = project.available === false; // failed its integrity check: offline until an administrator looks
+      count.textContent = offline ? 'offline: failed its integrity check. Ask your administrator; it can only be deleted.' : `${project.fileCount} file${project.fileCount === 1 ? '' : 's'}`;
+      if (offline) { button.disabled = true; button.classList.add('project-offline'); button.title = 'This project failed its integrity check when the service started. Nothing in it can be opened.'; }
       button.append(name, count);
       button.onclick = () => act(async () => {
         if (session.project?.projectId !== project.projectId) { await session.selectProject(project.projectId); disposeAllModels(); keepEditing.clear(); }
@@ -224,7 +227,7 @@ export async function startVault(transport, metadata, onSession) {
       const remove = document.createElement('button'); remove.className = 'project-delete'; remove.textContent = 'Delete…'; remove.disabled = busy;
       remove.title = `Delete ${project.name}`; remove.setAttribute('aria-label', `Delete project ${project.name}`);
       remove.onclick = () => { renaming = null; deleting = { projectId: project.projectId, typed: '' }; render(); $('delete-confirm-name')?.focus(); };
-      const rename = document.createElement('button'); rename.className = 'project-delete'; rename.textContent = 'Rename…'; rename.disabled = busy;
+      const rename = document.createElement('button'); rename.className = 'project-delete'; rename.textContent = 'Rename…'; rename.disabled = busy || offline;
       rename.setAttribute('aria-label', `Rename project ${project.name}`);
       rename.onclick = () => { deleting = null; renaming = { projectId: project.projectId, value: project.name }; render(); $('rename-project-name')?.select(); };
       row.append(button, rename, remove);

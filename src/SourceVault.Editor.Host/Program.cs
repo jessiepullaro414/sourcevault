@@ -305,7 +305,7 @@ internal sealed class EditorWindow : Window
                 VaultOperation.ListProjects => Respond(request, await controller.ListProjectsAsync(), (w, projects) =>
                 {
                     w.WriteStartArray("projects");
-                    foreach (var p in projects) { w.WriteStartObject(); w.WriteString("projectId", p.ProjectId.ToString("D")); w.WriteString("name", p.Name); w.WriteNumber("fileCount", p.FileCount); w.WriteEndObject(); }
+                    foreach (var p in projects) { w.WriteStartObject(); w.WriteString("projectId", p.ProjectId.ToString("D")); w.WriteString("name", p.Name); w.WriteNumber("fileCount", p.FileCount); w.WriteBoolean("available", p.Available); w.WriteEndObject(); }
                     w.WriteEndArray();
                 }),
                 VaultOperation.CreateProject => Respond(request, await controller.CreateProjectAsync(request.Name!), (w, p) =>

@@ -73,16 +73,26 @@ internal sealed class VaultProtocol
     private readonly TimeProvider clock;
     // Projects created or verified in this process. Only the service creates projects, so this is authoritative.
     private readonly ConcurrentDictionary<Guid, bool> projects = new();
-    // Projects that failed VerifyProject: Unavailable until the service restarts and an administrator has looked.
+    // Projects that failed their check (at startup, or VerifyProject): offline until an administrator has looked. They
+    // are listed as unavailable, and the only operation they allow is deletion.
     private readonly ConcurrentDictionary<Guid, bool> failed = new();
+    private readonly Action<int, IEnumerable<Guid>>? status; // writes the administrator's status file (ids and counts only)
 
-    internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null, PackageImports? packages = null)
+    internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null, PackageImports? packages = null,
+        IEnumerable<(Guid ProjectId, string Name)>? offline = null, Action<int, IEnumerable<Guid>>? status = null)
     {
         this.catalog = catalog;
         this.builds = builds;
         this.packages = packages;
+        this.status = status;
         this.clock = clock ?? TimeProvider.System;
         foreach (var p in verified) projects[p.ProjectId] = true;
+        foreach (var (id, _) in offline ?? []) { projects[id] = true; failed[id] = true; }
+    }
+
+    private void ReportStatus()
+    {
+        try { status?.Invoke(projects.Count - failed.Count, failed.Keys); } catch (Exception e) when (e is not OutOfMemoryException) { /* best effort */ }
     }
 
     internal ProtocolResponse Handle(ParsedRequest request, ConnectionState state)
@@ -180,11 +190,21 @@ internal sealed class VaultProtocol
     private ProtocolResponse ListProjects(ParsedRequest request)
     {
         Require(request.Body, "capability");
-        var verified = catalog.OpenAndVerify();
-        foreach (var p in verified) projects[p.ProjectId] = true;        return Ok(request, w =>
+        var check = catalog.Verify();
+        foreach (var p in check.Projects) projects[p.ProjectId] = true;
+        bool changed = false;
+        foreach (var (id, _) in check.Offline) { projects[id] = true; changed |= failed.TryAdd(id, true); }
+        if (changed) ReportStatus();
+        var available = check.Projects.Where(p => !failed.ContainsKey(p.ProjectId)).ToList();
+        var unavailable = check.Offline.Concat(check.Projects.Where(p => failed.ContainsKey(p.ProjectId)).Select(p => (p.ProjectId, p.Name))).ToList();
+        return Ok(request, w =>
         {
+            // Projects that failed their check: names only, so operators can see what is offline and delete it.
+            w.WriteStartArray("unavailable");
+            foreach (var (id, name) in unavailable) { w.WriteStartObject(); w.WriteString("projectId", id.ToString("D")); w.WriteString("name", name); w.WriteEndObject(); }
+            w.WriteEndArray();
             w.WriteStartArray("projects");
-            foreach (var p in verified)
+            foreach (var p in available)
             {
                 w.WriteStartObject();
                 w.WriteString("projectId", p.ProjectId.ToString("D"));
@@ -227,6 +247,7 @@ internal sealed class VaultProtocol
         catch (ArgumentException) { throw new RequestException("InvalidRequest"); }
         catch (KeyNotFoundException) { projects.TryRemove(id, out _); throw; }
         projects.TryRemove(id, out _);
+        if (failed.TryRemove(id, out _)) ReportStatus();
         return Ok(request, w => w.WriteBoolean("filesRemoved", removed));
     }
 
@@ -944,7 +965,7 @@ internal sealed class VaultProtocol
         Require(request.Body, "capability", "projectId");
         var id = Id(request.Body, "projectId");
         var (verified, failedFiles) = Project(request.Body).VerifyProject();
-        if (failedFiles > 0) failed[id] = true;
+        if (failedFiles > 0 && failed.TryAdd(id, true)) ReportStatus();
         return Ok(request, w => { w.WriteNumber("filesVerified", verified); w.WriteNumber("filesFailed", failedFiles); });
     }
 

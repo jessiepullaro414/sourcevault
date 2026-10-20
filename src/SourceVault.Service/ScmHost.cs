@@ -78,7 +78,7 @@ internal sealed class ScmHost
 
     private IDisposable StartEndpoints()
     {
-        var (key, catalog, projects) = OpenVerifiedVault();
+        var (key, catalog, check) = OpenVerifiedVault();
         var importKey = OpenImportKey();
         try
         {
@@ -87,7 +87,7 @@ internal sealed class ScmHost
             catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.OperatorsGroupMissing); }
             using var self = WindowsIdentity.GetCurrent();
             var pipeServer = new VaultPipeServer(VaultPipe.ProductionName, self.User!,
-                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, projects, builds: new BuildCoordinator(catalog, BuildServiceClient()),
+                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, check.Projects, builds: new BuildCoordinator(catalog, BuildServiceClient()), offline: check.Offline, status: VaultStatus.Write,
                     packages: importKey is null ? null : new PackageImports(importKey, importKey.ExportSubjectPublicKeyInfo(), PackageImports.ComputerName, PackageImports.DefaultSendersFolder)));
             try { pipeServer.Start(); }
             catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
@@ -149,8 +149,9 @@ internal sealed class ScmHost
         public void Dispose() { if (Interlocked.Exchange(ref disposed, 1) == 0) dispose(); }
     }
 
-    // Identity, config, trusted vault root, existing key, then every project authenticated. The caller owns the key.
-    private static (TpmKeyProtector Key, ProjectCatalog Catalog, IReadOnlyList<ProjectInfo> Projects) OpenVerifiedVault()
+    // Identity, config, trusted vault root, existing key, then every project authenticated; a project that fails is
+    // offline, not fatal (owner decision 2026-10-20). The caller owns the key.
+    private static (TpmKeyProtector Key, ProjectCatalog Catalog, VaultCheck Check) OpenVerifiedVault()
     {
         TpmKeyProtector.RequireServiceIdentity();
         var config = ServiceConfiguration.LoadFromApplicationDirectory();
@@ -159,18 +160,19 @@ internal sealed class ScmHost
         try
         {
             var catalog = new ProjectCatalog(config.VaultRootPath, key);
-            IReadOnlyList<ProjectInfo> projects;
-            try { projects = catalog.OpenAndVerify(); }
+            VaultCheck check;
+            try { check = catalog.Verify(); }
             catch (VaultCatalogException e)
             {
                 throw new StartupRefusedException(e.Failure == CatalogFailure.Project
                     ? StartupRefusedException.ProjectUntrusted : StartupRefusedException.CatalogUntrusted);
             }
+            VaultStatus.Write(check.Projects.Count, check.Offline.Select(o => o.ProjectId));
             // Finish any deletion a crash or a file in use interrupted. Best effort: a pending tombstone stays allowed.
             try { catalog.PurgeDeleted(); } catch (Exception e) when (e is not OutOfMemoryException) { }
             // Uploads never survive a restart (decision C6): their staging folders hold ciphertext nobody will commit.
             try { catalog.ClearStaging(); } catch (Exception e) when (e is not OutOfMemoryException) { }
-            return (key, catalog, projects);
+            return (key, catalog, check);
         }
         catch { key.Dispose(); throw; }
     }
@@ -184,7 +186,8 @@ internal sealed class ScmHost
         uint win32 = 0, specific = 0;
         try
         {
-            var (key, catalog, projects) = OpenVerifiedVault();
+            var (key, catalog, check) = OpenVerifiedVault();
+            var projects = check.Projects; // a lab run on a vault with an offline project fails its final strict check
             using (key)
             {
                 var project = catalog.CreateProject($"Synthetic demo {projects.Count + 1}");

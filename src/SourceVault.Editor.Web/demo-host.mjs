@@ -155,10 +155,11 @@ export class DemoVaultHost {
     if (this.locked) return reply('Locked');
     const project = 'projectId' in args ? this.#projects.get(args.projectId) : null;
     if ('projectId' in args && !project) return reply('NotFound');
+    if (project?.offline && operation !== 'deleteProject') return reply('Unavailable'); // like the service: offline projects can only be deleted
     const key = `${args.projectId}/${args.fileId}`;
     switch (operation) {
       case 'listProjects':
-        return reply('Ok', { projects: [...this.#projects].map(([projectId, p]) => ({ projectId, name: p.name, fileCount: p.files.size })) });
+        return reply('Ok', { projects: [...this.#projects].map(([projectId, p]) => ({ projectId, name: p.name, fileCount: p.offline ? 0 : p.files.size, available: !p.offline })) });
       case 'createProject': {
         if ([...this.#projects.values()].some(p => p.name.toLowerCase() === args.name.toLowerCase())) return reply('AlreadyExists');
         const projectId = crypto.randomUUID();
@@ -420,6 +421,9 @@ export class DemoVaultHost {
     const set = new Set(names);
     return set.size === names.length && !names.some(n => n.split('/').slice(0, -1).some((_, i, parts) => set.has(parts.slice(0, i + 1).join('/'))));
   }
+  /** Simulates a project failing its integrity check at the service's start (it goes offline). */
+  takeOffline(projectId) { const project = this.#projects.get(projectId); if (!project) return false; project.offline = true; return true; }
+
   /** Someone else deletes a file (another editor). */
   externalDelete(projectId, fileId) {
     const project = this.#projects.get(projectId), file = project?.files.get(fileId);
@@ -465,6 +469,7 @@ export function installDemoPanel(demo, getActive) {
     ['Session expiry', () => { demo.simulateLock('expired'); return 'Simulated the 30-minute expiry.'; }],
     ['Next unlock fails', () => { demo.failNextUnlock = 'ServiceNotRunning'; return 'The next unlock reports the service as not running.'; }],
     ['Next build fails', () => { demo.buildFails = !demo.buildFails; return demo.buildFails ? 'Builds now fail (click again to undo).' : 'Builds succeed again.'; }],
+    ['A project fails its integrity check', () => { const id = demo.projectIdByName('Synthetic C# demo'); return id && demo.takeOffline(id) ? '"Synthetic C# demo" is offline. Switch project to see it; it can only be deleted.' : 'Already offline or deleted.'; }],
   ];
   const note = document.createElement('em');
   for (const [label, act] of actions) {

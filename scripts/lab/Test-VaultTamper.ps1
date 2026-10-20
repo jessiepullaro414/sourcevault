@@ -1,7 +1,8 @@
 #Requires -RunAsAdministrator
 # LAB ONLY, synthetic vaults only. Fail-closed drill; every change is undone before the script exits.
 #   1. Add a stray empty file to the vault root   -> normal start must be refused with 1066/11
-#   2. Flip one bit in a project's live manifest  -> normal start must be refused with 1066/12
+#   2. Flip one bit in a project's live manifest  -> the service starts with that project OFFLINE (owner decision
+#      2026-10-20; before, the whole service refused with 1066/12), and status\vault.json lists its id
 #      (original bytes are restored and verified by SHA-256)
 #   3. With everything restored                   -> normal start must reach RUNNING again
 $ErrorActionPreference = 'Stop'
@@ -49,7 +50,10 @@ $originalHash = (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash
 try {
     $tampered = [byte[]]$original.Clone(); $tampered[$tampered.Length - 1] = $tampered[$tampered.Length - 1] -bxor 1
     [IO.File]::WriteAllBytes($manifest, $tampered)
-    Report 'one flipped bit in a project manifest' '1066/12' (Invoke-Start)
+    Report 'one flipped bit in a project manifest: the service still starts' 'RUNNING' (Invoke-Start)
+    $statusFile = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault\status\vault.json'
+    $offline = if (Test-Path -LiteralPath $statusFile) { @((Get-Content -LiteralPath $statusFile -Raw | ConvertFrom-Json).projectsOffline) } else { @() }
+    Report 'the status report lists that project as offline' $project.Name ([string]($offline | Where-Object { $_ -eq $project.Name } | Select-Object -First 1))
 } finally {
     [IO.File]::WriteAllBytes($manifest, $original)
     if ((Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash -ne $originalHash) { throw "RESTORE FAILED for $manifest. Stop and review." }
@@ -58,4 +62,6 @@ try {
 # 3. Restored state starts normally.
 if (Test-Path -LiteralPath $stray) { throw 'Stray file still present.' }
 Report 'restored vault' 'RUNNING' (Invoke-Start)
+$offline = @((Get-Content -LiteralPath (Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault\status\vault.json') -Raw | ConvertFrom-Json).projectsOffline)
+Report 'no project offline after the restore' '0' ([string]$offline.Count)
 if ($failures) { exit 1 } else { Write-Output 'All drill steps behaved as expected; vault restored byte-for-byte.' }

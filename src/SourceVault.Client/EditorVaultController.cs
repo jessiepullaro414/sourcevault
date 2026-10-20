@@ -6,7 +6,8 @@ namespace SourceVault.Client;
 
 public enum LockReason { User, Closed, Expired }
 
-public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount);
+/// <summary>A project. Not <c>Available</c>: it failed its integrity check and is offline (it can only be deleted).</summary>
+public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount, bool Available = true);
 /// <summary>A live file. <c>Kind</c> is "text" or "binary"; <c>Sha256</c> (hex) is null for a legacy text record.</summary>
 public sealed record FileSummary(Guid FileId, string Name, Guid RevisionId, long ByteLength, string Kind = "text", string? Sha256 = null)
 {
@@ -129,6 +130,9 @@ public sealed class EditorVaultController : IDisposable
         if (!r.Ok) return Fail<IReadOnlyList<ProjectSummary>>(r.Code);
         return new("Ok", r.Body.GetProperty("projects").EnumerateArray()
             .Select(p => new ProjectSummary(Guid.Parse(p.GetProperty("projectId").GetString()!), p.GetProperty("name").GetString()!, p.GetProperty("fileCount").GetInt32()))
+            .Concat(r.Body.TryGetProperty("unavailable", out var offline) // absent from an older service
+                ? offline.EnumerateArray().Select(p => new ProjectSummary(Guid.Parse(p.GetProperty("projectId").GetString()!), p.GetProperty("name").GetString()!, 0, Available: false))
+                : [])
             .ToList());
     });
 

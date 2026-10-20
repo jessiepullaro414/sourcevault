@@ -39,11 +39,13 @@ $buildAccount = 'NT SERVICE\SourceVaultBuild'
 $configDir = Join-Path $dataDir 'config'
 # Registered SourceVault Pack senders (docs/package-import-design.md): administrators change it, the service reads it.
 $sendersDir = Join-Path $dataDir 'senders'
+# The service's report for administrators (ids and counts only): projects that failed their check and are offline.
+$statusDir = Join-Path $dataDir 'status'
 $buildConfig = Join-Path $configDir 'build.json'
 $exitReasons = @{
     10 = 'vault folder missing or its permissions are not locked down'
     11 = 'unexpected item in the vault folder, or the project index failed authentication'
-    12 = 'a project failed authentication (possible tampering or damage)'
+    12 = 'a project failed authentication (possible tampering or damage); services from 2026-10-20 take only that project offline instead'
     13 = "the local group '$groupName' is missing"
     14 = 'the service pipe could not be created (name already taken?)'
     15 = 'the vault service account NT SERVICE\SourceVault does not exist (install the vault first)'
@@ -235,6 +237,16 @@ function Show-Status {
         $disk = Get-Partition -DriveLetter $where[0] -ErrorAction SilentlyContinue | Get-Disk -ErrorAction SilentlyContinue
         Ok "vault drive $($where.Substring(0, 2)): $($volume.DriveType), $($volume.FileSystem), $($disk.BusType) disk"
     }
+    $vaultStatus = Join-Path $statusDir 'vault.json'
+    if (Test-Path -LiteralPath $vaultStatus) {
+        try {
+            $report = Get-Content -LiteralPath $vaultStatus -Raw | ConvertFrom-Json
+            $offline = @($report.projectsOffline)
+            if ($offline.Count) {
+                Warn "$($offline.Count) project(s) OFFLINE: they failed their integrity check (damage or tampering) and cannot be opened. The rest of the vault works. Operators see them marked offline in the editor and can delete them. Ids: $($offline -join ', ')"
+            } else { Ok "every project passed its integrity check ($($report.projectsAvailable) available, as of $($report.updatedAt) UTC)" }
+        } catch { Warn "the service's status report ($vaultStatus) could not be read" }
+    } elseif ($service.Status -eq 'Running') { Warn 'no status report from the service yet (run setup -Update to create its folder)' }
     if (Test-Path -LiteralPath $sendersDir) {
         $registered = @(Get-ChildItem -LiteralPath $sendersDir -Filter '*.json' -File | ForEach-Object { try { (Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).computer } catch { "$($_.Name) (unreadable)" } })
         Ok "package senders registered: $(if ($registered) { $registered -join ', ' } else { '(none)' })"
@@ -390,6 +402,14 @@ if (!(Test-Path -LiteralPath $sendersDir)) {
     New-Item -ItemType Directory -Path $sendersDir | Out-Null
     Set-ExactSecurity $sendersDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSid)"
     Ok 'created; administrators register senders here, the service can only read it'
+} else { Ok 'kept' }
+
+Step "Service status folder ($statusDir)"
+if (!(Test-Path -LiteralPath $statusDir)) {
+    New-Item -ItemType Directory -Path $statusDir | Out-Null
+    # The service writes vault.json (project ids and counts only); administrators read it with -Status.
+    Set-ExactSecurity $statusDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSid)"
+    Ok 'created; the service reports offline projects here (ids only), -Status shows them'
 } else { Ok 'kept' }
 
 if ($WithSyntheticDemo) {
