@@ -49,7 +49,7 @@ function Invoke-Script([string]$path, [string[]]$arguments) {
     return $LASTEXITCODE
 }
 function Invoke-Wsl([string]$script, [switch]$AllowFailure) {
-    $output = ($script -replace "`r", '') | & wsl.exe -d $distro -u root -- sh -s
+    $output = ($script -replace "`r", '') | & wsl.exe -d $distro -u root --exec sh -c 'sed -e ''1s/^\xEF\xBB\xBF//'' -e ''s/\r$//'' | sh' # strip the CR/BOM PowerShell adds to piped text
     if ($LASTEXITCODE -ne 0 -and !$AllowFailure) { Fail "A command in the WSL distro failed (exit $LASTEXITCODE)." }
     return $output
 }

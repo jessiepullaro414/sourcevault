@@ -43,7 +43,7 @@ if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') { throw 'Invalid conta
 
 function Invoke-Wsl([string]$script, [switch]$AllowFailure) {
     # The script goes in on stdin (LF line endings) so nothing is interpolated into a Windows command line.
-    $output = ($script -replace "`r", '') | & wsl.exe -d $Distro -u root -- sh -s
+    $output = ($script -replace "`r", '') | & wsl.exe -d $Distro -u root --exec sh -c 'sed -e ''1s/^\xEF\xBB\xBF//'' -e ''s/\r$//'' | sh' # strip the CR/BOM PowerShell adds to piped text
     if ($LASTEXITCODE -ne 0 -and !$AllowFailure) { throw "The command in WSL distro '$Distro' failed (exit $LASTEXITCODE)." }
     return $output
 }
