@@ -24,6 +24,8 @@ const NOT_CONNECTED = {
   ServerUntrusted: ['NOT CONNECTED', 'The editor refused to connect', 'Something other than the SourceVault service answered on its connection. Nothing was sent to it. Tell your administrator.'],
 };
 const NOT_CONNECTED_NOTE = 'Nothing can be opened or saved, and nothing is decrypted, until the vault is connected. Unsaved edits already in this window stay here.';
+// Working offline (owner decision 2026-10-20): chosen with "Work offline" on that screen. Memory only, never the disk.
+const OFFLINE_NOTE = 'You can keep editing the files that are open and make new ones. They stay in this window’s memory only: nothing is saved or encrypted until the vault is back, and closing the editor loses them. Save marks a file to be saved then.';
 const KEPT = 'Unsaved edits stay in this editor’s memory and are checked against the vault when you unlock. Locking hides them; it does not guarantee memory erasure.';
 const LOCK_SCREENS = {
   start: ['VAULT', 'Connecting to the vault', 'Documents are decrypted by the SourceVault service, and only for files you open.'],
@@ -61,6 +63,8 @@ const FAILURES = {
   UnsavedChanges: 'Save or reload the edited files first.',
   NameMismatch: 'The typed name does not match the project name exactly. Nothing was deleted.',
   Timeout: 'The editor host did not answer. Nothing was changed.',
+  Offline: 'Not connected: that needs the vault. The open files and new files still work; everything else is back once the vault is (Try again).',
+  NoProject: 'Open a project first: new files made offline are saved into it.',
 };
 
 /** `onSession` is passed only by the browser-review fake host, so its panel can target the open file. */
@@ -117,17 +121,22 @@ export async function startVault(transport, metadata, onSession) {
   function render() {
     const locked = session.locked, hasProject = !!session.project && !picking;
     const f = hasProject ? active() : null; // nothing is "current" while the picker is open
-    const offline = locked && !!notConnected;
+    const offline = locked && !!notConnected; // the red lock screen: the service can't be reached
+    const working = session.offline;          // working offline: red, editable, nothing saved until the vault is back
     const [eyebrow, title, detail] = offline ? NOT_CONNECTED[notConnected] : LOCK_SCREENS[session.lockReason] ?? LOCK_SCREENS.closed;
     $('locked-view').hidden = !locked;
     $('locked-eyebrow').textContent = eyebrow; $('locked-title').textContent = title;
     $('locked-detail').textContent = offline ? `${detail} ${NOT_CONNECTED_NOTE}` : unlockError ?? (demo ? `${detail} ${DEMO_NOTE}` : detail);
     $('unlock').disabled = busy;
     $('unlock-label').textContent = offline ? 'Try again' : 'Unlock vault';
-    document.body.classList.toggle('mode-red', demo || offline);
-    document.body.classList.toggle('mode-offline', offline);
-    $('offline-banner').hidden = !offline;
+    $('work-offline').hidden = !offline; $('work-offline').disabled = busy;
+    document.body.classList.toggle('mode-red', demo || offline || working);
+    document.body.classList.toggle('mode-offline', offline || working);
+    $('offline-banner').hidden = !offline && !working;
+    $('offline-label').textContent = working ? 'OFFLINE · NOT SAVED' : 'NOT CONNECTED';
+    $('offline-retry').hidden = !working; $('offline-retry').disabled = busy;
     if (offline) $('offline-text').textContent = `${title}. ${NOT_CONNECTED_NOTE}`;
+    if (working) $('offline-text').textContent = `${(NOT_CONNECTED[notConnected] ?? NOT_CONNECTED.ServiceNotRunning)[1]}. ${OFFLINE_NOTE}`;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
     $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging || !!buildsView || !!comparing || !!(info && session.files.has(info.id));
@@ -181,7 +190,8 @@ export async function startVault(transport, metadata, onSession) {
       }
     }
     $('breadcrumb-file').textContent = f ? f.path : 'No file selected';
-    $('document-state').textContent = !f ? '' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : demo ? 'Saved in the demo vault · not encrypted' : 'Saved in vault';
+    $('document-state').textContent = !f ? '' : f.saveWhenBack ? 'Offline · saves when the vault is back' : f.pendingCreate ? (working ? 'New file · offline, not saved' : 'New file · not saved yet')
+      : working && session.dirty(f.id) ? 'Offline · unsaved edits' : f.deleted ? 'Deleted by someone else · Save creates it again' : f.conflict ? 'Changed by someone else' : f.mergedOnto ? 'Merged · not saved yet' : session.dirty(f.id) ? 'Unsaved edits' : demo ? 'Saved in the demo vault · not encrypted' : 'Saved in vault';
     $('conflict-banner').hidden = locked || !f || !f.conflict || keepEditing.has(f.id);
     $('save').disabled = !editor || locked || busy || !f || !session.dirty(f.id);
     const unsaved = locked ? 0 : session.dirtyIds.length;
@@ -239,7 +249,7 @@ export async function startVault(transport, metadata, onSession) {
       button.onclick = () => act(async () => {
         if (session.project?.projectId !== project.projectId) { await session.selectProject(project.projectId); disposeAllModels(); keepEditing.clear(); }
         picking = false; deleting = null;
-        return `Opened project "${project.name}".`;
+        return `Opened project "${project.name}".${await saveOfflineWork()}`;
       });
       const remove = document.createElement('button'); remove.className = 'project-delete'; remove.textContent = 'Delete…'; remove.disabled = busy;
       remove.title = `Delete ${project.name}`; remove.setAttribute('aria-label', `Delete project ${project.name}`);
@@ -826,12 +836,25 @@ export async function startVault(transport, metadata, onSession) {
       }
       for (const id of changed) { keepEditing.delete(id); notMergeable.delete(id); }
       if (info) { try { info.details = await session.info(info.id); } catch (e) { if (e?.code !== 'NotFound') throw e; info = null; } }
-      return changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : demo ? 'Demo vault ready (simulated, not encrypted).' : 'Connected to the vault.';
+      const queued = await saveOfflineWork();
+      return (changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : demo ? 'Demo vault ready (simulated, not encrypted).' : 'Connected to the vault.') + queued;
     }, () => { wb.renderSearch(); if (!session.locked && !session.project) $('new-project-name').focus(); });
+  }
+  // What Save did offline, saved now that the vault is back. Returns a sentence for the status bar ('' if nothing).
+  async function saveOfflineWork() {
+    const result = await session.saveQueued();
+    for (const [oldId] of result.replaced) dropModel(oldId); // new files now have their vault ids; models follow
+    const parts = [];
+    if (result.saved.length) parts.push(`Saved ${result.saved.length} file${result.saved.length === 1 ? '' : 's'} you saved offline: ${result.saved.join(', ')}.`);
+    if (result.failed.length) parts.push(`Not saved, needs your choice: ${result.failed.map(f => `${f.path} (${f.code === 'Conflict' ? 'changed by someone else: Merge' : f.code === 'AlreadyExists' ? 'that name is taken: rename it' : f.code})`).join(', ')}.`);
+    if (result.waiting) parts.push(`${result.waiting} new file${result.waiting === 1 ? '' : 's'} made offline will be saved into the project you open.`);
+    return parts.length ? ' ' + parts.join(' ') : '';
   }
   function save() {
     const f = active();
     if (!f || session.locked || !session.dirty(f.id)) return;
+    if (session.offline) { session.queueSave(f.id); render(); announce(`Offline: ${f.path} will be saved when the vault is back. Until then it is only in this window.`); return; }
+    if (f.pendingCreate) { act(async () => { const id = await session.savePending(f.id); dropModel(f.id); return `Saved ${session.files.get(id).path} to the vault.`; }); return; }
     if (f.deleted) { act(async () => { await session.saveAsNew(f.id); dropModel(f.id); return `${f.path} was deleted by someone else; saved your version as a new file.`; }); return; }
     act(async () => (await session.save(f.id)) ? (demo ? `Saved ${f.path} to the demo vault (in memory, not encrypted).` : `Saved ${f.path} to the vault as a new encrypted revision.`) : 'No unsaved edits.');
   }
@@ -988,13 +1011,14 @@ export async function startVault(transport, metadata, onSession) {
     const ids = session.dirtyIds;
     if (!available()) return;
     if (!ids.length) { announce('No unsaved edits.'); return; }
+    if (session.offline) { for (const id of ids) session.queueSave(id); render(); announce(`Offline: ${ids.length} file${ids.length === 1 ? '' : 's'} will be saved when the vault is back.`); return; }
     act(async () => {
       let saved = 0; const left = [];
       for (const id of ids) {
         const f = session.files.get(id);
         if (!f) continue;
         if (f.deleted || f.conflict) { left.push(f.path); continue; } // these need a choice: open each one
-        try { if (await session.save(id)) saved++; }
+        try { if (f.pendingCreate) { await session.savePending(id); dropModel(id); saved++; } else if (await session.save(id)) saved++; }
         catch (e) { if (session.locked) throw e; if (e?.code === 'Conflict') keepEditing.delete(id); left.push(f.path); }
       }
       const done = `Saved ${saved} file${saved === 1 ? '' : 's'} to the vault.`;
@@ -1120,6 +1144,12 @@ export async function startVault(transport, metadata, onSession) {
   }, true);
 
   $('unlock').onclick = unlock;
+  $('offline-retry').onclick = unlock;
+  $('work-offline').onclick = () => {
+    try { session.goOffline(); } catch { return; }
+    syncModel(); render();
+    announce('Working offline: nothing is saved or encrypted until the vault is back. Closing the editor loses unsaved work.');
+  };
   $('lock').onclick = () => act(async () => { await session.lock(); return 'Locked. The service session ended; unsaved edits are kept in this editor.'; });
   $('save').onclick = save;
   $('conflict-reload').onclick = () => {
@@ -1147,11 +1177,11 @@ export async function startVault(transport, metadata, onSession) {
     event.preventDefault();
     const name = $('new-project-name').value.trim();
     if (!name) return;
-    act(async () => { await session.createProject(name); disposeAllModels(); keepEditing.clear(); picking = false; $('new-project-name').value = ''; return `Created project "${name}".`; });
+    act(async () => { await session.createProject(name); disposeAllModels(); keepEditing.clear(); picking = false; $('new-project-name').value = ''; return `Created project "${name}".${await saveOfflineWork()}`; });
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); clearInternalClipboard(); showDeleted = false; merging = null; notMergeable.clear(); render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { notConnected = null; closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); clearInternalClipboard(); showDeleted = false; merging = null; notMergeable.clear(); render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
   wireChrome(focusedEditor, { onSave: save, isLocked: () => session.locked, skipKey: event => chordKeys.has(event) });
   // In vault mode the rail's search button searches all files (Ctrl+F still finds in the open file).

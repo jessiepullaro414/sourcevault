@@ -69,13 +69,25 @@ export class BridgeClient {
   dispose() { this.#unsubscribe?.(); for (const { timer } of this.#pending.values()) clearTimeout(timer); this.#pending.clear(); }
 }
 
+/** Unlock failures that mean the service can't be reached: only then can the editor work offline. */
+export const OFFLINE_CODES = new Set(['ServiceNotRunning', 'ServiceNotInstalled', 'Timeout', 'ServerUntrusted']);
+// What still talks to the host offline: connecting again, locking, and display settings. Everything else needs the vault.
+const OFFLINE_ALLOWED = new Set(['unlock', 'lock', 'getSettings', 'saveSettings']);
+
 export class VaultSession {
   projects = [];
   project = null;          // { projectId, name, fileCount }
   files = new Map();       // fileId -> { id, path, language, byteLength, kind, sha256, loaded, text, saved, revision, conflict, pending }
   openIds = [];
   activeId = null;
-  locked = true;
+  #locked = true;
+  /**
+   * Offline (owner decision 2026-10-20): the service can't be reached and the user chose to keep working. Files already
+   * open stay editable and new files can be made, all in this window's memory only (nothing is written to disk). Saves
+   * wait for the vault (saveWhenBack). Everything that needs the service is refused with Offline. Any lock ends it.
+   */
+  offline = false;
+  lastUnlockFailure = null; // the code of the last failed unlock
   lockReason = 'start';    // start | user | windows | closed | expired
   savedCount = 0;
   #bridge; #listeners = new Set();
@@ -86,9 +98,12 @@ export class VaultSession {
   /** Called after any state change the UI did not initiate itself (host lock events). */
   onChange(listener) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   #emit() { for (const listener of this.#listeners) listener(); }
-  #setLocked(reason) { this.locked = true; this.lockReason = reason; }
+  /** Locked: nothing can be edited. Offline work is not locked: the files in memory stay editable. */
+  get locked() { return this.#locked && !this.offline; }
+  #setLocked(reason) { this.#locked = true; this.offline = false; this.lockReason = reason; }
 
   async #call(operation, args, options) {
+    if (this.offline && !OFFLINE_ALLOWED.has(operation)) throw new VaultError('Offline'); // needs the vault: never sent
     const { code, result } = await this.#bridge.request(operation, args, options);
     if (code === 'Ok') return result ?? {};
     if (code === 'Locked') this.#setLocked(this.locked ? this.lockReason : 'closed');
@@ -97,7 +112,7 @@ export class VaultSession {
 
   file(id) { const f = this.files.get(id); if (!f) throw new VaultError('UnknownFile'); return f; }
   // A pending merge counts as unsaved even if its text happens to equal the last saved text.
-  dirty(id) { const f = this.files.get(id); return !!f && f.loaded && (f.text !== f.saved || !!f.mergedOnto); }
+  dirty(id) { const f = this.files.get(id); return !!f && f.loaded && (f.text !== f.saved || !!f.mergedOnto || !!f.pendingCreate); }
   get dirtyIds() { return [...this.files.values()].filter(f => this.dirty(f.id)).map(f => f.id); }
   get metadata() {
     return { locked: this.locked, dirtyCount: Math.min(MAX_DIRTY, this.dirtyIds.length), revisionCount: Math.min(MAX_REVISIONS, this.savedCount) };
@@ -105,8 +120,12 @@ export class VaultSession {
 
   /** Opens a session. Returns the ids of opened files that changed in the vault while locked (now marked conflict). */
   async unlock() {
-    const result = await this.#call('unlock');
-    this.locked = false; this.lockReason = null;
+    let result;
+    try { result = await this.#call('unlock'); this.lastUnlockFailure = null; }
+    catch (e) { this.lastUnlockFailure = e.code; throw e; } // offline work, if any, carries on
+    this.#locked = false; this.offline = false; this.lockReason = null;
+    // Offline work begun without a project: show the project list; the new files go into the project chosen there.
+    if (this.project && !this.project.projectId) this.project = null;
     const changed = (result.changed ?? []).filter(c => c.projectId === this.project?.projectId).map(c => c.fileId);
     // A draft already merged onto their version is checked again by its save, so it is not flagged here. An info
     // panel's file (not loaded) is simply shown as it is now. A staged replacement was discarded with the connection.
@@ -122,13 +141,74 @@ export class VaultSession {
     this.#setLocked('user');
   }
 
+  /**
+   * Keeps working while the service can't be reached (after a failed unlock with one of OFFLINE_CODES). Files already
+   * open stay editable; new files are kept in memory. Without an open project, a placeholder holds the new files.
+   */
+  goOffline() {
+    if (!this.#locked || !OFFLINE_CODES.has(this.lastUnlockFailure)) throw new VaultError('InvalidRequest');
+    this.offline = true;
+    if (!this.project) this.project = { projectId: null, name: 'Offline work (not saved yet)', fileCount: 0 };
+  }
+
+  /** Offline: Save marks the file; it is saved when the vault is back (saveQueued). */
+  queueSave(id) {
+    const f = this.file(id);
+    if (!this.dirty(id)) return false;
+    f.saveWhenBack = true;
+    return true;
+  }
+
+  /**
+   * Saves what was saved offline, now that the vault is back: edits of existing files (a file someone else changed
+   * meanwhile is left as a conflict to merge), and new files (when a project is open). Returns { saved: [path],
+   * failed: [{ path, code }], waiting: count (new files waiting for a project), replaced: [[oldId, newId]] }.
+   */
+  async saveQueued() {
+    const result = { saved: [], failed: [], waiting: 0, replaced: [] };
+    if (this.#locked) return result;
+    for (const f of [...this.files.values()].filter(x => x.saveWhenBack)) {
+      if (f.pendingCreate && !this.project?.projectId) { result.waiting++; continue; }
+      f.saveWhenBack = false;
+      try {
+        if (f.pendingCreate) result.replaced.push([f.id, await this.savePending(f.id)]);
+        else if (f.conflict) { result.failed.push({ path: f.path, code: 'Conflict' }); continue; }
+        else await this.save(f.id);
+        result.saved.push(f.path);
+      } catch (e) {
+        if (e.code === 'Locked') throw e;
+        result.failed.push({ path: f.path, code: e.code });
+      }
+    }
+    return result;
+  }
+
+  /** Creates a file made offline in the open project. Returns its new id (the offline one is gone). */
+  async savePending(id) {
+    const f = this.file(id);
+    if (!f.pendingCreate) throw new VaultError('InvalidRequest');
+    if (!this.project?.projectId) throw new VaultError('NoProject');
+    const created = await this.#call('createFile', { projectId: this.project.projectId, name: f.path, text: f.text });
+    this.files.delete(id);
+    const at = this.openIds.indexOf(id);
+    this.files.set(created.fileId, { ...f, id: created.fileId, path: created.name, pendingCreate: false, saveWhenBack: false, saved: f.text, byteLength: new TextEncoder().encode(f.text).length });
+    if (at >= 0) this.openIds[at] = created.fileId; else this.openIds.push(created.fileId);
+    if (this.activeId === id) this.activeId = created.fileId;
+    this.savedCount++;
+    if (this.project) this.project = { ...this.project, fileCount: this.project.fileCount + 1 };
+    return created.fileId;
+  }
+
   async refreshProjects() {
     this.projects = (await this.#call('listProjects')).projects ?? [];
     if (this.project) this.project = this.projects.find(p => p.projectId === this.project.projectId) ?? this.project;
   }
 
+  /** Unsaved edits that stop switching project: everything but new files made offline (those go along). */
+  get #blockingDrafts() { return this.dirtyIds.filter(id => !this.files.get(id).pendingCreate); }
+
   async createProject(name) {
-    if (this.dirtyIds.length) throw new VaultError('UnsavedChanges'); // check before creating anything on the host
+    if (this.#blockingDrafts.length) throw new VaultError('UnsavedChanges'); // check before creating anything on the host
     const created = await this.#call('createProject', { name });
     await this.refreshProjects();
     await this.selectProject(created.projectId);
@@ -153,12 +233,13 @@ export class VaultSession {
 
   /** Switches project. Refused with unsaved edits; documents of the previous project are closed on the host. */
   async selectProject(projectId) {
-    if (this.dirtyIds.length) throw new VaultError('UnsavedChanges');
-    if (this.project) for (const id of [...this.openIds]) await this.#call('closeDocument', { projectId: this.project.projectId, fileId: id });
+    if (this.#blockingDrafts.length) throw new VaultError('UnsavedChanges');
+    const carried = [...this.files.values()].filter(f => f.pendingCreate); // new files made offline go into this project
+    if (this.project?.projectId) for (const id of this.openIds.filter(id => !this.files.get(id)?.pendingCreate)) await this.#call('closeDocument', { projectId: this.project.projectId, fileId: id });
     this.project = this.projects.find(p => p.projectId === projectId) ?? null;
     if (!this.project) throw new VaultError('NotFound');
     if (this.project.available === false) { this.project = null; throw new VaultError('Unavailable'); } // offline: failed its integrity check
-    this.files = new Map(); this.openIds = []; this.activeId = null;
+    this.files = new Map(carried.map(f => [f.id, f])); this.openIds = carried.map(f => f.id); this.activeId = this.openIds.at(-1) ?? null;
     await this.#refreshFiles();
   }
 
@@ -173,7 +254,8 @@ export class VaultSession {
         : { id: info.fileId, ...listing, loaded: false, text: null, saved: null, revision: 0, conflict: false, pending: false });
     }
     // Someone else deleted a file this editor holds a draft of: keep the draft, marked, so it can be saved as a new file.
-    for (const [id, f] of this.files) if (!next.has(id) && this.dirty(id)) next.set(id, { ...f, deleted: true });
+    // New files made offline aren't in the vault yet: they simply stay.
+    for (const [id, f] of this.files) if (!next.has(id) && this.dirty(id)) next.set(id, f.pendingCreate ? f : { ...f, deleted: true });
     this.files = next;
     this.openIds = this.openIds.filter(id => this.files.has(id));
     if (this.activeId && !this.files.has(this.activeId)) this.activeId = this.openIds.at(-1) ?? null;
@@ -226,7 +308,7 @@ export class VaultSession {
   }
 
   edit(id, text) {
-    if (this.locked) throw new VaultError('Locked');
+    if (this.locked) throw new VaultError('Locked'); // offline is not locked: open files stay editable
     if (typeof text !== 'string') throw new TypeError('TextRequired');
     const f = this.file(id);
     if (!f.loaded) throw new VaultError('NotOpen');
@@ -281,6 +363,11 @@ export class VaultSession {
   /** Renames or moves a file. Its text, draft and tab stay as they are; only the path changes. */
   async renameFile(id, newName) {
     const f = this.file(id);
+    if (f.pendingCreate) { // not in the vault yet: only its name here changes
+      if ([...this.files.values()].some(o => o !== f && o.path.toLowerCase() === newName.toLowerCase())) throw new VaultError('AlreadyExists');
+      f.path = newName; f.language = languageFor(newName);
+      return;
+    }
     await this.#call('renameFile', { projectId: this.project.projectId, fileId: id, newName });
     f.path = newName; f.language = languageFor(newName);
   }
@@ -414,6 +501,7 @@ export class VaultSession {
   /** Deletes a file from the vault. Refused with unsaved edits; Conflict if someone else changed it since it was opened. */
   async deleteFile(id) {
     const f = this.file(id);
+    if (f.pendingCreate) { this.files.delete(id); this.openIds = this.openIds.filter(x => x !== id); if (this.activeId === id) this.activeId = this.openIds.at(-1) ?? null; return; } // discards it
     if (!f.deleted && this.dirty(id)) throw new VaultError('UnsavedChanges'); // a draft of a file deleted elsewhere may be discarded
     if (!f.deleted) await this.#call('deleteFile', { projectId: this.project.projectId, fileId: id });
     this.#forget(id);
@@ -496,6 +584,17 @@ export class VaultSession {
   /** Opens a finished build's output folder in Explorer (the host gets the folder from the service). */
   async openBuildFolder(buildNumber) { await this.#call('openBuildFolder', { projectId: this.project.projectId, buildNumber }); }
 
+  // A new file made offline: in memory only, created in the vault by savePending once it is back.
+  #createOffline(name, text) {
+    if (tooLarge(text)) throw new VaultError('LimitExceeded');
+    if ([...this.files.values()].some(f => f.path.toLowerCase() === name.toLowerCase())) throw new VaultError('AlreadyExists');
+    const id = crypto.randomUUID();
+    this.files.set(id, { id, path: name, language: languageFor(name), byteLength: 0, kind: 'text', sha256: null, loaded: true, text, saved: '',
+      revision: 0, conflict: false, deleted: false, pending: false, pendingCreate: true });
+    this.openIds.push(id); this.activeId = id;
+    return id;
+  }
+
   #forget(id) {
     this.files.delete(id);
     this.openIds = this.openIds.filter(x => x !== id);
@@ -504,6 +603,7 @@ export class VaultSession {
   }
 
   async createFile(name, text = '') {
+    if (this.offline) return this.#createOffline(name, text);
     if (tooLarge(text)) throw new VaultError('LimitExceeded');
     const created = await this.#call('createFile', { projectId: this.project.projectId, name, text });
     this.files.set(created.fileId, { id: created.fileId, path: created.name, language: languageFor(created.name),
