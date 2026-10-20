@@ -710,21 +710,20 @@ string NewSourceFolder()
     return root;
 }
 
-Test("importer: scan includes UTF-8 text only and explains every skip; links are not followed", () =>
+Test("importer: scan takes any file (binary, Latin-1, over 256 KiB) and explains every skip; links are not followed", () =>
 {
     var root = NewSourceFolder();
     var junction = Path.Combine(root, "linked");
     var linked = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{junction}\" \"{Path.Combine(root, "src")}\"") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true })!;
     linked.WaitForExit();
     var plan = SourceVault.Import.ImportPlan.Scan(root);
-    Assert(plan.Files.Select(f => f.Path).SequenceEqual(new[] { ".gitignore", "README.md", "src/app/main.ts", "src/util.ts" }), "included: " + string.Join(",", plan.Files.Select(f => f.Path)));
+    Assert(plan.Files.Select(f => f.Path).SequenceEqual(new[] { ".gitignore", "assets/logo.png", "big.txt", "latin1.txt", "README.md", "src/app/main.ts", "src/util.ts" }), "included: " + string.Join(",", plan.Files.Select(f => f.Path)));
     string Reason(string path) => plan.Skipped.Single(s => s.Path == path).Reason;
     Assert(Reason("node_modules/") == SourceVault.Import.ImportPlan.ExcludedFolder && Reason("bin/") == SourceVault.Import.ImportPlan.ExcludedFolder, "excluded folders");
-    Assert(Reason("assets/logo.png") == SourceVault.Import.ImportPlan.NotText && Reason("latin1.txt") == SourceVault.Import.ImportPlan.NotText, "binary and non-UTF-8");
-    Assert(Reason("big.txt") == SourceVault.Import.ImportPlan.TooLarge, "too large");
+    Assert(plan.Files.Single(f => f.Path == "big.txt").Length == 262145 && plan.LimitProblem is null, "large file and limits");
     if (Directory.Exists(junction)) Assert(Reason("linked") == SourceVault.Import.ImportPlan.Link, "junction not followed");
     var withExtra = SourceVault.Import.ImportPlan.Scan(root, ["src"]);
-    Assert(withExtra.Files.Count == 2 && withExtra.Skipped.Any(s => s.Path == "src/"), "--exclude adds folders");
+    Assert(withExtra.Files.Count == 5 && withExtra.Skipped.Any(s => s.Path == "src/"), "--exclude adds folders");
 });
 
 Test("importer: imports into a new project, verifies every file byte for byte, refuses an existing name", () =>
@@ -737,7 +736,7 @@ Test("importer: imports into a new project, verifies every file byte for byte, r
         var plan = SourceVault.Import.ImportPlan.Scan(root);
         var output = new StringWriter();
         Assert(SourceVault.Import.Importer.Run(plan, "Imported app", Connect, output) == 0, "import: " + output);
-        Assert(output.ToString().Contains("all 4 decrypted and matched"), "verified");
+        Assert(output.ToString().Contains("all 7 match the originals"), "verified: " + output);
         Assert(!output.ToString().Contains("synthetic'") && !output.ToString().Contains("✓"), "no content printed");
         using (var c = new Client(pipe, me))
         {
@@ -754,6 +753,11 @@ Test("importer: imports into a new project, verifies every file byte for byte, r
         File.AppendAllText(Path.Combine(root, "src", "util.ts"), "// edited after the scan\n");
         try { SourceVault.Import.Importer.Run(plan, "Second import", Connect, new StringWriter()); throw new Exception("changed file accepted"); }
         catch (SourceVault.Import.ImportException e) { Assert(e.Message.Contains("changed after it was scanned"), "changed file"); }
+        // A large file changed after the scan (same length) is refused by the service at its last byte.
+        var plan2 = SourceVault.Import.ImportPlan.Scan(root);
+        var big = Path.Combine(root, "big.txt"); var bigBytes = File.ReadAllBytes(big); bigBytes[^1] = (byte)'y'; File.WriteAllBytes(big, bigBytes);
+        try { SourceVault.Import.Importer.Run(plan2, "Third import", Connect, new StringWriter()); throw new Exception("changed large file accepted"); }
+        catch (SourceVault.Import.ImportException e) { Assert(e.Message.Contains("big.txt changed after it was scanned"), e.Message); }
     }
 });
 
@@ -789,8 +793,10 @@ Test("importer --delete-source: typed DELETE only; deletes unchanged imported fi
     Assert(!File.Exists(Path.Combine(root, "src", "app", "main.ts")) && !Directory.Exists(Path.Combine(root, "src", "app")), "emptied folder removed");
     Assert(Directory.Exists(Path.Combine(root, "src")), "folder with a kept file stays");
     if (linked) Assert(File.Exists(Path.Combine(root, "linked.ts")) && File.ReadAllText(hardLink) == "export const linked = 1;\n" && text.Contains(SourceVault.Import.SourceCleanup.HardLinked), "hard link untouched");
-    foreach (var keep in new[] { @".git\HEAD", @"node_modules\left-pad\index.js", @"bin\Debug\app.dll", @"assets\logo.png", "big.txt", "latin1.txt" })
+    foreach (var keep in new[] { @".git\HEAD", @"node_modules\left-pad\index.js", @"bin\Debug\app.dll" })
         Assert(File.Exists(Path.Combine(root, keep)), "skipped item kept: " + keep);
+    foreach (var gone in new[] { @"assets\logo.png", "big.txt", "latin1.txt" }) // imported now (any file), so deleted like the rest
+        Assert(!File.Exists(Path.Combine(root, gone)), "imported binary or large file deleted: " + gone);
     Assert(Directory.Exists(root), "root kept");
     Assert(!text.Contains("synthetic'") && !text.Contains("✓"), "no content printed");
 });
@@ -1089,7 +1095,7 @@ Test("SourceVault Pack: scan, recipient check and confirmation, then a package t
 
         var dry = new StringWriter();
         Assert(pack::SourceVault.Pack.Commands.Pack([source, "--to", recipientPath, "--dry-run"], dry, () => throw new Exception("no prompt in a dry run"), Signer) == 0, "dry run: " + dry);
-        Assert(dry.ToString().Contains("2 file(s) to pack") && dry.ToString().Contains("logo.png") && dry.ToString().Contains(".git/") && dry.ToString().Contains(packages.Recipient.FingerprintText), "plan and fingerprint shown");
+        Assert(dry.ToString().Contains("3 file(s) to pack") && dry.ToString().Contains(".git/") && dry.ToString().Contains(packages.Recipient.FingerprintText), "plan and fingerprint shown: " + dry);
         Assert(!File.Exists(outPath), "dry run wrote nothing");
 
         var declined = new StringWriter();
@@ -1104,12 +1110,14 @@ Test("SourceVault Pack: scan, recipient check and confirmation, then a package t
 
         SourceVault.Client.VaultClient Connect() => new(VaultPipe.Connect(pipe, me, TimeSpan.FromSeconds(5)));
         var imported = new StringWriter();
-        Assert(SourceVault.Import.PackageImport.Run(outPath, "Packed elsewhere", Connect, imported) == 0 && imported.ToString().Contains("Imported 2 file(s)"), "service imports what Pack wrote: " + imported);
+        Assert(SourceVault.Import.PackageImport.Run(outPath, "Packed elsewhere", Connect, imported) == 0 && imported.ToString().Contains("Imported 3 file(s)"), "service imports what Pack wrote: " + imported);
         using var c = new Client(pipe, me);
         c.Begin();
         var id = c.Ok("ListProjects").GetProperty("projects").EnumerateArray().Single(p => p.GetProperty("name").GetString() == "Packed elsewhere").GetProperty("projectId").GetString()!;
-        var names = c.Ok("ListFiles", ("projectId", id)).GetProperty("files").EnumerateArray().Select(f => f.GetProperty("name").GetString()).Order().ToArray();
-        Assert(names.SequenceEqual(["README.md", "src/app.cs"]), "exactly the text files, without .git or the binary");
+        var listed = c.Ok("ListFiles", ("projectId", id)).GetProperty("files").EnumerateArray().ToList();
+        Assert(listed.Select(f => f.GetProperty("name").GetString()).Order(StringComparer.Ordinal).SequenceEqual(["README.md", "logo.png", "src/app.cs"]), "every file, without .git");
+        var logo = listed.Single(f => f.GetProperty("name").GetString() == "logo.png");
+        Assert(logo.GetProperty("kind").GetString() == "binary" && logo.GetProperty("sha256").GetString() == Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(source, "logo.png")))), "the binary arrives byte-exact");
     }
 });
 

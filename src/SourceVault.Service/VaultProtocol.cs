@@ -16,8 +16,11 @@ internal sealed class ConnectionState
     internal bool Closed; // terminal: expired, ended, revoked or rejected
     internal uint WindowsSession;
     internal string? Actor; // the operator's account name, recorded in encrypted file history
-    internal byte[]? Upload; // a package being uploaded (ciphertext), at most one per connection
-    internal int UploadReceived;
+    // A package being uploaded, at most one per connection: spooled to staging\ as it arrives (ciphertext), hashed on the way.
+    internal FileStream? PackageSpool;
+    internal string? PackageFolder;
+    internal IncrementalHash? PackageHash;
+    internal long PackageLength, UploadReceived;
     internal Action? OnClose; // releases an upload's service-wide slot when the connection closes
     // File uploads in parts (docs/vault-any-file-design.md section 3.2): ciphertext in this connection's staging folder.
     internal readonly Dictionary<Guid, FileUpload> FileUploads = new();
@@ -561,6 +564,7 @@ internal sealed class VaultProtocol
     // ---- encrypted packages from another computer (docs/package-import-design.md) ---------------------------------
 
     internal const int MaxPackagePartBytes = 512 * 1024;
+    internal const int PackageCommitFiles = 1024; // staged records per commit of a package import
 
     /// <summary>This PC's recipient file (the import key's public half): public, for SourceVault Pack on the other computer.</summary>
     private ProtocolResponse GetImportRecipient(ParsedRequest request, PackageImports packages)
@@ -575,19 +579,37 @@ internal sealed class VaultProtocol
         });
     }
 
-    /// <summary>Starts an upload of <c>length</c> bytes. One per connection, and one at a time across the service.</summary>
+    /// <summary>
+    /// Starts an upload of <c>length</c> bytes, spooled to this connection's folder in staging\ (the package is ciphertext)
+    /// and hashed as it arrives. One per connection, and one at a time across the service.
+    /// </summary>
     private ProtocolResponse BeginPackageImport(ParsedRequest request, ConnectionState state, PackageImports packages)
     {
         Require(request.Body, "capability", "length");
         var value = request.Body.GetProperty("length");
-        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out long length) || length < Package.HeaderBytes + Package.SignatureBytes || state.Upload is not null)
+        if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out long length) || length < Package.HeaderBytes + Package.SignatureBytes || state.PackageSpool is not null)
             throw new RequestException("InvalidRequest");
         if (length > Package.MaxPackageBytes) throw new RequestException("LimitExceeded");
         if (!packages.TryEnter()) throw new RequestException("Unavailable"); // another package import is running
-        state.Upload = new byte[length];
-        state.UploadReceived = 0;
         int released = 0; // the connection closing (another thread) and FinishPackageImport may both release it
-        state.OnClose = () => { if (Interlocked.Exchange(ref released, 1) == 1) return; state.Upload = null; packages.Exit(); };
+        state.OnClose = () =>
+        {
+            if (Interlocked.Exchange(ref released, 1) == 1) return;
+            state.PackageSpool?.Dispose(); state.PackageSpool = null; // DeleteOnClose
+            state.PackageHash?.Dispose(); state.PackageHash = null;
+            if (state.PackageFolder is { } folder) try { Directory.Delete(folder, recursive: true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+            state.PackageFolder = null;
+            packages.Exit();
+        };
+        try
+        {
+            state.PackageFolder = catalog.CreateStagingFolder();
+            state.PackageSpool = new FileStream(Path.Combine(state.PackageFolder, "package.svpkg"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 81920, FileOptions.DeleteOnClose);
+            state.PackageHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            state.PackageLength = length;
+            state.UploadReceived = 0;
+        }
+        catch { state.OnClose(); state.OnClose = null; throw; }
         return Ok(request, _ => { });
     }
 
@@ -595,13 +617,16 @@ internal sealed class VaultProtocol
     private ProtocolResponse PackageImportPart(ParsedRequest request, ConnectionState state)
     {
         Require(request.Body, "capability", "offset", "dataBase64");
-        var upload = state.Upload ?? throw new RequestException("InvalidRequest");
+        var spool = state.PackageSpool ?? throw new RequestException("InvalidRequest");
         var offset = request.Body.GetProperty("offset");
         if (offset.ValueKind != JsonValueKind.Number || !offset.TryGetInt64(out long at) || at != state.UploadReceived) throw new RequestException("InvalidRequest");
         var data = request.Body.GetProperty("dataBase64");
         if (data.ValueKind != JsonValueKind.String || !data.TryGetBytesFromBase64(out var bytes) || bytes.Length == 0) throw new RequestException("InvalidRequest");
-        if (bytes.Length > MaxPackagePartBytes || state.UploadReceived + bytes.Length > upload.Length) throw new RequestException("LimitExceeded");
-        bytes.CopyTo(upload, state.UploadReceived);
+        if (bytes.Length > MaxPackagePartBytes || state.UploadReceived + bytes.Length > state.PackageLength) throw new RequestException("LimitExceeded");
+        spool.Write(bytes);
+        // The signature covers everything before its own 256 bytes: hash exactly that, as it arrives.
+        long signedEnd = state.PackageLength - Package.SignatureBytes;
+        if (state.UploadReceived < signedEnd) state.PackageHash!.AppendData(bytes, 0, (int)Math.Min(bytes.Length, signedEnd - state.UploadReceived));
         state.UploadReceived += bytes.Length;
         return Ok(request, w => w.WriteNumber("received", state.UploadReceived));
     }
@@ -616,39 +641,56 @@ internal sealed class VaultProtocol
         try
         {
             Require(request.Body, "capability", "projectName");
-            var upload = state.Upload;
-            if (upload is null || state.UploadReceived != upload.Length) throw new RequestException("InvalidRequest");
+            var spool = state.PackageSpool;
+            if (spool is null || state.UploadReceived != state.PackageLength) throw new RequestException("InvalidRequest");
             var name = Text(request.Body, "projectName");
             try { ProjectCatalog.ValidateProjectName(name); } catch (ArgumentException) { throw new RequestException("InvalidRequest"); }
-            PackageContents contents;
-            try { contents = packages.Open(upload); }
+            spool.Flush(true);
+            PackageReader reader;
+            try { reader = packages.Open(spool, state.PackageHash!.GetHashAndReset()); }
             catch (PackageRejectedException) { throw new RequestException("PackageRejected"); }
             catch (UnknownSenderException) { throw new RequestException("UnknownSender"); }
-            using (contents)
+            using (reader)
             {
-                var sender = packages.RegisteredSender(contents.SenderFingerprint)?.Computer ?? throw new RequestException("UnknownSender");
+                var sender = packages.RegisteredSender(reader.SenderFingerprint)?.Computer ?? throw new RequestException("UnknownSender");
                 var created = catalog.CreateProject(name); // a taken name is AlreadyExists, before anything is written
                 projects[created.ProjectId] = true;
-                StoreSnapshot next;
+                StoreSnapshot next = created.Snapshot;
+                var staged = new List<(string Path, StagedFile File)>();
+                var folder = catalog.CreateStagingFolder();
                 try
                 {
                     var store = catalog.OpenProject(created.ProjectId);
-                    next = store.CommitChanges(created.Snapshot.SnapshotId,
-                        contents.Files.Select(f => (StoreChange)new StoreChange.Write(f.Path, f.Content, "imported")).ToList(), state.Actor);
+                    // Each file streams from the package straight into a staged SVR2 record (one chunk in memory), then the
+                    // records are committed in batches, with the history action "imported".
+                    using (var session = store.BeginImport(folder))
+                    {
+                        StoreUpload? current = null;
+                        try
+                        {
+                            reader.ReadContents(
+                                (entry, piece) => { current ??= session.Begin(entry.Length, entry.Sha256); current.Write(piece); },
+                                entry => { current ??= session.Begin(entry.Length, entry.Sha256); staged.Add((entry.Path, current.Complete())); current.Dispose(); current = null; });
+                        }
+                        finally { current?.Dispose(); }
+                    }
+                    foreach (var batch in staged.Chunk(PackageCommitFiles))
+                        next = store.CommitChanges(next.SnapshotId, batch.Select(s => (StoreChange)new StoreChange.Stage(s.File, s.Path, "imported")).ToList(), state.Actor);
                 }
                 catch (Exception e) when (e is not OutOfMemoryException)
                 {
-                    // All or nothing: remove the empty project again. A file/folder path clash inside the package is the package's fault.
+                    // All or nothing: remove the new project again. A path clash or bad content inside the package is the package's fault.
                     try { catalog.DeleteProject(created.ProjectId, name); projects.TryRemove(created.ProjectId, out _); } catch (Exception cleanup) when (cleanup is not OutOfMemoryException) { }
-                    if (e is NameExistsException) throw new RequestException("PackageRejected");
+                    if (e is NameExistsException or PackageRejectedException) throw new RequestException("PackageRejected");
                     throw;
                 }
+                finally { try { Directory.Delete(folder, recursive: true); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { } }
                 return Ok(request, w =>
                 {
                     w.WriteString("projectId", created.ProjectId.ToString("D"));
                     w.WriteString("snapshotId", next.SnapshotId.ToString("D"));
-                    w.WriteNumber("imported", contents.Files.Count);
-                    w.WriteString("packageId", contents.PackageId.ToString("D"));
+                    w.WriteNumber("imported", staged.Count);
+                    w.WriteString("packageId", reader.PackageId.ToString("D"));
                     w.WriteString("sender", sender);
                 });
             }

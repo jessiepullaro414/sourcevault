@@ -6,6 +6,19 @@ namespace SourceVault.Storage;
 /// <summary>An upload whose SVR2 record is complete in the staging folder, ready for <see cref="StoreChange.Stage"/>.</summary>
 public sealed record StagedFile(Guid FileId, Guid RevisionId, long Length, FileKind Kind, byte[] Sha256, byte[] RecordSha256, string Path, bool NewFile, Guid ProjectKeyId);
 
+/// <summary>Stages the files of one import under a project key held for the session (see RevisionStore.BeginImport).</summary>
+public sealed class StoreImportSession : IDisposable
+{
+    private readonly Func<long, byte[], StoreUpload> begin;
+    private readonly IDisposable keys;
+    internal StoreImportSession(Func<long, byte[], StoreUpload> begin, IDisposable keys) { this.begin = begin; this.keys = keys; }
+
+    /// <summary>A new file of <paramref name="length"/> bytes whose plaintext must have <paramref name="sha256"/>.</summary>
+    public StoreUpload Begin(long length, byte[] sha256) => begin(length, sha256);
+
+    public void Dispose() => keys.Dispose();
+}
+
 /// <summary>The operation needs text and this revision is binary (protocol code NotText).</summary>
 public sealed class NotTextException() : Exception("The revision is not text.");
 
@@ -138,6 +151,35 @@ public sealed partial class RevisionStore
         var revisionId = Guid.NewGuid();
         var path = Path.Combine(stagingFolder, revisionId.ToString("D") + ".svr");
         return new StoreUpload(path, new(projectId, fileId, revisionId, RecordKind.Document), length, (byte[])sha256.Clone(), replaceFileId is null, keys.Get());
+    }
+
+    /// <summary>
+    /// Stages many new files into <paramref name="stagingFolder"/> for one import (a package), reading the manifest and
+    /// unwrapping the project key once instead of once per file. The key is held until the session is disposed; commit
+    /// the staged files with <see cref="StoreChange.Stage"/>.
+    /// </summary>
+    public StoreImportSession BeginImport(string stagingFolder)
+    {
+        if (!Path.IsPathFullyQualified(stagingFolder) || !Directory.Exists(stagingFolder)) throw new ArgumentException("Invalid staging folder.");
+        CheckAncestors(stagingFolder);
+        using var lease = AcquireLock();
+        var manifest = ReadCurrent();
+        var keys = new KeyScope(this, manifest);
+        try
+        {
+            if (manifest.Key is null) PublishNext(manifest, Snapshot(Guid.NewGuid(), manifest.Snapshot.Files), manifest.DocumentSha256, manifest.History, manifest.Deleted, keys);
+            var key = keys.Get();
+            return new StoreImportSession((length, sha256) =>
+            {
+                if (length < 0 || length > MaximumFileBytes) throw new StoreLimitException("A file is larger than 1 GiB.");
+                if (sha256 is not { Length: 32 }) throw new ArgumentException("Invalid SHA-256.");
+                EnsureFreeSpace(length + (1L << 20));
+                var revisionId = Guid.NewGuid();
+                return new StoreUpload(Path.Combine(stagingFolder, revisionId.ToString("D") + ".svr"), new(projectId, Guid.NewGuid(), revisionId, RecordKind.Document),
+                    length, (byte[])sha256.Clone(), newFile: true, key);
+            }, keys);
+        }
+        catch { keys.Dispose(); throw; }
     }
 
     // A staged record must be exactly as completed: same size, same SHA-256, not a link, under this store's project key.

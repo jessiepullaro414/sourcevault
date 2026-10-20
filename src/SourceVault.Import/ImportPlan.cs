@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using SourceVault.Storage;
 
 namespace SourceVault.Import;
@@ -8,30 +7,35 @@ internal sealed record ImportCandidate(string Path, string FullPath, long Length
 internal sealed record SkippedItem(string Path, string Reason);
 
 /// <summary>
-/// What an import would bring in from a folder. Only UTF-8 text files the vault accepts are included; everything else
-/// is listed with a reason. Links (symbolic links, junctions) are never followed. Reads files as the person running
-/// the import; nothing is changed on disk.
+/// What an import would bring in from a folder: every file, whatever its content (docs/vault-any-file-design.md section
+/// 5.1), except excluded folders, links and junctions (never followed), names the vault can't hold, case duplicates,
+/// unreadable files and files over 1 GiB, each listed with a reason. A plan over 25,000 files or 8 GiB is refused as a
+/// whole (<see cref="LimitProblem"/>). Each file is read once to hash it; nothing is changed on disk.
 /// </summary>
 internal sealed class ImportPlan
 {
     internal static readonly string[] DefaultExcludedFolders =
         [".git", ".svn", ".hg", "node_modules", "bin", "obj", "dist", "build", "out", "target", ".vs", ".idea",
          "__pycache__", ".venv", "venv", "packages", ".gradle", ".next", "coverage"];
-    internal const string TooLarge = "larger than 256 KiB";
-    internal const string NotText = "binary or not UTF-8 text";
+    internal const string TooLarge = "larger than 1 GiB";
     internal const string BadName = "name not allowed in the vault";
     internal const string Link = "link or junction (not followed)";
     internal const string ExcludedFolder = "excluded folder";
     internal const string CaseDuplicate = "name differs from another only by letter case";
     internal const string Unreadable = "could not be read";
-    private const int MaxBytes = 256 * 1024;
-    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private const long MaxBytes = RevisionStore.MaximumFileBytes;
 
     /// <summary>Full path of the scanned folder.</summary>
     public required string Root { get; init; }
     public required IReadOnlyList<ImportCandidate> Files { get; init; }
     public required IReadOnlyList<SkippedItem> Skipped { get; init; }
     public long TotalBytes => Files.Sum(f => f.Length);
+
+    /// <summary>Why the whole plan can't go into one project (too many files or bytes), or null.</summary>
+    public string? LimitProblem =>
+        Files.Count > RevisionStore.MaximumFiles ? $"Too many files: a project holds at most {RevisionStore.MaximumFiles:N0}. Exclude more folders with --exclude."
+        : TotalBytes > RevisionStore.MaximumProjectBytes ? $"Too large: a project holds at most {RevisionStore.MaximumProjectBytes >> 30} GiB. Exclude more folders with --exclude."
+        : null;
 
     internal static ImportPlan Scan(string root, IEnumerable<string>? extraExcludedFolders = null)
     {
@@ -63,27 +67,19 @@ internal sealed class ImportPlan
                 var file = (FileInfo)entry;
                 if (!RevisionStore.IsValidLogicalName(path)) { skipped.Add(new(path, BadName)); continue; }
                 if (file.Length > MaxBytes) { skipped.Add(new(path, TooLarge)); continue; }
-                byte[] bytes;
-                try { bytes = File.ReadAllBytes(file.FullName); }
-                catch (Exception e) when (e is UnauthorizedAccessException or IOException) { skipped.Add(new(path, Unreadable)); continue; }
+                if (!seen.Add(path)) { skipped.Add(new(path, CaseDuplicate)); continue; }
+                byte[] hash; long length;
                 try
                 {
-                    if (!IsText(bytes)) { skipped.Add(new(path, NotText)); continue; }
-                    if (!seen.Add(path)) { skipped.Add(new(path, CaseDuplicate)); continue; }
-                    files.Add(new(path, file.FullName, bytes.Length, SHA256.HashData(bytes)));
+                    using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.SequentialScan);
+                    length = stream.Length;
+                    hash = SHA256.HashData(stream); // streamed: the file is never all in memory
                 }
-                finally { CryptographicOperations.ZeroMemory(bytes); }
+                catch (Exception e) when (e is UnauthorizedAccessException or IOException) { seen.Remove(path); skipped.Add(new(path, Unreadable)); continue; }
+                files.Add(new(path, file.FullName, length, hash));
             }
         }
         files.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Path, b.Path));
         return new ImportPlan { Root = rootInfo.FullName, Files = files, Skipped = skipped };
-    }
-
-    /// <summary>Strict UTF-8 without NUL bytes. UTF-16 files (full of NULs) and binaries are excluded.</summary>
-    internal static bool IsText(ReadOnlySpan<byte> bytes)
-    {
-        if (bytes.IndexOf((byte)0) >= 0) return false;
-        try { _ = StrictUtf8.GetCharCount(bytes); return true; }
-        catch (DecoderFallbackException) { return false; }
     }
 }

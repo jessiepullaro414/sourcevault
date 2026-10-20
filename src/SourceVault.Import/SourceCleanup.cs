@@ -96,11 +96,11 @@ internal static class SourceCleanup
             {
                 if (stream.Length != file.Length) return Changed;
                 if (LinkCount(stream.SafeFileHandle) != 1) return HardLinked;
-                content = new byte[stream.Length];
-                stream.ReadExactly(content);
-                if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(content), file.Sha256)) return Changed;
+                // Streamed: a file can be up to 1 GiB, so it is never read into memory whole.
+                if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(stream), file.Sha256)) return Changed;
                 stream.Position = 0;
-                stream.Write(new byte[content.Length]);
+                content = new byte[(int)Math.Min(1 << 20, Math.Max(1, stream.Length))]; // zeros
+                for (long left = stream.Length; left > 0; left -= content.Length) stream.Write(content, 0, (int)Math.Min(content.Length, left));
                 stream.Flush(flushToDisk: true);
             }
             File.Delete(file.FullPath);

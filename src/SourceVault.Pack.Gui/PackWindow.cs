@@ -76,7 +76,7 @@ internal sealed class PackWindow : Window
         senderText.Text = "Checking this computer's TPM signing key…";
         recipientText.Text = "No recipient file chosen.";
         folderText.Text = "No folder chosen.";
-        statusText.Text = "Only UTF-8 text files up to 256 KiB are packed (at most 1,024); your folder is never changed.";
+        statusText.Text = "Any file up to 1 GiB is packed (at most 25,000 files and 8 GiB); your folder is never changed.";
         Loaded += (_, _) => Run(RefreshSender);
     }
 
