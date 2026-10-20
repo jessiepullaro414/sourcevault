@@ -49,6 +49,12 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 | [ ] | **Offline work:** with a file open, stop the service; lock and unlock the editor (it can't connect): **Work offline**, edit, make a new file, Save both; Win+L hides them and unlocking Windows shows the lock screen, not the files; start the service, **Try again**: both are saved. Search the profile and `%TEMP%` for a marker typed offline: not found | admin |
 | [ ] | **Check codes:** Pack (window and `init`), `--export-recipient` and `-RegisterSender` all show the same six-group code for the same key | second PC |
 
+## Security fixes (2026-10-20)
+
+| Done | Test | Needs |
+|---|---|---|
+| [ ] | **Docker pipe owner:** with the real Windows engine running, a build still works. Its pipe's owner, `(Get-Acl '\\.\pipe\docker_engine').Owner`, is SYSTEM or Administrators. Stop the engine, create a pipe with that name as a normal user (a small PowerShell `NamedPipeServerStream`), request a build: it ends *could not run* with *something other than the Docker engine answered*, and the pipe receives no data | admin; Docker |
+
 ## Any-file vault (no sign-out or reboot; synthetic files only)
 
 Generate the files; never use real source or downloaded binaries. Start from a vault backup you can restore, because **the upgrade is one-way**: after the first change to a project, an older version refuses the vault.

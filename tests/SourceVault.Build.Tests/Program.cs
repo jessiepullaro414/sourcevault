@@ -222,10 +222,31 @@ Test("build: the windows cleanup line quotes the configured paths", () =>
 });
 
 // ---- Docker Engine API client over a named pipe ---------------------------------------------------------------------
+// The fake engine's pipe is owned by whoever runs the tests; the real client trusts only SYSTEM and Administrators.
+var TestPipeOwner = new HashSet<System.Security.Principal.SecurityIdentifier> { System.Security.Principal.WindowsIdentity.GetCurrent().Owner!, System.Security.Principal.WindowsIdentity.GetCurrent().User! };
+
+Test("docker client: a pipe not owned by SYSTEM or Administrators is refused before anything is sent (a squatter)", () =>
+{
+    using var server = new FakeDockerServer();
+    var owner = System.Security.Principal.WindowsIdentity.GetCurrent().Owner!;
+    if (DockerEngineClient.TrustedPipeOwners.Contains(owner)) { Console.WriteLine("SKIP squatter pipe: tests run elevated, so the fake pipe is owned by Administrators"); return; }
+    using var client = new DockerEngineClient(new Uri($"npipe://./pipe/{server.PipeName}"));
+    try { Run(client.InspectAsync("box", default)); throw new Exception("a user's pipe was trusted"); }
+    catch (Exception e) when (e is not Exception { Message: "a user's pipe was trusted" })
+    {
+        for (var inner = e; ; inner = inner.InnerException ?? throw new Exception("not refused as untrusted: " + e.GetType().Name))
+            if (inner is DockerEngineUntrustedException) break;
+    }
+    Assert(server.Requests.Count == 0, "nothing was sent to it");
+    var outcome = Run(BuildRunner.RunAsync(BuildConfig.Parse(Utf8(Config(LinuxTarget, Dest().Replace("\\", "\\\\")))).Targets[0], Dest(), Guid.NewGuid(), 1,
+        new InMemoryBuildSource(Source()), client, default));
+    Assert(outcome.Reason == "EngineUntrusted" && server.Requests.Count == 0, "the build stops with EngineUntrusted, still nothing sent: " + outcome.Reason);
+});
+
 Test("docker client: inspect, upload, exec with multiplexed output, archive download, restart, errors", () =>
 {
     using var server = new FakeDockerServer();
-    using var client = new DockerEngineClient(new Uri($"npipe://./pipe/{server.PipeName}"));
+    using var client = new DockerEngineClient(new Uri($"npipe://./pipe/{server.PipeName}"), null, null, TestPipeOwner); // the fake's pipe is ours
     var info = Run(client.InspectAsync("box", default));
     Assert(info is { Running: true, NetworkMode: "none", Os: "linux" }, "inspect");
     try { Run(client.InspectAsync("missing", default)); throw new Exception("404 accepted"); }

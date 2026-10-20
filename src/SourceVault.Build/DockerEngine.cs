@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 
@@ -17,6 +18,12 @@ public sealed class DockerException(int status) : Exception($"Docker engine erro
 {
     public int Status { get; } = status;
 }
+
+/// <summary>
+/// Something other than the Docker engine owns its named pipe: any local user can create a pipe with that name while the
+/// engine isn't running. Refused before a single byte is sent (internal security review, 2026-10-20).
+/// </summary>
+public sealed class DockerEngineUntrustedException() : Exception("The Docker engine pipe is not owned by a trusted account.");
 
 /// <summary>The few Docker Engine API calls a build needs. The interface is the test seam.</summary>
 public interface IDockerEngine : IDisposable
@@ -33,7 +40,9 @@ public interface IDockerEngine : IDisposable
 /// <summary>
 /// Docker Engine API v1.41 over a named pipe (<c>npipe://./pipe/docker_engine</c>) or loopback TCP with TLS client
 /// certificates (the WSL engine). The server certificate must chain to the configured CA; the system trust store is
-/// not used. Responses are bounded; error bodies are never read or reported.
+/// not used. A named pipe must be owned by SYSTEM or the Administrators group, as the engine's own pipe is (it runs as
+/// a system service), and is opened for identification only, so its server can't act as the build account. Responses
+/// are bounded; error bodies are never read or reported.
 /// </summary>
 public sealed class DockerEngineClient : IDockerEngine
 {
@@ -42,7 +51,15 @@ public sealed class DockerEngineClient : IDockerEngine
     private readonly HttpClient http;
     private readonly X509Certificate2? clientCertificate, authority;
 
+    /// <summary>Owners a real engine's pipe can have. An ordinary user can't create a pipe owned by either.</summary>
+    internal static readonly IReadOnlySet<SecurityIdentifier> TrustedPipeOwners = new HashSet<SecurityIdentifier>
+        { new(WellKnownSidType.LocalSystemSid, null), new(WellKnownSidType.BuiltinAdministratorsSid, null) };
+
     public DockerEngineClient(Uri engine, string? caFile = null, string? clientCertificateThumbprint = null)
+        : this(engine, caFile, clientCertificateThumbprint, TrustedPipeOwners) { }
+
+    /// <summary>Tests only: <paramref name="trustedPipeOwners"/> lets a fake engine's pipe, owned by the test account, pass.</summary>
+    internal DockerEngineClient(Uri engine, string? caFile, string? clientCertificateThumbprint, IReadOnlySet<SecurityIdentifier> trustedPipeOwners)
     {
         var handler = new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, ConnectTimeout = TimeSpan.FromSeconds(10), PooledConnectionLifetime = TimeSpan.FromMinutes(2) };
         if (engine.Scheme == "npipe")
@@ -50,8 +67,16 @@ public sealed class DockerEngineClient : IDockerEngine
             var pipeName = engine.AbsolutePath.StartsWith("/pipe/", StringComparison.Ordinal) ? engine.AbsolutePath["/pipe/".Length..] : throw new ArgumentException("Invalid engine.");
             handler.ConnectCallback = async (_, ct) =>
             {
-                var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-                try { await pipe.ConnectAsync(5000, ct).ConfigureAwait(false); return pipe; }
+                // Identification only: whoever serves the pipe can't act as the build account (which controls Docker).
+                var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous, TokenImpersonationLevel.Identification);
+                try
+                {
+                    await pipe.ConnectAsync(5000, ct).ConfigureAwait(false);
+                    // Before anything is sent: the pipe must be the engine's, not one a user created while it was down.
+                    if (pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || !trustedPipeOwners.Contains(owner))
+                        throw new DockerEngineUntrustedException();
+                    return pipe;
+                }
                 catch { await pipe.DisposeAsync().ConfigureAwait(false); throw; }
             };
             http = new HttpClient(handler) { BaseAddress = new Uri("http://docker"), Timeout = Timeout.InfiniteTimeSpan };
