@@ -54,7 +54,7 @@ function onClipboard(event) {
     if (editor) {
       if (editor.getOption(globalThis.monaco.editor.EditorOption.readOnly)) return;
       editor.trigger('keyboard', 'paste', { text: source.text, pasteOnNewLine: source.wholeLine, multicursorText: source.lines });
-    } else if (isTextInput(target) && !target.readOnly && !target.disabled) {
+    } else if ((isTextInput(target) || (target instanceof HTMLInputElement && target.type === 'password')) && !target.readOnly && !target.disabled) {
       const text = target instanceof HTMLInputElement ? source.text.replace(/\r?\n/g, ' ') : source.text;
       target.setRangeText(text, target.selectionStart ?? target.value.length, target.selectionEnd ?? target.value.length, 'end');
       target.dispatchEvent(new Event('input', { bubbles: true }));

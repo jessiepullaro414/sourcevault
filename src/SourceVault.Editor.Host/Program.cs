@@ -421,6 +421,9 @@ internal sealed class EditorWindow : Window
                 VaultOperation.CloseDocument => Close(request, controller),
                 VaultOperation.Lock => await LockAsync(request, controller),
                 VaultOperation.Unlock => await UnlockAsync(request, controller),
+                VaultOperation.UnlockWithPassword => await UnlockAsync(request, controller, request.Password),
+                VaultOperation.SetPassword => await UnlockAsync(request, controller, newPassword: request.NewPassword),
+                VaultOperation.ChangePassword => Respond(request, await controller.ChangePasswordAsync(request.Password!, request.NewPassword!), (w, _) => { }),
                 _ => BridgePolicy.BuildResponse(request.RequestId, "UnsupportedOperation", null),
             };
         }
@@ -620,9 +623,9 @@ internal sealed class EditorWindow : Window
         return BridgePolicy.BuildResponse(request.RequestId, "Ok", _ => { });
     }
 
-    private async Task<string> UnlockAsync(VaultBridgeRequest request, EditorVaultController controller)
+    private async Task<string> UnlockAsync(VaultBridgeRequest request, EditorVaultController controller, string? password = null, string? newPassword = null)
     {
-        var result = await controller.UnlockAsync();
+        var result = await controller.UnlockAsync(password, newPassword);
         UpdateTitle(locked: !result.Ok, notConnected: result.Code is "ServiceNotRunning" or "ServiceNotInstalled" or "ServerUntrusted");
         return Respond(request, result, (w, changed) =>
         {

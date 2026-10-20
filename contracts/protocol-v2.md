@@ -235,3 +235,29 @@ A project that fails authentication at service start, or later fails `VerifyProj
 - Every operation on an offline project returns `Unavailable`, except `DeleteProject`.
 - An unexpected entry in the vault root or a damaged project index still refuses the whole service (1066/11).
 - The service writes `%ProgramData%\SourceVault\status\vault.json` (version, time, count of available projects, ids of offline ones; never names) for `Setup-SourceVault.ps1 -Status`.
+
+## Addition: SourceVault passwords (owner decision, 2026-10-20)
+
+**`BeginSession`** now takes one of three bodies:
+- `{}`;
+- `{password}`: the operator's SourceVault password;
+- `{newPassword}`: sets the first one, or one an administrator reset.
+
+The service checks it against the operator taken from the pipe's client token, before any capability exists.
+
+**New error codes:**
+- `PasswordRequired`: a password is needed;
+- `PasswordNotSet`: choose one with `newPassword`;
+- `WrongPassword`;
+- `PasswordLocked`: five wrong in a row, locked for 15 minutes;
+- `PasswordTooWeak`: 12 to 256 characters, no control characters.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| ChangePassword | `capability`, `password`, `newPassword` | `{}` |
+
+**Storage:** PBKDF2-HMAC-SHA256 (600,000 iterations, 16-byte salt, 32-byte hash), per operator SID, in an encrypted store at `accounts\` in the vault root. Hashes are never on disk in the clear.
+
+**Lockout:** the counter is kept in service memory per operator, across connections.
+
+**Reset:** an administrator writes `%ProgramData%\SourceVault\password-resets\<SID>.json` (`{"resetId": "<uuid>"}`, administrators only; the service reads it). Each reset id is honoured once, and it also lifts a lockout.

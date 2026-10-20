@@ -753,6 +753,16 @@ Check("bridge: import a folder and dropped files carry names only; the dropped i
     Assert(BridgePolicy.BuildProgress(Guid.Parse(Guid1), 5, 10) == $"{{\"type\":\"sourcevault.vault.progress\",\"requestId\":\"{Guid1}\",\"done\":5,\"total\":10}}", "progress carries bytes only");
 });
 
+Check("bridge: the SourceVault password: exact operations, 1-256 characters, no control characters", () =>
+{
+    Assert(Parsed(Req("unlockWithPassword", "{\"password\":\"a long synthetic phrase\"}")) is { Operation: VaultOperation.UnlockWithPassword, Password: "a long synthetic phrase" }, "unlock");
+    Assert(Parsed(Req("setPassword", "{\"newPassword\":\"another phrase here\"}")) is { Operation: VaultOperation.SetPassword, NewPassword: "another phrase here" }, "set");
+    Assert(Parsed(Req("changePassword", "{\"password\":\"old one\",\"newPassword\":\"new one here!!\"}")) is { Operation: VaultOperation.ChangePassword }, "change");
+    Rejects(Vault, Req("unlockWithPassword", "{}"), Req("unlockWithPassword", "{\"password\":\"\"}"), Req("unlockWithPassword", "{\"password\":\"a\\u0000b\"}"),
+        Req("unlockWithPassword", "{\"password\":\"" + new string('p', BridgePolicy.MaxPasswordChars + 1) + "\"}"), Req("unlockWithPassword", "{\"password\":42}"),
+        Req("setPassword", "{\"newPassword\":\"x\",\"password\":\"y\"}"), Req("changePassword", "{\"password\":\"x\"}"));
+});
+
 Check("bridge: settings carry exactly eight bounded display preferences", () =>
 {
     Assert(Parsed(Req("getSettings", "{}")).Operation == VaultOperation.GetSettings, "getSettings");

@@ -11,6 +11,7 @@
 #   Setup-SourceVault.ps1 -RegisterSender <file>      allow encrypted packages signed by another computer (SourceVault Pack)
 #   Setup-SourceVault.ps1 -AddOperator PC\alice       let people use SourceVault (they sign out and back in once)
 #   Setup-SourceVault.ps1 -RemoveOperator PC\alice    take that away (it applies when they next sign out)
+#   Setup-SourceVault.ps1 -ResetPassword PC\alice     forgotten SourceVault password: they choose a new one at their next unlock
 #   Setup-SourceVault.ps1 -VaultRoot K:\SourceVault\vault   new install with the vault on another local drive
 #                                                     (chosen at install only; -Update keeps the configured location)
 #
@@ -26,7 +27,8 @@ param(
     [string]$RegisterSender,
     [string]$VaultRoot,
     [string[]]$AddOperator,
-    [string[]]$RemoveOperator
+    [string[]]$RemoveOperator,
+    [string[]]$ResetPassword
 )
 # No options at all: the guided mode (a menu), as from "SourceVault Setup.cmd".
 $guided = $PSBoundParameters.Count -eq 0
@@ -49,6 +51,8 @@ $configDir = Join-Path $dataDir 'config'
 $sendersDir = Join-Path $dataDir 'senders'
 # The service's report for administrators (ids and counts only): projects that failed their check and are offline.
 $statusDir = Join-Path $dataDir 'status'
+# Administrators' password resets (one small file per operator): only administrators write here; the service reads it.
+$resetsDir = Join-Path $dataDir 'password-resets'
 $buildConfig = Join-Path $configDir 'build.json'
 $exitReasons = @{
     10 = 'vault folder missing or its permissions are not locked down'
@@ -341,6 +345,20 @@ function Remove-Operators([string[]]$names) {
     }
 }
 
+# ---- SourceVault passwords ------------------------------------------------------------------------------------------
+# The service keeps the hashes inside the encrypted vault; an administrator can't read or set a password, only reset it:
+# the person then chooses a new one at their next unlock. A reset also lifts a lockout after wrong tries.
+function Reset-Passwords([string[]]$names) {
+    if (!(Test-Path -LiteralPath $resetsDir)) { Fail "$resetsDir is missing. Run Setup-SourceVault.ps1 -Update first." }
+    foreach ($name in $names | Where-Object { $_ }) {
+        try { $sid = (New-Object Security.Principal.NTAccount($name.Trim())).Translate([Security.Principal.SecurityIdentifier]).Value }
+        catch { Warn "'$name' is not a Windows account on this computer or its domain"; continue }
+        $json = '{"resetId":"' + [guid]::NewGuid().ToString('D') + '"}'
+        [IO.File]::WriteAllText((Join-Path $resetsDir "$sid.json"), $json, (New-Object Text.UTF8Encoding $false))
+        Ok "reset $name's SourceVault password: at their next unlock they choose a new one (any lockout is lifted)"
+    }
+}
+
 # ---- Pack computers -------------------------------------------------------------------------------------------------
 function Register-Sender([string]$senderFile) {
     if (!(Test-Path -LiteralPath $sendersDir)) { Fail "$sendersDir is missing. Run Setup-SourceVault.ps1 -Update first." }
@@ -388,6 +406,7 @@ function Start-Guided {
         Write-Host '   2  Let people use SourceVault'
         Write-Host '   3  Stop people using SourceVault'
         Write-Host '   4  Allow packages from another computer (SourceVault Pack)'
+        Write-Host '   7  Reset someone''s SourceVault password (forgotten, or locked out)'
         if ($hasPayload) { Write-Host '   5  Update SourceVault from this setup package'; Write-Host '   6  Set up or refresh Docker builds' }
         Write-Host '   Q  Quit'
         switch (Read-Choice '   Choose') {
@@ -395,6 +414,7 @@ function Start-Guided {
             '2' { Step 'Let people use SourceVault'; Add-Operators ((Read-Choice '   Windows accounts, comma-separated (e.g. PC\alice)') -split ',') }
             '3' { Step 'Stop people using SourceVault'; Remove-Operators ((Read-Choice '   Windows accounts, comma-separated') -split ',') }
             '4' { Step 'Allow packages from another computer'; $f = Read-Choice '   Path of its SourceVault-sender-<computer>.json file'; if ($f) { Register-Sender $f.Trim('"') } }
+            '7' { Step 'Reset a SourceVault password'; Reset-Passwords ((Read-Choice '   Windows accounts, comma-separated (e.g. PC\alice)') -split ',') }
             '5' { if ($hasPayload) { $script:Update = [switch]$true; return } }
             '6' { if ($hasPayload) { $script:Update = [switch]$true; $script:WithBuilds = [switch]$true; return } }
             { $_ -in 'q', 'Q', '' } { exit 0 }
@@ -408,6 +428,10 @@ if ($guided) { Start-Guided }
 if ($Status) {
     if (!(Test-Admin)) { Fail 'Run -Status from an elevated PowerShell (Run as administrator).' }
     Step 'Status'; Show-StatusSummary; return
+}
+if ($ResetPassword) {
+    if (!(Test-Admin)) { Fail 'Run -ResetPassword from an elevated PowerShell (Run as administrator).' }
+    Step 'Reset SourceVault passwords'; Reset-Passwords $ResetPassword; return
 }
 if ($AddOperator -or $RemoveOperator) {
     if (!(Test-Admin)) { Fail 'Run -AddOperator / -RemoveOperator from an elevated PowerShell (Run as administrator).' }
@@ -523,6 +547,14 @@ if (!(Test-Path -LiteralPath $sendersDir)) {
     New-Item -ItemType Directory -Path $sendersDir | Out-Null
     Set-ExactSecurity $sendersDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSid)"
     Ok 'created; administrators register senders here, the service can only read it'
+} else { Ok 'kept' }
+
+Step "Password resets folder ($resetsDir)"
+if (!(Test-Path -LiteralPath $resetsDir)) {
+    New-Item -ItemType Directory -Path $resetsDir | Out-Null
+    # Administrators write reset requests; the service only reads them, so nobody else can reset anyone's password.
+    Set-ExactSecurity $resetsDir "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSid)"
+    Ok 'created; only administrators can reset SourceVault passwords (-ResetPassword)'
 } else { Ok 'kept' }
 
 Step "Service status folder ($statusDir)"

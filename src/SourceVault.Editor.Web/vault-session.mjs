@@ -72,7 +72,9 @@ export class BridgeClient {
 /** Unlock failures that mean the service can't be reached: only then can the editor work offline. */
 export const OFFLINE_CODES = new Set(['ServiceNotRunning', 'ServiceNotInstalled', 'Timeout', 'ServerUntrusted']);
 // What still talks to the host offline: connecting again, locking, and display settings. Everything else needs the vault.
-const OFFLINE_ALLOWED = new Set(['unlock', 'lock', 'getSettings', 'saveSettings']);
+const OFFLINE_ALLOWED = new Set(['unlock', 'unlockWithPassword', 'setPassword', 'lock', 'getSettings', 'saveSettings']);
+/** The service wants the operator's SourceVault password (2026-10-20): the lock screen shows a password form. */
+export const PASSWORD_CODES = new Set(['PasswordRequired', 'PasswordNotSet', 'WrongPassword', 'PasswordLocked', 'PasswordTooWeak']);
 
 export class VaultSession {
   projects = [];
@@ -119,9 +121,11 @@ export class VaultSession {
   }
 
   /** Opens a session. Returns the ids of opened files that changed in the vault while locked (now marked conflict). */
-  async unlock() {
+  /** `password`: the operator's SourceVault password; `newPassword`: sets the first one (or one an administrator reset). */
+  async unlock(password = null, newPassword = null) {
     let result;
-    try { result = await this.#call('unlock'); this.lastUnlockFailure = null; }
+    const [operation, args] = newPassword ? ['setPassword', { newPassword }] : password ? ['unlockWithPassword', { password }] : ['unlock', {}];
+    try { result = await this.#call(operation, args); this.lastUnlockFailure = null; }
     catch (e) { this.lastUnlockFailure = e.code; throw e; } // offline work, if any, carries on
     this.#locked = false; this.offline = false; this.lockReason = null;
     // Offline work begun without a project: show the project list; the new files go into the project chosen there.
@@ -140,6 +144,9 @@ export class VaultSession {
     await this.#call('lock');
     this.#setLocked('user');
   }
+
+  /** Changes the operator's SourceVault password (the current one must match). */
+  async changePassword(password, newPassword) { await this.#call('changePassword', { password, newPassword }); }
 
   /**
    * Keeps working while the service can't be reached (after a failed unlock with one of OFFLINE_CODES). Files already

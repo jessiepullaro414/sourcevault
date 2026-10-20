@@ -843,6 +843,82 @@ Test("offline project: listed as unavailable, refuses everything but deletion; t
     Assert(Run(ctl.ListProjectsAsync()).Value!.All(p => p.Available), "the editor's view");
 });
 
+// ---- SourceVault passwords (owner decision 2026-10-20) ----
+(VaultPipeServer Server, string Pipe, string Vault, string Resets, ProjectCatalog Catalog) StartPasswordServer(ManualClock clock, string? vaultPath = null, string? resetsPath = null)
+{
+    var vault = vaultPath ?? Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
+    var resets = resetsPath ?? Path.Combine(workspace, "resets-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(vault); Directory.CreateDirectory(resets);
+    var catalog = new ProjectCatalog(vault, key);
+    var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
+    var server = new VaultPipeServer(name, me, new PipePeerPolicy(authenticatedUsers, [self]),
+        new VaultProtocol(catalog, catalog.Verify().Projects, clock, passwords: new SourceVault.Service.OperatorPasswords(catalog, resets, clock)));
+    server.Start();
+    return (server, name, vault, resets, catalog);
+}
+
+Test("passwords: chosen at first unlock, then required; 5 wrong lock for 15 minutes; change; an administrator's reset; never on disk", () =>
+{
+    var clock = new ManualClock();
+    const string good = "correct horse battery staple", better = "another long synthetic phrase";
+    var (server, pipe, vault, resets, catalog) = StartPasswordServer(clock);
+    string Begin(params (string, object)[] fields) { using var c = new Client(pipe, me); return c.Code("BeginSession", fields); }
+    using (server)
+    {
+        Assert(Begin() == "PasswordNotSet", "none yet");
+        Assert(Begin(("password", good)) == "PasswordNotSet", "nothing to check against");
+        Assert(Begin(("newPassword", "too short")) == "PasswordTooWeak", "12 characters at least");
+        Assert(Begin(("newPassword", good)) == "Ok", "chosen at first unlock");
+        Assert(Begin() == "PasswordRequired" && Begin(("newPassword", better)) == "PasswordRequired", "now required; can't be replaced without it");
+        Assert(Begin(("password", good)) == "Ok", "the right one");
+        for (int i = 1; i <= 4; i++) Assert(Begin(("password", "wrong guess " + i)) == "WrongPassword", "wrong " + i);
+        Assert(Begin(("password", "wrong guess 5")) == "PasswordLocked", "the fifth locks it");
+        Assert(Begin(("password", good)) == "PasswordLocked", "even the right one, while locked");
+        clock.Advance(TimeSpan.FromMinutes(16));
+        Assert(Begin(("password", good)) == "Ok", "after 15 minutes");
+        using (var c = new Client(pipe, me))
+        {
+            using var doc = JsonDocument.Parse(c.Raw("BeginSession", ("password", good)));
+            Assert(doc.RootElement.GetProperty("code").GetString() == "Ok", "session");
+            c.Begin2(doc);
+            Assert(c.Code("ChangePassword", ("password", "not it at all"), ("newPassword", better)) == "WrongPassword", "change needs the current one");
+            Assert(c.Code("ChangePassword", ("password", good), ("newPassword", better)) == "Ok", "changed");
+        }
+        Assert(Begin(("password", good)) == "WrongPassword" && Begin(("password", better)) == "Ok", "the new one works, the old one doesn't");
+        // An administrator's reset: the operator chooses a new one; each reset id is honoured once.
+        File.WriteAllText(Path.Combine(resets, System.Security.Principal.WindowsIdentity.GetCurrent().User!.Value + ".json"), "{\"resetId\":\"" + Guid.NewGuid().ToString("D") + "\"}");
+        Assert(Begin(("password", better)) == "PasswordNotSet", "reset: choose a new one");
+        Assert(Begin(("newPassword", good)) == "Ok" && Begin() == "PasswordRequired" && Begin(("password", good)) == "Ok", "set again, and the same reset doesn't apply twice");
+    }
+    // Encrypted at rest: neither the password nor its account name is in any vault file; and it survives a restart.
+    foreach (var file in Directory.EnumerateFiles(vault, "*", SearchOption.AllDirectories))
+    {
+        var bytes = File.ReadAllBytes(file);
+        Assert(bytes.AsSpan().IndexOf(Encoding.UTF8.GetBytes(good)) < 0 && bytes.AsSpan().IndexOf(Encoding.UTF8.GetBytes("salt")) < 0, "no plaintext in " + Path.GetFileName(file));
+    }
+    Assert(Directory.Exists(Path.Combine(vault, "accounts")) && catalog.Verify().Projects.Count == 0, "the accounts store passes the vault check, even with no projects");
+    var (server2, pipe2, _, _, _) = StartPasswordServer(new ManualClock(), vault, resets);
+    using (server2) { using var c = new Client(pipe2, me); Assert(c.Code("BeginSession") == "PasswordRequired", "kept across a restart"); }
+});
+
+Test("controller: the editor unlocks with a password, sets the first one, and changes it", () =>
+{
+    var (server, pipe, _, _, _) = StartPasswordServer(new ManualClock());
+    using (server)
+    using (var ctl = Controller(pipe))
+    {
+        Assert(Run(ctl.UnlockAsync()).Code == "PasswordNotSet" && ctl.IsLocked, "asks for a new one");
+        Assert(Run(ctl.UnlockAsync(newPassword: "synthetic phrase one")).Ok, "set and unlocked");
+        ctl.LockAsync().GetAwaiter().GetResult();
+        Assert(Run(ctl.UnlockAsync()).Code == "PasswordRequired", "then required");
+        Assert(Run(ctl.UnlockAsync("nope nope nope")).Code == "WrongPassword" && ctl.IsLocked, "wrong");
+        Assert(Run(ctl.UnlockAsync("synthetic phrase one")).Ok, "right");
+        Assert(Run(ctl.ChangePasswordAsync("synthetic phrase one", "synthetic phrase two")).Ok, "changed");
+        ctl.LockAsync().GetAwaiter().GetResult();
+        Assert(Run(ctl.UnlockAsync("synthetic phrase two")).Ok, "the new one");
+    }
+});
+
 Test("controller: unlock failures are reported as fixed, explainable codes", () =>
 {
     foreach (var (failure, expected) in new (Exception, string)[]
@@ -1545,6 +1621,8 @@ sealed class Client : IDisposable
         FrameCodec.WriteAsync(pipe, frame).GetAwaiter().GetResult();
         return Encoding.UTF8.GetString(FrameCodec.ReadAsync(pipe).GetAwaiter().GetResult());
     }
+    // Takes the capability from a BeginSession response this test sent itself.
+    public void Begin2(JsonDocument response) => capability = response.RootElement.GetProperty("body").GetProperty("capability").GetString();
     public void Dispose() => pipe.Dispose();
 }
 

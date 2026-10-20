@@ -100,3 +100,25 @@ test('a Windows lock ends offline work: everything is hidden and locked again', 
   throwsWith(() => session.edit(byName('main.ts').id, 'more'), 'Locked');
   assert.equal(byName('main.ts').text, 'kept\n', 'drafts stay in memory behind the lock, as always');
 });
+
+// ---- the SourceVault password (owner decision 2026-10-20), on the demo vault's simulation ----
+test('password: chosen at the first unlock, then required; wrong ones lock; it works offline-to-online too', async () => {
+  const host = new DemoVaultHost({ passwords: true });
+  const session = new VaultSession(host.transport, { timeoutMs: 500 });
+  await rejectsWith(session.unlock(), 'PasswordNotSet');
+  await rejectsWith(session.unlock(null, 'short'), 'PasswordTooWeak');
+  await session.unlock(null, 'a long synthetic phrase');
+  assert.equal(session.locked, false);
+  await session.lock();
+  await rejectsWith(session.unlock(), 'PasswordRequired');
+  for (let i = 0; i < 4; i++) await rejectsWith(session.unlock('wrong one'), 'WrongPassword');
+  await rejectsWith(session.unlock('wrong one'), 'PasswordLocked');
+  await rejectsWith(session.unlock('a long synthetic phrase'), 'PasswordLocked');
+  host.resetPassword(); // an administrator's reset
+  await rejectsWith(session.unlock(), 'PasswordNotSet');
+  await session.unlock(null, 'a brand new phrase');
+  await session.changePassword('a brand new phrase', 'and yet another one');
+  await session.lock();
+  await session.unlock('and yet another one');
+  assert.equal(session.locked, false);
+});

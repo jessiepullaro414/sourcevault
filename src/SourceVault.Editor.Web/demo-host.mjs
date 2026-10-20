@@ -23,6 +23,7 @@ const ARGS = {
   fileInfo: ['projectId', 'fileId'], replaceFromDisk: ['projectId', 'fileId'], keepMine: ['projectId', 'fileId'], keepTheirs: ['projectId', 'fileId'],
   addFromDisk: ['projectId', 'folder'], revertFile: ['projectId', 'fileId', 'revisionId'],
   chooseImportFolder: [], importFolder: ['name'], cancelImport: [], dropFiles: ['projectId', 'folder'],
+  unlockWithPassword: ['password'], setPassword: ['newPassword'], changePassword: ['password', 'newPassword'],
 };
 const isQuery = q => typeof q === 'string' && q.length > 0 && q.length <= 200 && ![...q].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
 const MAX_TEXT_BYTES = 1024 * 1024; // the editor's text limit
@@ -82,8 +83,13 @@ export class DemoVaultHost {
   #builds = new Map();     // projectId -> [build], newest last
   settings = { ...DEFAULT_SETTINGS }; // the host's editor-settings.json
 
-  constructor({ latencyMs = 0, seed = SEED } = {}) {
+  // Demo of the SourceVault password (in memory only): off unless asked for, so tests and old flows unlock as before.
+  passwords = false;
+  #password = null; #failures = 0;
+
+  constructor({ latencyMs = 0, seed = SEED, passwords = false } = {}) {
     this.latencyMs = latencyMs;
+    this.passwords = passwords;
     for (const project of seed) {
       const files = new Map(project.files.map(([name, text]) => [crypto.randomUUID(), this.#newFile(name, typeof text === 'function' ? text() : text, 'created')]));
       this.#projects.set(crypto.randomUUID(), { name: project.name, files, deleted: new Map() });
@@ -150,7 +156,26 @@ export class DemoVaultHost {
     // Display preferences need no vault session.
     if (operation === 'getSettings') return reply('Ok', { settings: { ...this.settings } });
     if (operation === 'saveSettings') { this.settings = { ...args.settings }; return reply('Ok', {}); }
-    if (operation === 'unlock') return reply(...this.#unlock());
+    if (operation === 'unlock' || operation === 'unlockWithPassword' || operation === 'setPassword') {
+      const password = typeof args.password === 'string' ? args.password : null, chosen = typeof args.newPassword === 'string' ? args.newPassword : null;
+      if (this.passwords && !this.failNextUnlock) {
+        if (this.#password === null) {
+          if (chosen === null) return reply('PasswordNotSet');
+          if (chosen.length < 12) return reply('PasswordTooWeak');
+          this.#password = chosen; this.#failures = 0;
+        } else if (chosen !== null || password === null) return reply('PasswordRequired');
+        else if (this.#failures >= 5) return reply('PasswordLocked');
+        else if (password !== this.#password) { this.#failures++; return reply(this.#failures >= 5 ? 'PasswordLocked' : 'WrongPassword'); }
+        else this.#failures = 0;
+      }
+      return reply(...this.#unlock());
+    }
+    if (operation === 'changePassword') {
+      if (this.locked) return reply('Locked');
+      if (args.password !== this.#password) return reply('WrongPassword');
+      if (args.newPassword.length < 12) return reply('PasswordTooWeak');
+      this.#password = args.newPassword; return reply('Ok', {});
+    }
     if (operation === 'lock') { const was = this.locked; this.locked = true; reply('Ok', {}); if (!was) this.#emit({ type: 'sourcevault.vault.locked', reason: 'user' }); return; }
     if (this.locked) return reply('Locked');
     const project = 'projectId' in args ? this.#projects.get(args.projectId) : null;
@@ -421,6 +446,9 @@ export class DemoVaultHost {
     const set = new Set(names);
     return set.size === names.length && !names.some(n => n.split('/').slice(0, -1).some((_, i, parts) => set.has(parts.slice(0, i + 1).join('/'))));
   }
+  /** An administrator's password reset: the operator chooses a new one at the next unlock. */
+  resetPassword() { this.#password = null; this.#failures = 0; }
+
   /** Simulates a project failing its integrity check at the service's start (it goes offline). */
   takeOffline(projectId) { const project = this.#projects.get(projectId); if (!project) return false; project.offline = true; return true; }
 
@@ -469,6 +497,7 @@ export function installDemoPanel(demo, getActive) {
     ['Session expiry', () => { demo.simulateLock('expired'); return 'Simulated the 30-minute expiry.'; }],
     ['Next unlock fails', () => { demo.failNextUnlock = 'ServiceNotRunning'; return 'The next unlock reports the service as not running.'; }],
     ['Next build fails', () => { demo.buildFails = !demo.buildFails; return demo.buildFails ? 'Builds now fail (click again to undo).' : 'Builds succeed again.'; }],
+    ['Administrator resets my password', () => { demo.resetPassword(); return 'Reset: lock, then unlock and choose a new SourceVault password.'; }],
     ['A project fails its integrity check', () => { const id = demo.projectIdByName('Synthetic C# demo'); return id && demo.takeOffline(id) ? '"Synthetic C# demo" is offline. Switch project to see it; it can only be deleted.' : 'Already offline or deleted.'; }],
   ];
   const note = document.createElement('em');

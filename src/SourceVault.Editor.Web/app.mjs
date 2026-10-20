@@ -40,7 +40,7 @@ async function detectMode() {
 // Demo mode: the full vault editor on the in-page demo vault (demo-host.mjs). Nothing is encrypted or stored.
 async function startDemo(metadata) {
   const [{ DemoVaultHost, installDemoPanel }, { startVault }] = await Promise.all([import('./demo-host.mjs'), import('./vault-app.mjs')]);
-  const demo = new DemoVaultHost({ latencyMs: 40 });
+  const demo = new DemoVaultHost({ latencyMs: 40, passwords: true }); // shows the SourceVault password, in memory only
   let session = null;
   installDemoPanel(demo, () => session?.project && session.activeId ? { projectId: session.project.projectId, fileId: session.activeId } : null);
   startVault(demo.transport, { ...metadata, demo: true }, s => { session = s; });

@@ -34,7 +34,7 @@ internal static class Importer
         if (plan.Files.Count == 0) { output.WriteLine("Nothing to import."); return 1; }
         if (plan.LimitProblem is { } problem) { output.WriteLine("Not imported. " + problem); return 1; }
         using var client = connect();
-        Expect(client.Begin(), "connect");
+        Expect(client.Begin(ConsolePassword.Ask), "connect");
         var created = client.Call("CreateProject", w => w.WriteString("name", projectName));
         if (created.Code == "AlreadyExists") { output.WriteLine($"A project named \"{projectName}\" already exists. Imports always go into a new project; choose another name."); return 1; }
         var projectId = Expect(created, "create project").GetProperty("projectId").GetString()!;

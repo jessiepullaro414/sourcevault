@@ -87,7 +87,7 @@ internal sealed class ScmHost
             catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.OperatorsGroupMissing); }
             using var self = WindowsIdentity.GetCurrent();
             var pipeServer = new VaultPipeServer(VaultPipe.ProductionName, self.User!,
-                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, check.Projects, builds: new BuildCoordinator(catalog, BuildServiceClient()), offline: check.Offline, status: VaultStatus.Write,
+                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, check.Projects, builds: new BuildCoordinator(catalog, BuildServiceClient()), offline: check.Offline, status: VaultStatus.Write, passwords: new OperatorPasswords(catalog, OperatorPasswords.DefaultResetsFolder),
                     packages: importKey is null ? null : new PackageImports(importKey, importKey.ExportSubjectPublicKeyInfo(), PackageImports.ComputerName, PackageImports.DefaultSendersFolder)));
             try { pipeServer.Start(); }
             catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
