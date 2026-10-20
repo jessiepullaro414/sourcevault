@@ -46,7 +46,7 @@ The drive is about **4.5 GB**, most of it the Windows image (2.8 GB compressed).
 | .NET SDK image, Linux | `mcr.microsoft.com/dotnet/sdk@sha256:3a48280a…` (amd64 manifest of `10.0.402`) | manifest, config and every layer checked against their digests; image ID `sha256:9cd0d6fa…177d23fd` |
 | .NET SDK image, Windows | `mcr.microsoft.com/dotnet/sdk@sha256:c3fad2bd…` (`10.0.402-windowsservercore-ltsc2025`) | same; image ID `sha256:22585ab0…c9a33854` |
 
-**Images without Docker.** The kit builder needs no Docker. It downloads the image manifest, configuration and layers straight from Microsoft's registry and checks each against its digest. It then writes them in the format `docker load` reads. On the target, the loaded image's ID must equal the pinned configuration digest, so no other image can stand in.
+**Images without Docker.** The kit builder needs no Docker. It downloads the image manifest, configuration and layers straight from Microsoft's registry and checks each against its digest. It then writes them in both layouts `docker load` reads, as `docker save` does: the legacy `manifest.json` and an OCI `index.json` holding the registry's exact manifest. On the target, the loaded image's ID must equal the pinned configuration digest (Docker's classic image store) or the pinned manifest digest (the containerd image store, Docker 29's default in WSL), so no other image can stand in. Changed 2026-10-20 and unverified until the lab row runs; drives built before that hold only `manifest.json` and must be rebuilt.
 
 ## Building the kit (a connected staging PC)
 

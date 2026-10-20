@@ -1,6 +1,10 @@
 # Saves one container image from a registry as a `docker load` archive, WITHOUT Docker (docs/deployment-kit-design.md).
 # The manifest is fetched by its pinned digest and must hash to it; the configuration and every layer must hash to the
-# digests the manifest names. The image ID after `docker load` is the configuration digest, which the deploy step checks.
+# digests the manifest names. The archive holds both layouts `docker save` writes: manifest.json for Docker's classic
+# image store, where the image ID after `docker load` is the configuration digest, and an OCI index.json with the
+# registry's exact manifest for the containerd image store, where the image ID is that manifest's digest. The deploy
+# step accepts either pinned digest. (From legacy manifest.json alone, the containerd store would write a manifest of
+# its own, whose digest matches neither pin.)
 #
 #   Save-RegistryImage.ps1 -Registry mcr.microsoft.com -Repository dotnet/sdk -Manifest sha256:<64 hex> `
 #       -ImageId sha256:<64 hex> -Tag 10.0.402 -OutFile E:\SourceVaultKit\images\sdk-linux.tar [-MetadataOnly]
@@ -33,7 +37,8 @@ function Get-Blob([string]$digest, [long]$size, [string]$path) {
 }
 
 $parts = "$OutFile.parts"
-New-Item -ItemType Directory -Force -Path $parts | Out-Null
+$blobs = Join-Path $parts 'blobs\sha256' # the OCI layout; manifest.json points into it too
+New-Item -ItemType Directory -Force -Path $blobs | Out-Null
 
 # 1. The manifest, by digest: its bytes must hash to the pinned digest.
 $accept = 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json'
@@ -45,10 +50,12 @@ if ($actual -ne $Manifest) { throw "The manifest did not match its pinned digest
 $doc = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
 if ($doc.schemaVersion -ne 2 -or !$doc.config -or !$doc.layers) { throw 'Unsupported manifest (expected a single-platform schema 2 image manifest).' }
 if ($doc.config.digest -ne $ImageId) { throw "The manifest's configuration is $($doc.config.digest), not the pinned image ID $ImageId." }
+$manifestType = if ($doc.mediaType) { [string]$doc.mediaType } else { ([string]$response.Headers['Content-Type'] -split ';')[0].Trim() }
+if ($manifestType -notin 'application/vnd.docker.distribution.manifest.v2+json', 'application/vnd.oci.image.manifest.v1+json') { throw "Unexpected manifest media type '$manifestType'." }
 
-# 2. The configuration (its digest is the image ID).
-$configName = $doc.config.digest.Substring(7) + '.json'
-$state = Get-Blob $doc.config.digest ([long]$doc.config.size) (Join-Path $parts $configName)
+# 2. The configuration (its digest is the image ID on the classic store).
+$configName = 'blobs/sha256/' + $doc.config.digest.Substring(7)
+$state = Get-Blob $doc.config.digest ([long]$doc.config.size) (Join-Path $blobs $doc.config.digest.Substring(7))
 Write-Output "configuration $($doc.config.digest): $state"
 
 # 3. The layers.
@@ -57,28 +64,35 @@ $total = 0L
 foreach ($layer in $doc.layers) {
     if ($layer.urls) { throw "Layer $($layer.digest) is a foreign layer (urls); not supported." }
     if ($layer.mediaType -notmatch 'tar(\.gzip|\+gzip)?$') { throw "Unexpected layer media type $($layer.mediaType)." }
-    $name = $layer.digest.Substring(7) + '.tar.gz'
-    $layerNames += $name
+    $layerNames += 'blobs/sha256/' + $layer.digest.Substring(7)
     $total += [long]$layer.size
     if ($MetadataOnly) { Write-Output ("layer {0}: {1:N0} bytes (not downloaded)" -f $layer.digest, $layer.size); continue }
-    $state = Get-Blob $layer.digest ([long]$layer.size) (Join-Path $parts $name)
+    $state = Get-Blob $layer.digest ([long]$layer.size) (Join-Path $blobs $layer.digest.Substring(7))
     Write-Output ("layer {0}: {1:N0} bytes, {2}" -f $layer.digest, $layer.size, $state)
 }
 if ($MetadataOnly) { Write-Output ("{0} layers, {1:N0} bytes in all. Metadata verified; nothing archived." -f $layerNames.Count, $total); return }
 
-# 4. The docker-save layout, then one tar (Windows' built-in tar.exe). docker load decompresses gzip layers itself.
+# 4. Both docker-save layouts, then one tar (Windows' built-in tar.exe). docker load decompresses gzip layers itself.
+$utf8 = New-Object Text.UTF8Encoding $false
 $repoTag = "$Registry/$Repository`:$Tag"
+$manifestName = 'blobs/sha256/' + $Manifest.Substring(7)
+[IO.File]::WriteAllBytes((Join-Path $blobs $Manifest.Substring(7)), $bytes) # the registry's bytes, which hash to the pin
+$index = '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"' + $manifestType +
+    '","digest":"' + $Manifest + '","size":' + $bytes.Length + ',"annotations":{"io.containerd.image.name":"' + $repoTag +
+    '","org.opencontainers.image.ref.name":"' + $Tag + '"}}]}'
+[IO.File]::WriteAllText((Join-Path $parts 'index.json'), $index, $utf8)
+[IO.File]::WriteAllText((Join-Path $parts 'oci-layout'), '{"imageLayoutVersion":"1.0.0"}', $utf8)
 $layersJson = ($layerNames | ForEach-Object { '"' + $_ + '"' }) -join ','
 $manifestJson = '[{"Config":"' + $configName + '","RepoTags":["' + $repoTag + '"],"Layers":[' + $layersJson + ']}]'
-[IO.File]::WriteAllText((Join-Path $parts 'manifest.json'), $manifestJson, (New-Object Text.UTF8Encoding $false))
-Get-ChildItem -LiteralPath $parts -Filter '*.download' | Remove-Item -Force
+[IO.File]::WriteAllText((Join-Path $parts 'manifest.json'), $manifestJson, $utf8)
+Get-ChildItem -LiteralPath $blobs -Filter '*.download' | Remove-Item -Force
 $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 if (!(Test-Path -LiteralPath $tar)) { throw 'Windows tar.exe is missing.' }
 $tmp = "$OutFile.tmp"
 if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
-$members = @('manifest.json', $configName) + $layerNames
+$members = @('oci-layout', 'index.json', 'manifest.json', $manifestName, $configName) + $layerNames
 & $tar -cf $tmp -C $parts @members
 if ($LASTEXITCODE -ne 0) { throw "tar.exe failed (exit $LASTEXITCODE)." }
 Move-Item -LiteralPath $tmp -Destination $OutFile -Force
 Remove-Item -LiteralPath $parts -Recurse -Force
-Write-Output ("Saved $repoTag as $OutFile ({0:N0} bytes); image ID after docker load: $ImageId" -f (Get-Item -LiteralPath $OutFile).Length)
+Write-Output ("Saved $repoTag as $OutFile ({0:N0} bytes); image ID after docker load: $ImageId (classic store) or $Manifest (containerd store)" -f (Get-Item -LiteralPath $OutFile).Length)

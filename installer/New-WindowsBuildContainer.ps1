@@ -8,7 +8,8 @@
 #   New-WindowsBuildContainer.ps1 -OwnerImageId sha256:<64 hex> [-ImageArchive <your-image.tar>] [-Name sourcevault-build-java] [-TargetName java-windows]
 #
 # -ImageArchive (offline, the deployment drive): loads the image from that archive instead of pulling, and accepts it
-# only if its image ID is the pinned configuration digest below.
+# only if its image ID is the pinned configuration digest below, or (Docker's containerd image store) the pinned
+# manifest digest.
 #
 # -OwnerImageId (docs/cpp-build-design.md, section 1): YOUR build image instead of Microsoft's .NET SDK image (MSVC,
 # a JDK for Ant...). It is never pulled: it must already be in this engine (docker load / docker build), or come from
@@ -54,7 +55,9 @@ $imageTag = '10.0.402-windowsservercore-ltsc2025'
 $imageDigest = 'sha256:c3fad2bdfc6637eef231ed3acb6718737643b88ca4877233ef29053ae3b329e5'
 $sdkVersion = '10.0.402'
 $image = "$imageRepo@$imageDigest"
-# Its configuration digest: the image ID after `docker load` (kit-sources.json).
+# Its configuration digest (kit-sources.json). After `docker load`, the image ID is the configuration digest on Docker's
+# classic image store (the Windows engine's default), and the manifest digest above on the containerd image store.
+# Either one is accepted, nothing else.
 $imageId = 'sha256:22585ab055b5a2dfee1cc9311445592a1000e5dfbd92c16828fa4721c9a33854'
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$') { throw 'Invalid container name.' }
 
@@ -86,15 +89,22 @@ if ((Invoke-Docker -AllowFailure container inspect --format '{{.Name}}' $Name) -
     Ok "removed the old '$Name'"
 }
 
-if ($OwnerImageId) { $imageId = $OwnerImageId } # the ID every check below must match
+# The IDs a loaded image may have: the configuration digest (classic store) or the manifest digest (containerd store).
+# Your image has exactly the ID you give, as the engine it runs on reports it.
+$acceptedIds = @($imageId, $imageDigest)
+if ($OwnerImageId) { $imageId = $OwnerImageId; $acceptedIds = @($OwnerImageId) } # the ID every check below must match
 if ($ImageArchive) {
     $archive = (Resolve-Path -LiteralPath $ImageArchive).Path
     Write-Host "Loading the image from $archive (no download; a few minutes)..."
     Invoke-Docker load -i $archive | Out-Null
-    $loaded = (Invoke-Docker -AllowFailure image inspect --format '{{.Id}}' $imageId) -join ''
-    if ($loaded -ne $imageId) { throw "The archive did not load the pinned image $imageId; not creating the container." }
-    $image = $imageId # create the container from the verified image ID
-    Ok 'image loaded from the archive and matches the pinned image ID'
+    $verified = $null
+    foreach ($id in $acceptedIds) {
+        $loaded = (Invoke-Docker -AllowFailure image inspect --format '{{.Id}}' $id) -join ''
+        if ($LASTEXITCODE -eq 0 -and $loaded -eq $id) { $verified = $id; break }
+    }
+    if (!$verified) { throw "The archive did not load the pinned image (ID $($acceptedIds -join ' or ')); not creating the container." }
+    $image = $verified # create the container from the verified image ID
+    Ok "image loaded from the archive and matches the pinned image ID ($verified)"
 } elseif ($OwnerImageId) {
     $found = (Invoke-Docker -AllowFailure image inspect --format '{{.Id}}' $imageId) -join ''
     if ($found -ne $imageId) { throw "Image $imageId is not in the Windows Docker engine. Load it first (docker load -i <archive>) or pass -ImageArchive; SourceVault never pulls your images." }
