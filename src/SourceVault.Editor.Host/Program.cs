@@ -623,7 +623,7 @@ internal sealed class EditorWindow : Window
     private async Task<string> UnlockAsync(VaultBridgeRequest request, EditorVaultController controller)
     {
         var result = await controller.UnlockAsync();
-        UpdateTitle(locked: !result.Ok);
+        UpdateTitle(locked: !result.Ok, notConnected: result.Code is "ServiceNotRunning" or "ServiceNotInstalled" or "ServerUntrusted");
         return Respond(request, result, (w, changed) =>
         {
             // Opened files someone else changed while locked: the renderer reports these drafts as conflicts.
@@ -652,8 +652,9 @@ internal sealed class EditorWindow : Window
         if (!closing) webView.CoreWebView2?.PostWebMessageAsJson(BridgePolicy.BuildLocked(reason));
     }
 
-    private void UpdateTitle(bool locked) => Title = mode switch
+    private void UpdateTitle(bool locked, bool notConnected = false) => Title = mode switch
     {
+        EditorMode.Vault when notConnected => "SourceVault — NOT CONNECTED (the service isn't running)",
         EditorMode.Vault => locked ? "SourceVault — Vault editor (locked)" : "SourceVault — Vault editor",
         EditorMode.Demo => "SourceVault — DEMO (not encrypted)",
         _ => locked ? "SourceVault — Locked synthetic preview" : "SourceVault — Synthetic editor preview",

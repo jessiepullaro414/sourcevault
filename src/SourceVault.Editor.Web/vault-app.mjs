@@ -15,6 +15,15 @@ const UNLOCK_FAILURES = {
   ClientRejected: 'The service only accepts the installed SourceVault editor.',
   Timeout: 'The editor host did not answer.',
 };
+// The service can't be reached: the window turns red and says so (owner request 2026-10-20). Nothing is opened, saved or
+// decrypted until it is back; there is no unencrypted fallback. [eyebrow, title, what it means and what to do]
+const NOT_CONNECTED = {
+  ServiceNotRunning: ['SERVICE NOT RUNNING', 'The SourceVault service isn’t running', 'Ask your administrator to start it (Start menu → SourceVault Administration → Check SourceVault), then click Try again.'],
+  ServiceNotInstalled: ['NOT INSTALLED', 'The SourceVault service isn’t installed on this computer', 'This editor only works with an installed SourceVault service. Ask your administrator.'],
+  Timeout: ['NO ANSWER', 'The vault didn’t answer', 'The service or this editor’s connection to it isn’t responding. Wait a moment, then click Try again.'],
+  ServerUntrusted: ['NOT CONNECTED', 'The editor refused to connect', 'Something other than the SourceVault service answered on its connection. Nothing was sent to it. Tell your administrator.'],
+};
+const NOT_CONNECTED_NOTE = 'Nothing can be opened or saved, and nothing is decrypted, until the vault is connected. Unsaved edits already in this window stay here.';
 const KEPT = 'Unsaved edits stay in this editor’s memory and are checked against the vault when you unlock. Locking hides them; it does not guarantee memory erasure.';
 const LOCK_SCREENS = {
   start: ['VAULT', 'Connecting to the vault', 'Documents are decrypted by the SourceVault service, and only for files you open.'],
@@ -62,6 +71,7 @@ export async function startVault(transport, metadata, onSession) {
   const viewStates = new Map();
   const keepEditing = new Set(); // files whose conflict banner was dismissed
   let editor, suppress = false, busy = false, picking = false, unlockError = null;
+  let notConnected = null; // a NOT_CONNECTED code while the service can't be reached
   let deleting = null; // { projectId, typed } while a delete confirmation is open in the picker
   let renaming = null; // { projectId, value } while a project rename is open in the picker
   let history = null, diffEditor = null; // the open history view: { fileId, path, language, deleted, revisions, more, page, selected, latestText, models }
@@ -86,6 +96,7 @@ export async function startVault(transport, metadata, onSession) {
   document.title = demo ? 'SourceVault — DEMO (not encrypted)' : 'SourceVault — Vault editor';
   document.body.classList.add('mode-vault');
   document.body.classList.toggle('mode-demo', demo);
+  document.body.classList.toggle('mode-red', demo); // the red look; also while the service can't be reached
   relabel(metadata);
 
   async function act(work, after) {
@@ -106,11 +117,17 @@ export async function startVault(transport, metadata, onSession) {
   function render() {
     const locked = session.locked, hasProject = !!session.project && !picking;
     const f = hasProject ? active() : null; // nothing is "current" while the picker is open
-    const [eyebrow, title, detail] = LOCK_SCREENS[session.lockReason] ?? LOCK_SCREENS.closed;
+    const offline = locked && !!notConnected;
+    const [eyebrow, title, detail] = offline ? NOT_CONNECTED[notConnected] : LOCK_SCREENS[session.lockReason] ?? LOCK_SCREENS.closed;
     $('locked-view').hidden = !locked;
     $('locked-eyebrow').textContent = eyebrow; $('locked-title').textContent = title;
-    $('locked-detail').textContent = unlockError ?? (demo ? `${detail} ${DEMO_NOTE}` : detail);
+    $('locked-detail').textContent = offline ? `${detail} ${NOT_CONNECTED_NOTE}` : unlockError ?? (demo ? `${detail} ${DEMO_NOTE}` : detail);
     $('unlock').disabled = busy;
+    $('unlock-label').textContent = offline ? 'Try again' : 'Unlock vault';
+    document.body.classList.toggle('mode-red', demo || offline);
+    document.body.classList.toggle('mode-offline', offline);
+    $('offline-banner').hidden = !offline;
+    if (offline) $('offline-text').textContent = `${title}. ${NOT_CONNECTED_NOTE}`;
     $('project-picker').hidden = locked || hasProject;
     if (!locked && !hasProject) renderPicker();
     $('no-file').hidden = locked || !hasProject || !!f || !!history || showDeleted || !!merging || !!buildsView || !!comparing || !!(info && session.files.has(info.id));
@@ -801,8 +818,12 @@ export async function startVault(transport, metadata, onSession) {
   // ---- actions ---------------------------------------------------------------------------------------------------
   function unlock() {
     act(async () => {
-      try { var changed = await session.unlock(); unlockError = null; }
-      catch (e) { unlockError = UNLOCK_FAILURES[e?.code] ?? `Could not connect to the vault (${e?.code ?? 'InternalError'}).`; return 'Still locked.'; }
+      try { var changed = await session.unlock(); unlockError = null; notConnected = null; }
+      catch (e) {
+        notConnected = NOT_CONNECTED[e?.code] ? e.code : null;
+        unlockError = UNLOCK_FAILURES[e?.code] ?? `Could not connect to the vault (${e?.code ?? 'InternalError'}).`;
+        return notConnected ? `Not connected. ${NOT_CONNECTED[notConnected][1]}.` : 'Still locked.';
+      }
       for (const id of changed) { keepEditing.delete(id); notMergeable.delete(id); }
       if (info) { try { info.details = await session.info(info.id); } catch (e) { if (e?.code !== 'NotFound') throw e; info = null; } }
       return changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : demo ? 'Demo vault ready (simulated, not encrypted).' : 'Connected to the vault.';
