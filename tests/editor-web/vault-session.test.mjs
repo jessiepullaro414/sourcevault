@@ -17,7 +17,7 @@ test('starts locked; unlock opens a session and lists projects; nothing is loade
   const session = new VaultSession(host.transport, { timeoutMs: 500 });
   assert.equal(session.locked, true);
   assert.deepEqual(await session.unlock(), []);
-  assert.deepEqual(session.projects.map(p => p.name), ['Synthetic demo 1', 'Synthetic C++ demo', 'Lab client check']);
+  assert.deepEqual(session.projects.map(p => p.name), ['Synthetic demo 1', 'Synthetic C++ demo', 'Synthetic C# demo']);
   await session.selectProject(host.projectIdByName('Synthetic demo 1'));
   assert.equal(session.files.size, 3);
   assert.ok([...session.files.values()].every(f => !f.loaded && f.text === null), 'no text before open');
@@ -84,11 +84,11 @@ test('create file and project; duplicate names are AlreadyExists; switching proj
 
 test('deleting a project needs its exact name, refuses drafts in it, and clears it when open', async () => {
   const { host, session, projectId, byName } = await opened();
-  const other = host.projectIdByName('Lab client check');
-  await rejectsWith(session.deleteProject(other, 'lab client check'), 'NameMismatch');
-  assert.equal(await session.deleteProject(other, 'Lab client check'), true);
-  assert.ok(!session.projects.some(p => p.projectId === other)); assert.equal(host.projectIdByName('Lab client check'), null);
-  await rejectsWith(session.deleteProject(other, 'Lab client check'), 'NotFound');
+  const other = host.projectIdByName('Synthetic C# demo');
+  await rejectsWith(session.deleteProject(other, 'synthetic c# demo'), 'NameMismatch');
+  assert.equal(await session.deleteProject(other, 'Synthetic C# demo'), true);
+  assert.ok(!session.projects.some(p => p.projectId === other)); assert.equal(host.projectIdByName('Synthetic C# demo'), null);
+  await rejectsWith(session.deleteProject(other, 'Synthetic C# demo'), 'NotFound');
   const main = byName('main.ts');
   await session.open(main.id);
   session.edit(main.id, '// draft\n');
@@ -117,7 +117,7 @@ test('rename and move files and folders; tabs and drafts follow the file', async
   await rejectsWith(session.renameFolder('nowhere', 'x'), 'NotFound');
   await session.renameProject(projectId, 'Renamed demo');
   assert.equal(session.project.name, 'Renamed demo');
-  await rejectsWith(session.renameProject(projectId, 'lab client check'), 'AlreadyExists');
+  await rejectsWith(session.renameProject(projectId, 'synthetic c# demo'), 'AlreadyExists');
   assert.equal(host.textOf(projectId, main.id), '// draft survives a rename\n');
 });
 

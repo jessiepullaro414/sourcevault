@@ -16,7 +16,7 @@ and no administrator rights. Keep this folder together: editor\ runs on runtime\
 START: double-click "Start SourceVault Demo.cmd"
 
 WHAT IS IN IT
-  - Three fictional projects (TypeScript, C++ and a small text file). Projects, files, history and settings live only
+  - Three fictional projects (TypeScript, C++ and C#). Projects, files, history and settings live only
     in this window's memory and are gone when it closes. Its browser profile is deleted when it closes.
   - Every editor feature works as in the vault: projects and files, history and restore, conflicts and merge,
     deleted files, builds (simulated: nothing is compiled), search all files, go to file (Ctrl+P), outlines,

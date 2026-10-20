@@ -44,7 +44,11 @@ const SEED = [
     ['src/main.cpp', '#include <iostream>\n#include "gadget.h"\n\nint main() {\n    demo::Gadget gadget(3);\n    std::cout << gadget.label() << "\\n";\n    return 0;\n}\n'],
     ['CMakeLists.txt', 'cmake_minimum_required(VERSION 3.20)\nproject(synthetic_gadget CXX)\nadd_executable(gadget src/main.cpp src/gadget.cpp)\ntarget_include_directories(gadget PRIVATE include)\n'],
   ] },
-  { name: 'Lab client check', files: [['check.txt', 'SourceVault lab client check\nnonce: fictional\n']] },
+  { name: 'Synthetic C# demo', files: [
+    ['Widgets.csproj', '<Project Sdk="Microsoft.NET.Sdk">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net10.0</TargetFramework>\n    <Nullable>enable</Nullable>\n  </PropertyGroup>\n</Project>\n'],
+    ['src/Widget.cs', 'namespace Demo.Widgets;\n\n/// <summary>A fictional widget.</summary>\npublic sealed class Widget\n{\n    private readonly List<string> tags = new();\n\n    public Widget(string name) { Name = name; }\n\n    public string Name { get; }\n    public int TagCount => tags.Count;\n\n    public void Tag(string tag)\n    {\n        if (!tags.Contains(tag)) tags.Add(tag);\n    }\n\n    public override string ToString() => $"{Name} ({TagCount} tags)";\n}\n'],
+    ['src/Program.cs', 'using Demo.Widgets;\n\nvar widget = new Widget("sample");\nwidget.Tag("fictional");\nConsole.WriteLine(widget);\n'],
+  ] },
 ];
 
 export class DemoVaultHost {
