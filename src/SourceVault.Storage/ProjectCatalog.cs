@@ -54,6 +54,21 @@ public sealed class ProjectCatalog
         this.protector = protector ?? throw new ArgumentNullException(nameof(protector));
     }
 
+    /// <summary>Free space kept on the vault drive (<see cref="RevisionStore.FreeSpaceReserveBytes"/>); lower or higher in tests only.</summary>
+    internal long FreeSpaceReserve { get; set; } = RevisionStore.FreeSpaceReserveBytes;
+
+    /// <summary>
+    /// Throws <see cref="StoreLimitException"/> when writing <paramref name="bytes"/> to the vault drive would leave less than
+    /// the reserve free: for writes outside a project store, such as a package spool (internal security review 2026-10-20).
+    /// </summary>
+    public void EnsureFreeSpace(long bytes)
+    {
+        long available;
+        try { available = new DriveInfo(Path.GetPathRoot(vaultRoot)!).AvailableFreeSpace; }
+        catch (Exception e) when (e is ArgumentException or IOException or UnauthorizedAccessException) { return; } // the write itself reports
+        if (available - bytes < FreeSpaceReserve) throw new StoreLimitException("Not enough free space on the vault drive.");
+    }
+
     private string IndexPath => Path.Combine(vaultRoot, "index");
     private string ProjectsPath => Path.Combine(vaultRoot, "projects");
     private string ProjectPath(Guid id) => Path.Combine(ProjectsPath, id.ToString("D"));

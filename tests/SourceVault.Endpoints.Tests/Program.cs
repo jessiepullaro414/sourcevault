@@ -1137,13 +1137,14 @@ using var otherImportRsa = RSA.Create(2048); // a second vault PC's import key
 var senderFile = SourceVault.Packaging.PublicKeyFile.Create(SourceVault.Packaging.PublicKeyFile.SenderFormat, "DEV-PC", senderRsa.ExportSubjectPublicKeyInfo());
 byte[] SenderSign(byte[] hash) => senderRsa.SignHash(hash, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
 
-(VaultPipeServer Server, string Pipe, PackageImports Packages) StartPackageServer(bool registerSender = true, RSA? import = null)
+(VaultPipeServer Server, string Pipe, PackageImports Packages) StartPackageServer(bool registerSender = true, RSA? import = null, long? freeSpaceReserve = null)
 {
     var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
     var senders = Path.Combine(workspace, "senders-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(vault); Directory.CreateDirectory(senders);
     if (registerSender) File.WriteAllBytes(Path.Combine(senders, Convert.ToHexStringLower(senderFile.Fingerprint) + ".json"), senderFile.ToJson());
     var catalog = new ProjectCatalog(vault, key);
+    if (freeSpaceReserve is { } reserve) catalog.FreeSpaceReserve = reserve;
     import ??= importRsa;
     var packages = new PackageImports(new RsaTestKey(import), import.ExportSubjectPublicKeyInfo(), "TEST-VAULT", senders);
     var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
@@ -1169,6 +1170,25 @@ string Upload(Client c, byte[] package, string project)
     }
     return c.Code("FinishPackageImport", ("projectName", project));
 }
+
+Test("package import: a package that would leave less than the free-space reserve is refused before anything is spooled", () =>
+{
+    var (server, pipe, _) = StartPackageServer(freeSpaceReserve: long.MaxValue / 4); // no drive has that much free
+    using (server)
+    using (var c = new Client(pipe, me))
+    {
+        c.Begin();
+        Assert(c.Code("BeginPackageImport", ("length", 4096)) == "LimitExceeded", "refused for space");
+        Assert(c.Code("PackageImportPart", ("offset", 0), ("dataBase64", B64("x"))) == "InvalidRequest", "no upload was begun");
+    }
+    var (server2, pipe2, _) = StartPackageServer(freeSpaceReserve: 0);
+    using (server2)
+    using (var c = new Client(pipe2, me))
+    {
+        c.Begin();
+        Assert(c.Code("BeginPackageImport", ("length", 4096)) == "Ok", "the service-wide slot was not held by the refused attempt");
+    }
+});
 
 Test("package import: a registered computer's package becomes a new project with the same files", () =>
 {

@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("SourceVault.Revisions.Tests")]
+[assembly: InternalsVisibleTo("SourceVault.Endpoints.Tests")]
 namespace SourceVault.Storage;
 
 /// <summary>How the store classifies a revision's bytes (docs/vault-any-file-design.md section 2.1).</summary>

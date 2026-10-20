@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 
 namespace SourceVault.Import;
@@ -91,19 +92,24 @@ internal static class SourceCleanup
         byte[]? content = null;
         try
         {
-            // Exclusive handle: nothing can change the file between the hash check and the overwrite.
-            using (var stream = new FileStream(file.FullPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            // One exclusive handle for everything (internal security review 2026-10-20): nothing can change the file
+            // between the hash check and the overwrite, and the file deleted is the one verified, never whatever the path
+            // names by then. The handle never follows a link (FILE_FLAG_OPEN_REPARSE_POINT).
+            using var handle = OpenForDelete(file.FullPath);
+            using (var stream = new FileStream(handle, FileAccess.ReadWrite))
             {
                 if (stream.Length != file.Length) return Changed;
-                if (LinkCount(stream.SafeFileHandle) != 1) return HardLinked;
+                if (LinkCount(handle) != 1) return HardLinked;
                 // Streamed: a file can be up to 1 GiB, so it is never read into memory whole.
                 if (!CryptographicOperations.FixedTimeEquals(SHA256.HashData(stream), file.Sha256)) return Changed;
                 stream.Position = 0;
                 content = new byte[(int)Math.Min(1 << 20, Math.Max(1, stream.Length))]; // zeros
                 for (long left = stream.Length; left > 0; left -= content.Length) stream.Write(content, 0, (int)Math.Min(content.Length, left));
                 stream.Flush(flushToDisk: true);
+                // Mark this open file for deletion; it goes when the handle closes.
+                var disposition = new FileDispositionInfo { DeleteFile = true };
+                if (!SetFileInformationByHandle(handle, 4, ref disposition, (uint)Marshal.SizeOf<FileDispositionInfo>())) throw new IOException("Delete refused.");
             }
-            File.Delete(file.FullPath);
             return null;
         }
         catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return Missing; }
@@ -121,6 +127,24 @@ internal static class SourceCleanup
     private static uint LinkCount(Microsoft.Win32.SafeHandles.SafeFileHandle handle) =>
         GetFileInformationByHandle(handle, out var info) ? info.NumberOfLinks : uint.MaxValue;
 
+    // GENERIC_READ | GENERIC_WRITE | DELETE, no sharing, the link itself rather than its target.
+    private static Microsoft.Win32.SafeHandles.SafeFileHandle OpenForDelete(string path)
+    {
+        var handle = CreateFileW(path, 0x80000000 | 0x40000000 | 0x00010000, 0, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error();
+            handle.Dispose();
+            throw error is 2 or 3 ? new FileNotFoundException() : error == 5 ? new UnauthorizedAccessException() : new IOException("Open refused.");
+        }
+        return handle;
+    }
+
+    [StructLayout(LayoutKind.Sequential)] private struct FileDispositionInfo { [MarshalAs(UnmanagedType.U1)] public bool DeleteFile; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file, int infoClass, ref FileDispositionInfo info, uint size);
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file, out ByHandleFileInformation information);
 
