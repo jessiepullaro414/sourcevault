@@ -37,6 +37,8 @@ Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-de
 
 All five findings of this review are fixed. Their lab checks are in the checklist.
 
+**SourceVault password (2026-10-20):** built. A per-operator password, checked by the service at every session start; PBKDF2 hashes in the encrypted vault; 15-minute lockout after 5 wrong tries; administrator reset with `-ResetPassword`; change it in the editor settings ([protocol-v2.md](../contracts/protocol-v2.md)). The lockout counter is in service memory, so a service restart (administrators only) clears it. Lab row in the checklist.
+
 **The whitepaper's open finding (stolen whole PC):** the owner reports that the vault PC has BitLocker and Secure Boot on (2026-10-20), and `-Status` now reports and warns about both. A lab row confirms it there. A BitLocker startup PIN is still recommended.
 
 Still open:

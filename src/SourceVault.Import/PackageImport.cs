@@ -21,7 +21,7 @@ internal static class PackageImport
         var package = File.ReadAllBytes(info.FullName); // ciphertext
         output.WriteLine($"Package: {info.Name} ({package.Length:N0} bytes). Sending it to the vault service, which checks and decrypts it.");
         using var client = connect();
-        Expect(client.Begin(), "BeginSession");
+        Expect(client.Begin(ConsolePassword.Ask), "BeginSession");
         var begin = client.Call("BeginPackageImport", w => w.WriteNumber("length", package.Length));
         if (!begin.Ok) return Report(begin.Code, project, output);
         for (int offset = 0; offset < package.Length; offset += PartBytes)
@@ -45,7 +45,7 @@ internal static class PackageImport
         var full = Path.GetFullPath(path);
         if (File.Exists(full)) throw new ImportException("That file already exists; choose a new file name.");
         using var client = connect();
-        Expect(client.Begin(), "BeginSession");
+        Expect(client.Begin(ConsolePassword.Ask), "BeginSession");
         var reply = client.Call("GetImportRecipient");
         if (!reply.Ok) return Report(reply.Code, null, output);
         var recipient = PublicKeyFile.Create(PublicKeyFile.RecipientFormat, reply.Body.GetProperty("computer").GetString()!,

@@ -85,7 +85,12 @@ public sealed class EditorVaultController : IDisposable
     internal Func<Task>? BeforeCommit { get; set; }
 
     /// <summary>Opens a connection and session. Returns the opened files that changed in the vault while locked.</summary>
-    public Task<VaultResult<IReadOnlyList<(Guid ProjectId, Guid FileId)>>> UnlockAsync(CancellationToken ct = default) => Guarded(async () =>
+    /// <summary>
+    /// <paramref name="password"/>: the operator's SourceVault password; <paramref name="newPassword"/>: sets the first
+    /// one (or one an administrator reset). Without either, a service that wants one answers PasswordRequired or
+    /// PasswordNotSet, so the editor knows which form to show.
+    /// </summary>
+    public Task<VaultResult<IReadOnlyList<(Guid ProjectId, Guid FileId)>>> UnlockAsync(string? password = null, string? newPassword = null, CancellationToken ct = default) => Guarded(async () =>
     {
         client?.Dispose();
         client = null;
@@ -93,7 +98,7 @@ public sealed class EditorVaultController : IDisposable
         try
         {
             client = await connect(ct).ConfigureAwait(false);
-            begun = await client.BeginAsync(ct).ConfigureAwait(false);
+            begun = await client.BeginAsync(password, newPassword, ct).ConfigureAwait(false);
         }
         catch (Exception e) when (UnlockFailure(e) is { } code)
         {
@@ -115,6 +120,15 @@ public sealed class EditorVaultController : IDisposable
         }
         return new VaultResult<IReadOnlyList<(Guid, Guid)>>("Ok", changed);
     }, unlocking: true);
+
+    public Task<VaultResult<IReadOnlyList<(Guid ProjectId, Guid FileId)>>> UnlockAsync(CancellationToken ct) => UnlockAsync(null, null, ct);
+
+    /// <summary>Changes the operator's SourceVault password; the current one must match.</summary>
+    public Task<VaultResult<bool>> ChangePasswordAsync(string password, string newPassword, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("ChangePassword", w => { w.WriteString("password", password); w.WriteString("newPassword", newPassword); }, null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<bool>("Ok", true) : Fail<bool>(r.Code);
+    });
 
     /// <summary>Ends the session (user lock). Opened-document ids are kept for the unlock re-check.</summary>
     public async Task LockAsync()

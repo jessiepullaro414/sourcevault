@@ -1,6 +1,6 @@
 // Vault mode UI (docs/editor-vault-design.md). The host owns the service connection; this page sees project/file ids,
 // names and the text of files it opens. Nothing here logs or posts document text anywhere but the host bridge.
-import { VaultSession, languageFor as languageOf, isOpenable, badgeOf, MAX_EDITOR_TEXT_BYTES } from './vault-session.mjs';
+import { VaultSession, languageFor as languageOf, isOpenable, badgeOf, MAX_EDITOR_TEXT_BYTES, PASSWORD_CODES } from './vault-session.mjs';
 import { resolve } from './merge.mjs';
 import { $, announce, postStatus, languageLabel, loadMonaco, createEditor, createDiffEditor, createLogViewer, wireChrome, showLoadFailure, clearInternalClipboard, setFileDropHandler } from './shell.mjs';
 import { touchRecent, counterpart, isCFamily, outline } from './workbench.mjs';
@@ -26,6 +26,17 @@ const NOT_CONNECTED = {
 const NOT_CONNECTED_NOTE = 'Nothing can be opened or saved, and nothing is decrypted, until the vault is connected. Unsaved edits already in this window stay here.';
 // Working offline (owner decision 2026-10-20): chosen with "Work offline" on that screen. Memory only, never the disk.
 const OFFLINE_NOTE = 'You can keep editing the files that are open and make new ones. They stay in this window’s memory only: nothing is saved or encrypted until the vault is back, and closing the editor loses them. Save marks a file to be saved then.';
+// The operator's SourceVault password (owner decision 2026-10-20), checked by the service on every unlock.
+const PASSWORD_SCREENS = {
+  enter: ['SOURCEVAULT PASSWORD', 'Enter your SourceVault password', 'Your vault password, not your Windows one. Five wrong tries in a row lock it for 15 minutes; an administrator can reset it.'],
+  choose: ['SOURCEVAULT PASSWORD', 'Choose your SourceVault password', 'You don’t have one yet, or an administrator reset it. Use at least 12 characters; a long phrase is best. Nobody can recover it: if you forget it, an administrator resets it and you choose a new one.'],
+};
+const PASSWORD_MESSAGES = {
+  WrongPassword: 'Wrong password. Five wrong tries in a row lock it for 15 minutes.',
+  PasswordLocked: 'Too many wrong passwords: locked for 15 minutes. An administrator can reset it sooner.',
+  PasswordTooWeak: 'Use at least 12 characters (and no more than 256).',
+  PasswordNotSet: '', PasswordRequired: '',
+};
 const KEPT = 'Unsaved edits stay in this editor’s memory and are checked against the vault when you unlock. Locking hides them; it does not guarantee memory erasure.';
 const LOCK_SCREENS = {
   start: ['VAULT', 'Connecting to the vault', 'Documents are decrypted by the SourceVault service, and only for files you open.'],
@@ -78,6 +89,7 @@ export async function startVault(transport, metadata, onSession) {
   const keepEditing = new Set(); // files whose conflict banner was dismissed
   let editor, suppress = false, busy = false, picking = false, unlockError = null;
   let notConnected = null; // a NOT_CONNECTED code while the service can't be reached
+  let passwordPrompt = null, passwordMessage = ''; // 'enter' | 'choose' while the service wants the SourceVault password
   let deleting = null; // { projectId, typed } while a delete confirmation is open in the picker
   let renaming = null; // { projectId, value } while a project rename is open in the picker
   let history = null, diffEditor = null; // the open history view: { fileId, path, language, deleted, revisions, more, page, selected, latestText, models }
@@ -125,10 +137,18 @@ export async function startVault(transport, metadata, onSession) {
     const f = hasProject ? active() : null; // nothing is "current" while the picker is open
     const offline = locked && !!notConnected; // the red lock screen: the service can't be reached
     const working = session.offline;          // working offline: red, editable, nothing saved until the vault is back
-    const [eyebrow, title, detail] = offline ? NOT_CONNECTED[notConnected] : LOCK_SCREENS[session.lockReason] ?? LOCK_SCREENS.closed;
-    $('locked-view').hidden = !locked;
+    const [eyebrow, title, detail] = passwordPrompt ? PASSWORD_SCREENS[passwordPrompt] : offline ? NOT_CONNECTED[notConnected] : LOCK_SCREENS[session.lockReason] ?? LOCK_SCREENS.closed;
+    $('locked-view').hidden = !locked && !passwordPrompt; // offline work hides behind the password form too
+    $('password-form').hidden = !passwordPrompt;
+    $('password-input').hidden = passwordPrompt !== 'enter';
+    $('password-new').hidden = $('password-confirm').hidden = passwordPrompt !== 'choose';
+    $('password-submit').textContent = passwordPrompt === 'choose' ? 'Set password and unlock' : 'Unlock';
+    $('password-submit').disabled = busy;
+    $('password-message').textContent = passwordMessage;
+    $('password-offline').hidden = !session.offline;
+    $('unlock').hidden = !!passwordPrompt;
     $('locked-eyebrow').textContent = eyebrow; $('locked-title').textContent = title;
-    $('locked-detail').textContent = offline ? `${detail} ${NOT_CONNECTED_NOTE}` : unlockError ?? (demo ? `${detail} ${DEMO_NOTE}` : detail);
+    $('locked-detail').textContent = passwordPrompt ? detail : offline ? `${detail} ${NOT_CONNECTED_NOTE}` : unlockError ?? (demo ? `${detail} ${DEMO_NOTE}` : detail);
     $('unlock').disabled = busy;
     $('unlock-label').textContent = offline ? 'Try again' : 'Unlock vault';
     $('work-offline').hidden = !offline; $('work-offline').disabled = busy;
@@ -203,7 +223,7 @@ export async function startVault(transport, metadata, onSession) {
     $('revision-count').textContent = String(session.savedCount).padStart(2, '0');
     $('files-detail').textContent = hasProject ? `${session.files.size} in project` : '—';
     $('language-detail').textContent = $('language-status').textContent = f ? languageLabel(f.language) : '—';
-    document.body.classList.toggle('locked', locked);
+    document.body.classList.toggle('locked', locked || !!passwordPrompt);
     renderHistory(); renderDeleted(); renderMerge(); renderBuilds(); renderCompare(); renderInfo(); updateStatusDetails();
     const choice = !!f && notMergeable.has(f.id);
     $('conflict-text').textContent = choice
@@ -828,10 +848,16 @@ export async function startVault(transport, metadata, onSession) {
   }
 
   // ---- actions ---------------------------------------------------------------------------------------------------
-  function unlock() {
+  function unlock(password = null, newPassword = null) {
     act(async () => {
-      try { var changed = await session.unlock(); unlockError = null; notConnected = null; }
+      try { var changed = await session.unlock(password, newPassword); unlockError = null; notConnected = null; passwordPrompt = null; passwordMessage = ''; }
       catch (e) {
+        if (PASSWORD_CODES.has(e?.code)) {
+          passwordPrompt = e.code === 'PasswordNotSet' || (e.code === 'PasswordTooWeak' && newPassword) ? 'choose' : 'enter';
+          passwordMessage = PASSWORD_MESSAGES[e.code] ?? '';
+          notConnected = null;
+          return passwordPrompt === 'choose' ? 'Choose your SourceVault password to unlock.' : passwordMessage || 'Enter your SourceVault password to unlock.';
+        }
         notConnected = NOT_CONNECTED[e?.code] ? e.code : null;
         unlockError = UNLOCK_FAILURES[e?.code] ?? `Could not connect to the vault (${e?.code ?? 'InternalError'}).`;
         return notConnected ? `Not connected. ${NOT_CONNECTED[notConnected][1]}.` : 'Still locked.';
@@ -840,7 +866,12 @@ export async function startVault(transport, metadata, onSession) {
       if (info) { try { info.details = await session.info(info.id); } catch (e) { if (e?.code !== 'NotFound') throw e; info = null; } }
       const queued = await saveOfflineWork();
       return (changed.length ? `Unlocked. ${changed.length} open file(s) changed in the vault while locked; saving them will conflict until you reload.` : demo ? 'Demo vault ready (simulated, not encrypted).' : 'Connected to the vault.') + queued;
-    }, () => { wb.renderSearch(); if (!session.locked && !session.project) $('new-project-name').focus(); });
+    }, () => {
+      for (const id of ['password-input', 'password-new', 'password-confirm']) $(id).value = ''; // never kept in the page
+      wb.renderSearch();
+      if (passwordPrompt) $(passwordPrompt === 'choose' ? 'password-new' : 'password-input').focus();
+      else if (!session.locked && !session.project) $('new-project-name').focus();
+    });
   }
   // What Save did offline, saved now that the vault is back. Returns a sentence for the status bar ('' if nothing).
   async function saveOfflineWork() {
@@ -1145,8 +1176,31 @@ export async function startVault(transport, metadata, onSession) {
     if (command) { event.preventDefault(); command.run(); }
   }, true);
 
-  $('unlock').onclick = unlock;
-  $('offline-retry').onclick = unlock;
+  $('unlock').onclick = () => unlock();
+  $('offline-retry').onclick = () => unlock();
+  $('password-form').onsubmit = event => {
+    event.preventDefault();
+    if (passwordPrompt === 'choose') {
+      const chosen = $('password-new').value;
+      if (chosen.length < 12) { passwordMessage = PASSWORD_MESSAGES.PasswordTooWeak; render(); return; }
+      if (chosen !== $('password-confirm').value) { passwordMessage = 'The two passwords are different. Type them again.'; $('password-new').value = $('password-confirm').value = ''; render(); return; }
+      unlock(null, chosen);
+    } else if ($('password-input').value) unlock($('password-input').value);
+  };
+  $('password-offline').onclick = () => { passwordPrompt = null; passwordMessage = ''; $('password-input').value = ''; render(); };
+  $('password-change').hidden = false; // vault and demo modes: change the SourceVault password in the settings dialog
+  $('password-change').onsubmit = event => {
+    event.preventDefault();
+    const current = $('password-current').value, next = $('password-change-new').value, again = $('password-change-confirm').value;
+    const say = text => { $('password-change-message').textContent = text; };
+    if (next.length < 12) { say(PASSWORD_MESSAGES.PasswordTooWeak); return; }
+    if (next !== again) { say('The two new passwords are different.'); return; }
+    act(async () => {
+      try { await session.changePassword(current, next); say('Password changed. Use the new one from your next unlock.'); return 'SourceVault password changed.'; }
+      catch (e) { say(PASSWORD_MESSAGES[e?.code] || FAILURES[e?.code] || `Not changed (${e?.code}).`); return 'Password not changed.'; }
+      finally { for (const id of ['password-current', 'password-change-new', 'password-change-confirm']) $(id).value = ''; }
+    });
+  };
   $('work-offline').onclick = () => {
     try { session.goOffline(); } catch { return; }
     syncModel(); render();

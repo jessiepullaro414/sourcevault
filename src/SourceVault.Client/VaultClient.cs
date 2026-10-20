@@ -38,12 +38,42 @@ public sealed class VaultClient : IDisposable
 
     public VaultResponse Begin() => BeginAsync().GetAwaiter().GetResult();
 
-    public async Task<VaultResponse> BeginAsync(CancellationToken cancellationToken = default)
+    /// <summary>
+    /// For console tools: starts a session, asking for the operator's SourceVault password (up to three tries) when
+    /// the service wants one. <paramref name="askPassword"/> returns null to give up.
+    /// </summary>
+    public VaultResponse Begin(Func<string?> askPassword)
     {
-        var response = await CallAsync("BeginSession", null, null, cancellationToken).ConfigureAwait(false);
+        var response = Begin();
+        for (int attempt = 0; attempt < 3 && response.Code is "PasswordRequired" or "WrongPassword"; attempt++)
+        {
+            if (response.Code == "WrongPassword") Console.Error.WriteLine("Wrong password.");
+            var password = askPassword();
+            if (password is null) break;
+            response = BeginAsync(password).GetAwaiter().GetResult();
+        }
+        if (response.Code == "PasswordNotSet") Console.Error.WriteLine("You have no SourceVault password yet. Open the SourceVault editor first: it asks you to choose one.");
+        if (response.Code == "PasswordLocked") Console.Error.WriteLine("Too many wrong passwords: locked for 15 minutes. An administrator can reset it (Setup-SourceVault.ps1 -ResetPassword).");
+        return response;
+    }
+
+    /// <summary>
+    /// Starts a session. <paramref name="password"/>: the operator's SourceVault password; <paramref name="newPassword"/>:
+    /// sets the first one (or one an administrator reset). Errors: PasswordRequired, PasswordNotSet, WrongPassword,
+    /// PasswordLocked, PasswordTooWeak.
+    /// </summary>
+    public async Task<VaultResponse> BeginAsync(string? password = null, string? newPassword = null, CancellationToken cancellationToken = default)
+    {
+        var response = await CallAsync("BeginSession", password is null && newPassword is null ? null : w =>
+        {
+            if (password is not null) w.WriteString("password", password);
+            if (newPassword is not null) w.WriteString("newPassword", newPassword);
+        }, null, cancellationToken).ConfigureAwait(false);
         if (response.Ok) capability = response.Body.GetProperty("capability").GetString();
         return response;
     }
+
+    public Task<VaultResponse> BeginAsync(CancellationToken cancellationToken) => BeginAsync(null, null, cancellationToken);
 
     /// <summary>Synchronous convenience for console tools.</summary>
     public VaultResponse Call(string operation, Action<Utf8JsonWriter>? fields = null, string? capabilityOverride = null) =>

@@ -16,6 +16,7 @@ internal sealed class ConnectionState
     internal bool Closed; // terminal: expired, ended, revoked or rejected
     internal uint WindowsSession;
     internal string? Actor; // the operator's account name, recorded in encrypted file history
+    internal System.Security.Principal.SecurityIdentifier? User; // the operator, from the pipe's client token (never the message)
     // A package being uploaded, at most one per connection: spooled to staging\ as it arrives (ciphertext), hashed on the way.
     internal FileStream? PackageSpool;
     internal string? PackageFolder;
@@ -77,10 +78,12 @@ internal sealed class VaultProtocol
     // are listed as unavailable, and the only operation they allow is deletion.
     private readonly ConcurrentDictionary<Guid, bool> failed = new();
     private readonly Action<int, IEnumerable<Guid>>? status; // writes the administrator's status file (ids and counts only)
+    private readonly OperatorPasswords? passwords; // null: in-process tests that don't exercise passwords
 
     internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null, PackageImports? packages = null,
-        IEnumerable<(Guid ProjectId, string Name)>? offline = null, Action<int, IEnumerable<Guid>>? status = null)
+        IEnumerable<(Guid ProjectId, string Name)>? offline = null, Action<int, IEnumerable<Guid>>? status = null, OperatorPasswords? passwords = null)
     {
+        this.passwords = passwords;
         this.catalog = catalog;
         this.builds = builds;
         this.packages = packages;
@@ -106,7 +109,18 @@ internal sealed class VaultProtocol
 
         if (request.Operation == "BeginSession")
         {
-            if (!Fields(body) || state.Capability is not null) return Error(request, "InvalidRequest");
+            // {} | {password} | {newPassword}: the operator's SourceVault password, checked before a capability exists.
+            bool withPassword = Fields(body, "password"), withNew = Fields(body, "newPassword");
+            if (!(Fields(body) || withPassword || withNew) || state.Capability is not null) return Error(request, "InvalidRequest");
+            if (passwords is not null)
+            {
+                string? password = withPassword ? PasswordText(body, "password") : null, newPassword = withNew ? PasswordText(body, "newPassword") : null;
+                if ((withPassword && password is null) || (withNew && newPassword is null) || state.User is null) return Error(request, "InvalidRequest");
+                string code;
+                try { code = passwords.BeginSession(state.User, password, newPassword); }
+                catch (Exception e) when (e is VaultCatalogException or InvalidDataException or CryptographicException or IOException) { return Error(request, "Unavailable"); }
+                if (code != "Ok") return Error(request, code);
+            }
             state.Capability = RandomNumberGenerator.GetBytes(32);
             state.Started = state.LastActivity = now;
             return Ok(request, w =>
@@ -128,6 +142,7 @@ internal sealed class VaultProtocol
             return request.Operation switch
             {
                 "EndSession" => EndSession(request, state),
+                "ChangePassword" => ChangePassword(request, state),
                 "ListProjects" => ListProjects(request),
                 "CreateProject" => CreateProject(request),
                 "ListFiles" => ListFiles(request),
@@ -178,6 +193,22 @@ internal sealed class VaultProtocol
         catch (Exception e) when (e is VaultCatalogException or CryptographicException or IOException or InvalidDataException
             or ArgumentException or UnauthorizedAccessException) { return Error(request, "Unavailable"); }
         catch (Exception e) when (e is not OutOfMemoryException) { return Error(request, "InternalError"); }
+    }
+
+    private static string? PasswordText(JsonElement body, string name)
+    {
+        var value = body.GetProperty(name);
+        return value.ValueKind == JsonValueKind.String && value.GetString() is { Length: > 0 and <= OperatorPasswords.MaxLength } text ? text : null;
+    }
+
+    private ProtocolResponse ChangePassword(ParsedRequest request, ConnectionState state)
+    {
+        Require(request.Body, "capability", "password", "newPassword");
+        if (passwords is null || state.User is null) throw new RequestException("Unavailable");
+        var password = PasswordText(request.Body, "password") ?? throw new RequestException("InvalidRequest");
+        var newPassword = PasswordText(request.Body, "newPassword") ?? throw new RequestException("InvalidRequest");
+        var code = passwords.ChangePassword(state.User, password, newPassword);
+        return code == "Ok" ? Ok(request, _ => { }) : Error(request, code);
     }
 
     private ProtocolResponse EndSession(ParsedRequest request, ConnectionState state)

@@ -168,3 +168,9 @@ Owner decisions after the usability review; none of them changes what leaves the
   - **What is refused:** every call that needs the vault is refused before anything is sent (`Offline`); only `unlock`, `lock` and the display settings still reach the host.
   - **Save** queues the file (`saveWhenBack`). After a successful **Try again**, `saveQueued` saves the queue through the normal per-file conflict check and creates the new files in the open project, or in the next one opened.
   - **Nothing is written to disk.** Any lock ends offline work. While there is no vault session, the host now forwards a Windows lock to the page itself, so offline work is hidden too.
+- **SourceVault password** (owner decision 2026-10-20).
+  - **Unlocking:** `unlock` without a password gets `PasswordRequired` or `PasswordNotSet`, and the lock screen then shows *Enter your SourceVault password* or *Choose your SourceVault password*.
+  - **Bridge operations:** `unlockWithPassword {password}`, `setPassword {newPassword}` and `changePassword {password, newPassword}` (1-256 characters, no control characters). The host passes the password to the service and never stores or logs it. The page clears the fields after each try.
+  - **Changing it:** a form in the settings dialog.
+  - **Offline:** working offline still needs no password, but reconnecting does; the password form covers the offline work until it succeeds.
+  - **Demo mode** simulates it in memory, with a demo-panel "reset".

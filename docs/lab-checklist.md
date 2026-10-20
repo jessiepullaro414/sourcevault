@@ -53,6 +53,7 @@ Before any of these: rebuild the package (`scripts\Build-Installer.ps1`) and run
 
 | Done | Test | Needs |
 |---|---|---|
+| [ ] | **SourceVault password:** in the installed editor: choose one at the first unlock; lock and unlock with it; 5 wrong tries lock it (the 6th, even right, is refused); `-ResetPassword` for that account lets them choose a new one; change it in settings; the importer asks for it in the console. Search the vault folder and `%LOCALAPPDATA%` for the password text: not found | admin for the reset |
 | [ ] | **Secure Boot and BitLocker on the vault PC:** `-Status` shows *Secure Boot is on* and *BitLocker protects the Windows drive* (and the vault drive, if another one). Record the result in the whitepaper (section 4.5) | admin; the vault PC |
 | [ ] | **Output folder check:** with the setup-created artifact folder, a build works and `-Status` shows no artifact warning. Then point `artifactRoot` at a new folder under one ordinary users can modify (e.g. `D:\Shared\out`, with Users Modify on `D:\Shared`): `-Status` warns, and a build ends *could not run* with the output-folder message. Restore it | admin; builds |
 | [ ] | **Startup hooks:** set `DOTNET_STARTUP_HOOKS` to any path in a normal window and start the installed editor and importer from it: both run normally (the hook is ignored), and the importer still connects | — |

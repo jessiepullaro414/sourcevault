@@ -18,7 +18,7 @@ internal static class LabCommands
     internal static int List(Func<VaultClient> connect, TextWriter output)
     {
         using var client = connect();
-        Expect(client.Begin(), "BeginSession");
+        Expect(client.Begin(ConsolePassword.Ask), "BeginSession");
         var projects = Expect(client.Call("ListProjects"), "ListProjects").GetProperty("projects");
         output.WriteLine($"{projects.GetArrayLength()} project(s)");
         foreach (var project in projects.EnumerateArray())
@@ -46,7 +46,7 @@ internal static class LabCommands
         using (var client = connect())
         {
             var t = Stopwatch.StartNew();
-            Report(client.Begin().Ok, "session started; capability issued to this connection only", t);
+            Report(client.Begin(ConsolePassword.Ask).Ok, "session started; capability issued to this connection only", t);
 
             t.Restart();
             var projects = Expect(client.Call("ListProjects"), "ListProjects").GetProperty("projects").EnumerateArray().ToList();
@@ -139,7 +139,7 @@ internal static class LabCommands
     internal static int SaveLoop(Func<VaultClient> connect, TextWriter output, int saves)
     {
         using var client = connect();
-        Expect(client.Begin(), "BeginSession");
+        Expect(client.Begin(ConsolePassword.Ask), "BeginSession");
         var (projectId, fileId, snapshot, count) = Counter(client, create: true);
         output.WriteLine($"starting at count {count}; cut the power any time");
         for (int i = 0; i < saves; i++)
@@ -157,7 +157,7 @@ internal static class LabCommands
     internal static int SaveCheck(Func<VaultClient> connect, TextWriter output)
     {
         using var client = connect();
-        Expect(client.Begin(), "BeginSession");
+        Expect(client.Begin(ConsolePassword.Ask), "BeginSession");
         var (_, fileId, _, count) = Counter(client, create: false);
         client.Call("EndSession");
         if (fileId is null) { output.WriteLine($"FAIL: no \"{PowerLossProject}\" project or {CounterFile}; run save-loop first."); return 1; }

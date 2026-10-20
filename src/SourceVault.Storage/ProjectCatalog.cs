@@ -35,6 +35,10 @@ public sealed class ProjectCatalog
 {
     /// <summary>Fixed store id of the index, so its records are bound to the index context.</summary>
     public static readonly Guid IndexStoreId = new("2b8e4f1c-6a3d-4e7b-9c05-d1f2a3b4c5e6");
+    /// <summary>accounts\ (2026-10-20): one encrypted document with the operators' SourceVault password hashes.</summary>
+    public static readonly Guid AccountsStoreId = new("7c1d9e3a-4b6f-4a2e-8d5c-3e9f1a2b6c40");
+    private const string AccountsDocument = "operators.json";
+    private readonly object accountsGate = new();
     public const int MaximumProjects = 256;
     private const string IndexDocument = "projects.json";
     private static readonly UTF8Encoding Utf8 = new(false, true);
@@ -73,6 +77,39 @@ public sealed class ProjectCatalog
     private string ProjectsPath => Path.Combine(vaultRoot, "projects");
     private string ProjectPath(Guid id) => Path.Combine(ProjectsPath, id.ToString("D"));
     private string BuildsPath => Path.Combine(vaultRoot, "builds");
+    private string AccountsPath => Path.Combine(vaultRoot, "accounts");
+
+    /// <summary>
+    /// The operators' password document, decrypted, or null when nobody has set a password yet. The caller zeroes it.
+    /// A damaged accounts store fails closed (<see cref="CatalogFailure.Index"/>).
+    /// </summary>
+    public byte[]? ReadAccounts()
+    {
+        lock (accountsGate)
+        {
+            if (!Directory.Exists(AccountsPath)) return null;
+            try
+            {
+                var store = Store(AccountsStoreId);
+                var snapshot = store.List();
+                if (snapshot.Files.Count == 0) return null;
+                if (snapshot.Files.Count != 1 || snapshot.Files[0].LogicalName != AccountsDocument) throw new InvalidDataException();
+                return store.Open(snapshot.SnapshotId, snapshot.Files[0].FileId);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException) { throw new VaultCatalogException(CatalogFailure.Index); }
+        }
+    }
+
+    /// <summary>Replaces the operators' password document (encrypted like every record).</summary>
+    public void WriteAccounts(byte[] content)
+    {
+        lock (accountsGate)
+        {
+            var store = Store(AccountsStoreId);
+            var snapshot = Directory.Exists(AccountsPath) ? store.List() : store.Initialize();
+            store.Commit(snapshot.SnapshotId, AccountsDocument, content);
+        }
+    }
     private string BuildLogPath(Guid id) => Path.Combine(BuildsPath, id.ToString("D"));
     private readonly ConcurrentDictionary<Guid, RevisionStore> buildLogs = new();
     private string StagingPath => Path.Combine(vaultRoot, "staging");
@@ -277,6 +314,7 @@ public sealed class ProjectCatalog
 
     private RevisionStore Store(Guid id) => stores.GetOrAdd(id, key => key == IndexStoreId
         ? new RevisionStore(IndexPath, IndexStoreId, protector)
+        : key == AccountsStoreId ? new RevisionStore(AccountsPath, AccountsStoreId, protector)
         : new RevisionStore(ProjectPath(key), key, protector));
 
     private void WriteIndex(IndexState state)
@@ -285,15 +323,24 @@ public sealed class ProjectCatalog
         indexStore.Commit(indexStore.List().SnapshotId, IndexDocument, SerializeIndex(state));
     }
 
+    // The accounts store authenticates like any store; a damaged one refuses the vault (the passwords can't be trusted).
+    private void VerifyAccounts()
+    {
+        var content = ReadAccounts();
+        if (content is not null) CryptographicOperations.ZeroMemory(content);
+    }
+
     private IndexState? ReadIndex()
     {
         string[] rootEntries;
         try { rootEntries = Directory.EnumerateFileSystemEntries(vaultRoot).Select(p => Path.GetFileName(p)!).ToArray(); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { throw new VaultCatalogException(CatalogFailure.Layout); }
-        // staging\ (uploads in progress, ciphertext only) alone does not make a vault: an otherwise empty root is fresh.
-        if (rootEntries.All(n => n == "staging")) return null;
-        if (!rootEntries.Contains("index", StringComparer.Ordinal) || rootEntries.Any(n => n is not ("index" or "projects" or "builds" or "staging")))
+        // staging\ (uploads in progress, ciphertext only) and accounts\ (passwords, set before any project) alone do not
+        // make a vault: such a root has no projects yet.
+        if (rootEntries.All(n => n is "staging" or "accounts")) { VerifyAccounts(); return null; }
+        if (!rootEntries.Contains("index", StringComparer.Ordinal) || rootEntries.Any(n => n is not ("index" or "projects" or "builds" or "staging" or "accounts")))
             throw new VaultCatalogException(CatalogFailure.Layout);
+        VerifyAccounts();
         byte[]? content = null;
         try
         {

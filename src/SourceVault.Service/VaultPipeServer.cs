@@ -85,7 +85,7 @@ internal sealed class VaultPipeServer : IDisposable
                 if (first is null)
                 {
                     policy.ValidateInstalledFiles(peer.ImagePath); // hash pins, once per connection
-                    first = peer; state.WindowsSession = peer.Session; state.Actor = AccountName(peer.User);
+                    first = peer; state.WindowsSession = peer.Session; state.Actor = AccountName(peer.User); state.User = peer.User;
                 }
                 else if (!peer.User.Equals(first.User) || peer.Session != first.Session || peer.ProcessId != first.ProcessId || peer.ProcessCreated != first.ProcessCreated) return;
                 ProtocolResponse response;

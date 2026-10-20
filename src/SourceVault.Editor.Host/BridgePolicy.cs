@@ -5,11 +5,12 @@ using System.Text.Json;
 namespace SourceVault.Editor.Host;
 
 internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock, SearchProject, GetSettings, SaveSettings,
-    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile, OpenBuildFolder, ChooseImportFolder, ImportFolder, CancelImport, DropFiles }
+    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile, OpenBuildFolder, ChooseImportFolder, ImportFolder, CancelImport, DropFiles, UnlockWithPassword, SetPassword, ChangePassword }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
 internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0,
-    string? Query = null, bool MatchCase = false, bool WholeWord = false, EditorSettings? Settings = null, string? Folder = null);
+    string? Query = null, bool MatchCase = false, bool WholeWord = false, EditorSettings? Settings = null, string? Folder = null,
+    string? Password = null, string? NewPassword = null);
 
 /// <summary>
 /// Bridge v2 (docs/editor-vault-design.md): pure, UI-free validation of renderer-to-host vault requests and
@@ -60,6 +61,10 @@ internal static class BridgePolicy
         ["createFile"] = (VaultOperation.CreateFile, ["projectId", "name", "text"]),
         ["lock"] = (VaultOperation.Lock, []),
         ["unlock"] = (VaultOperation.Unlock, []),
+        // The operator's SourceVault password (2026-10-20), checked by the service: never stored or logged by the host.
+        ["unlockWithPassword"] = (VaultOperation.UnlockWithPassword, ["password"]),
+        ["setPassword"] = (VaultOperation.SetPassword, ["newPassword"]), // the first one, or after an administrator's reset
+        ["changePassword"] = (VaultOperation.ChangePassword, ["password", "newPassword"]),
         ["searchProject"] = (VaultOperation.SearchProject, ["projectId", "query", "matchCase", "wholeWord"]),
         ["getSettings"] = (VaultOperation.GetSettings, []),
         ["saveSettings"] = (VaultOperation.SaveSettings, ["settings"]), // display preferences only (EditorSettings)
@@ -98,7 +103,7 @@ internal static class BridgePolicy
             if (!ExactFields(args, op.Args)) return false;
             Guid projectId = Guid.Empty, fileId = Guid.Empty, revisionId = Guid.Empty;
             int page = 0, buildNumber = 0;
-            string? name = null, text = null, newName = null, query = null, folder = null;
+            string? name = null, text = null, newName = null, query = null, folder = null, password = null, newPassword = null;
             bool matchCase = false, wholeWord = false;
             EditorSettings? settings = null;
             if (op.Args.Contains("projectId") && !TryId(args.GetProperty("projectId"), out projectId)) return false;
@@ -114,7 +119,9 @@ internal static class BridgePolicy
             if (op.Args.Contains("wholeWord") && !TryBool(args.GetProperty("wholeWord"), out wholeWord)) return false;
             if (op.Args.Contains("settings")) { if (!EditorSettings.TryParse(args.GetProperty("settings"), out var parsed)) return false; settings = parsed; }
             if (op.Args.Contains("folder") && !TryFolder(args.GetProperty("folder"), out folder)) return false;
-            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber, query, matchCase, wholeWord, settings, folder);
+            if (op.Args.Contains("password") && !TryPassword(args.GetProperty("password"), out password)) return false;
+            if (op.Args.Contains("newPassword") && !TryPassword(args.GetProperty("newPassword"), out newPassword)) return false;
+            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber, query, matchCase, wholeWord, settings, folder, password, newPassword);
             return true;
         }
         catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException)
@@ -193,6 +200,14 @@ internal static class BridgePolicy
     }
 
     // One line of plain text, 1-200 characters, no control characters.
+    internal const int MaxPasswordChars = 256;
+    // 1-256 characters, no control characters (the service decides what is strong enough).
+    private static bool TryPassword(JsonElement value, out string? password)
+    {
+        password = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        return password is { Length: > 0 and <= MaxPasswordChars } && !password.Any(char.IsControl) && IsStrictUtf8(password, out _);
+    }
+
     private static bool TryQuery(JsonElement value, out string? query)
     {
         query = value.ValueKind == JsonValueKind.String ? value.GetString() : null;

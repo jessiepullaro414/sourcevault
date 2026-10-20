@@ -70,6 +70,11 @@ Setup prints `OK` for each step and stops at the first problem with an explanati
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -Update
   ```
   Program files are replaced. The key, the vault, its location and the settings are kept.
+- **Reset a forgotten SourceVault password** (also lifts a lockout):
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -ResetPassword "COMPUTER\alice"
+  ```
+  The person chooses a new password at their next unlock. Administrators can't read or set anyone's password, only reset it. It's also in the *SourceVault Administration* menu.
 - **Let people use SourceVault, or stop them:**
   ```powershell
   powershell -ExecutionPolicy Bypass -File .\Setup-SourceVault.ps1 -AddOperator "COMPUTER\alice"
@@ -247,7 +252,14 @@ powershell -ExecutionPolicy Bypass -File .\Deploy-SourceVault.ps1
 
 ### Open the editor
 
-Start menu → **SourceVault Editor**. It connects to the vault by itself.
+Start menu → **SourceVault Editor**. It connects to the vault by itself, then asks for your **SourceVault password**.
+
+- **Your SourceVault password** is separate from your Windows password. The service checks it every time you unlock: when you open the editor, and after any lock.
+- **The first time** (or after an administrator resets it), the editor asks you to choose one. Use at least 12 characters; a long phrase is best.
+- **Five wrong tries in a row** lock it for 15 minutes.
+- **Nobody can recover it.** If you forget it, an administrator resets it and you choose a new one.
+- **To change it:** **⚙** (editor settings) → *SourceVault password*.
+- **The importer and the lab client** ask for it in the console.
 
 - The title bar says **Vault**. If it says *Synthetic preview*, you started the demonstration mode, not the vault.
 - The right-hand panel shows **Capture: Excluded (best effort)**. The window asks Windows to keep it out of screenshots and screen recordings.

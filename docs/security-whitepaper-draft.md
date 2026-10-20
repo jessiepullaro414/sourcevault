@@ -216,6 +216,8 @@ Before opening the key, the service validates the vault root (`TrustedStorageRoo
 
 ### 7.5 Sessions
 
+**SourceVault password (2026-10-20).** On top of Windows sign-in and the operators group, every session start needs the operator's own SourceVault password, checked by the service. It is stored as PBKDF2-HMAC-SHA256 (600,000 iterations) inside the encrypted vault. Five wrong tries lock that operator out for 15 minutes. Administrators can reset a password but not read or set one. It stops someone at an unattended, signed-in PC from opening the vault. It doesn't stop malware running as the operator, which could capture it as it is typed.
+
 `BeginSession` issues a 256-bit capability bound to the connection, the Windows user and the logon session. A wrong capability closes the connection. Sessions expire after 5 idle minutes or 30 minutes in total (monotonic clock). A Windows lock, sign-out or disconnect closes every vault connection from that Windows session, and the editor locks at once.
 
 ### 7.6 Protocol hygiene
