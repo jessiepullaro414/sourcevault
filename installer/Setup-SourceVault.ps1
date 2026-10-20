@@ -1,5 +1,7 @@
 # SourceVault setup — installs, updates or checks a SourceVault vault on this computer.
-# Run from an ELEVATED Windows PowerShell inside the unpacked setup package. See README.md in the package.
+# Easiest: double-click "SourceVault Setup.cmd" in the package (or "SourceVault Administration" in the Start menu once
+# installed). It asks for administrator rights and then guides you: install, check, add or remove people, register a
+# Pack computer, update, builds. Run with no options from an ELEVATED PowerShell for the same guided mode.
 #
 #   Setup-SourceVault.ps1 -CheckOnly                  pre-flight only (no admin needed, changes nothing)
 #   Setup-SourceVault.ps1 [-Operators user1,user2]    new install (default operator: you)
@@ -7,6 +9,8 @@
 #   Setup-SourceVault.ps1 -Status                     health check of an installed vault
 #   Setup-SourceVault.ps1 -Update -WithBuilds         also install/refresh the build service (Docker builds; see README)
 #   Setup-SourceVault.ps1 -RegisterSender <file>      allow encrypted packages signed by another computer (SourceVault Pack)
+#   Setup-SourceVault.ps1 -AddOperator PC\alice       let people use SourceVault (they sign out and back in once)
+#   Setup-SourceVault.ps1 -RemoveOperator PC\alice    take that away (it applies when they next sign out)
 #   Setup-SourceVault.ps1 -VaultRoot K:\SourceVault\vault   new install with the vault on another local drive
 #                                                     (chosen at install only; -Update keeps the configured location)
 #
@@ -20,8 +24,12 @@ param(
     [switch]$ManualStart,
     [switch]$WithBuilds,
     [string]$RegisterSender,
-    [string]$VaultRoot
+    [string]$VaultRoot,
+    [string[]]$AddOperator,
+    [string[]]$RemoveOperator
 )
+# No options at all: the guided mode (a menu), as from "SourceVault Setup.cmd".
+$guided = $PSBoundParameters.Count -eq 0
 $ErrorActionPreference = 'Stop'
 $package = $PSScriptRoot
 $payload = Join-Path $package 'payload'
@@ -62,7 +70,8 @@ trap {
 }
 function Step([string]$text) { Write-Host "`n== $text" -ForegroundColor Cyan }
 function Ok([string]$text) { Write-Host "   OK   $text" -ForegroundColor Green }
-function Warn([string]$text) { Write-Host "   NOTE $text" -ForegroundColor Yellow }
+$script:warnings = 0
+function Warn([string]$text) { $script:warnings++; Write-Host "   NOTE $text" -ForegroundColor Yellow }
 function Fail([string]$text) { Write-Host "   FAIL $text" -ForegroundColor Red; $script:reported = $true; throw $text }
 
 # ---- pre-flight --------------------------------------------------------------------------------------------------
@@ -272,11 +281,120 @@ function Show-Status {
     } else { Ok 'build service not installed (builds unavailable)' }
 }
 
+# Show-Status, then one plain line: all good, or how many things need attention.
+function Show-StatusSummary {
+    $script:warnings = 0
+    Show-Status
+    if ($script:warnings -eq 0) { Write-Host "`n   All good: SourceVault is installed, running and checked." -ForegroundColor Green }
+    else { Write-Host "`n   $($script:warnings) thing(s) need attention: see the NOTE lines above. Each says what to do." -ForegroundColor Yellow }
+}
+
+# ---- people ------------------------------------------------------------------------------------------------------
+# Windows reads group membership when someone signs in, so changes apply at their next sign-in, in both directions.
+function Add-Operators([string[]]$names) {
+    if (!(Get-LocalGroup -Name $groupName -ErrorAction SilentlyContinue)) { Fail "The local group '$groupName' is missing. Install SourceVault first." }
+    $added = @()
+    foreach ($name in $names | Where-Object { $_ }) {
+        try { $sid = (New-Object Security.Principal.NTAccount($name.Trim())).Translate([Security.Principal.SecurityIdentifier]).Value }
+        catch { Warn "'$name' is not a Windows account on this computer or its domain (use COMPUTER\name or DOMAIN\name)"; continue }
+        if (Get-LocalGroupMember -Group $groupName | Where-Object { $_.SID.Value -eq $sid }) { Ok "$name can already use SourceVault"; continue }
+        Add-LocalGroupMember -Group $groupName -Member $name.Trim(); $added += $name.Trim(); Ok "added $name"
+    }
+    if ($added) {
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        Write-Host ''
+        Write-Host "   >>> SIGN OUT AND BACK IN: $($added -join ', ') must sign out of Windows and sign back in (or restart) once." -ForegroundColor Yellow
+        Write-Host '       Until then the editor says their sign-in is not in SourceVault Operators.' -ForegroundColor Yellow
+        if ($added -contains $me) { Write-Host '       That includes you.' -ForegroundColor Yellow }
+    }
+}
+function Remove-Operators([string[]]$names) {
+    $removed = @()
+    foreach ($name in $names | Where-Object { $_ }) {
+        $member = Get-LocalGroupMember -Group $groupName -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $name.Trim() }
+        if (!$member) { Warn "'$name' is not in '$groupName' (members: $((Get-LocalGroupMember -Group $groupName | ForEach-Object Name) -join ', '))"; continue }
+        Remove-LocalGroupMember -Group $groupName -Member $member; $removed += $name.Trim(); Ok "removed $name"
+    }
+    if ($removed) {
+        Write-Host ''
+        Write-Host "   >>> $($removed -join ', ') can still use SourceVault until they sign out of Windows (the open sign-in keeps the group)." -ForegroundColor Yellow
+        Write-Host '       To cut access now: Task Manager > Users > their name > Sign off, or restart this computer.' -ForegroundColor Yellow
+    }
+}
+
+# ---- Pack computers -------------------------------------------------------------------------------------------------
+function Register-Sender([string]$senderFile) {
+    if (!(Test-Path -LiteralPath $sendersDir)) { Fail "$sendersDir is missing. Run Setup-SourceVault.ps1 -Update first." }
+    $file = (Resolve-Path -LiteralPath $senderFile).Path
+    $check = Invoke-ServiceTool 'sender-check' $file
+    if ($check.Exit -ne 0) { Fail "That is not a valid SourceVault sender file: $($check.Output)" }
+    $fields = @{}; foreach ($line in $check.Output -split "`r?`n") { if ($line -match '^(\w+)=(.*)$') { $fields[$Matches[1]] = $Matches[2] } }
+    if ($fields.fingerprint -notmatch '^[0-9a-f]{64}$') { Fail 'The service tool did not report a fingerprint.' }
+    Write-Host "   computer:   $($fields.computer)"
+    Write-Host "   check code: $($fields.display)"
+    Write-Host '   Compare the check code with what SourceVault Pack showed on that computer ("Set up this computer", or "init").'
+    if ((Read-Host '   Type YES if they match, to allow packages signed by this computer') -ne 'YES') { Write-Host 'Nothing was registered.'; return }
+    $target = Join-Path $sendersDir "$($fields.fingerprint).json"
+    Copy-Item -LiteralPath $file -Destination $target -Force
+    Ok "registered $($fields.computer); remove it later by deleting $target"
+}
+
+# ---- guided mode -----------------------------------------------------------------------------------------------------
+function Read-Choice([string]$prompt) { (Read-Host $prompt).Trim() }
+function Start-Guided {
+    if (!(Test-Admin)) { Fail 'Setup needs administrator rights: double-click "SourceVault Setup.cmd", or right-click PowerShell > Run as administrator.' }
+    $installed = [bool](Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
+    $hasPayload = Test-Path -LiteralPath $payload
+    if (!$installed) {
+        if (!$hasPayload) { Fail 'SourceVault is not installed, and this copy of setup has no program files. Run it from the setup package.' }
+        Step 'Install SourceVault on this computer'
+        Write-Host '   SourceVault keeps source code encrypted on this PC with a key in its TPM. There is no recovery key:'
+        Write-Host '   if this TPM is cleared or the PC is replaced, the vault is gone. Use synthetic code until the security review.'
+        $me = "$env:USERDOMAIN\$env:USERNAME"
+        $who = Read-Choice "`n   Who will use SourceVault? Windows accounts, comma-separated [Enter = $me]"
+        $script:Operators = if ($who) { @($who -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } else { @($me) }
+        $where = Read-Choice "   Where should the vault live? [Enter = $defaultVaultRoot, or a folder on another internal drive, e.g. K:\SourceVault\vault]"
+        if ($where -and $where -ne $defaultVaultRoot) { $script:VaultRoot = $where }
+        $builds = Read-Choice '   Set up Docker builds now? (you can do it later) [y/N]'
+        $script:WithBuilds = [switch]($builds -match '^(y|yes)$')
+        Write-Host "`n   Install for: $($script:Operators -join ', ')"
+        Write-Host "   Vault:       $(if ($script:VaultRoot) { $script:VaultRoot } else { $defaultVaultRoot })"
+        Write-Host "   Builds:      $(if ($script:WithBuilds) { 'yes' } else { 'not now' })"
+        if ((Read-Choice '   Type YES to install') -ne 'YES') { Write-Host 'Nothing was changed.'; exit 0 }
+        return # continue with the install below
+    }
+    while ($true) {
+        Write-Host "`nSourceVault administration" -ForegroundColor White
+        Write-Host '   1  Check SourceVault (status)'
+        Write-Host '   2  Let people use SourceVault'
+        Write-Host '   3  Stop people using SourceVault'
+        Write-Host '   4  Allow packages from another computer (SourceVault Pack)'
+        if ($hasPayload) { Write-Host '   5  Update SourceVault from this setup package'; Write-Host '   6  Set up or refresh Docker builds' }
+        Write-Host '   Q  Quit'
+        switch (Read-Choice '   Choose') {
+            '1' { Step 'Status'; Show-StatusSummary }
+            '2' { Step 'Let people use SourceVault'; Add-Operators ((Read-Choice '   Windows accounts, comma-separated (e.g. PC\alice)') -split ',') }
+            '3' { Step 'Stop people using SourceVault'; Remove-Operators ((Read-Choice '   Windows accounts, comma-separated') -split ',') }
+            '4' { Step 'Allow packages from another computer'; $f = Read-Choice '   Path of its SourceVault-sender-<computer>.json file'; if ($f) { Register-Sender $f.Trim('"') } }
+            '5' { if ($hasPayload) { $script:Update = [switch]$true; return } }
+            '6' { if ($hasPayload) { $script:Update = [switch]$true; $script:WithBuilds = [switch]$true; return } }
+            { $_ -in 'q', 'Q', '' } { exit 0 }
+        }
+    }
+}
+
 # ---- main -------------------------------------------------------------------------------------------------------
 Write-Host 'SourceVault setup (development build: synthetic data only until security review)' -ForegroundColor White
+if ($guided) { Start-Guided }
 if ($Status) {
     if (!(Test-Admin)) { Fail 'Run -Status from an elevated PowerShell (Run as administrator).' }
-    Step 'Status'; Show-Status; return
+    Step 'Status'; Show-StatusSummary; return
+}
+if ($AddOperator -or $RemoveOperator) {
+    if (!(Test-Admin)) { Fail 'Run -AddOperator / -RemoveOperator from an elevated PowerShell (Run as administrator).' }
+    if ($AddOperator) { Step 'Let people use SourceVault'; Add-Operators $AddOperator }
+    if ($RemoveOperator) { Step 'Stop people using SourceVault'; Remove-Operators $RemoveOperator }
+    return
 }
 Step 'Pre-flight checks'
 Test-Package
@@ -284,19 +402,7 @@ Test-Machine
 if ($RegisterSender) {
     if (!(Test-Admin)) { Fail 'Run -RegisterSender from an elevated PowerShell (Run as administrator).' }
     Step 'Register a SourceVault Pack sender'
-    if (!(Test-Path -LiteralPath $sendersDir)) { Fail "$sendersDir is missing. Run Setup-SourceVault.ps1 -Update first." }
-    $file = (Resolve-Path -LiteralPath $RegisterSender).Path
-    $check = Invoke-ServiceTool 'sender-check' $file
-    if ($check.Exit -ne 0) { Fail "That is not a valid SourceVault sender file: $($check.Output)" }
-    $fields = @{}; foreach ($line in $check.Output -split "`r?`n") { if ($line -match '^(\w+)=(.*)$') { $fields[$Matches[1]] = $Matches[2] } }
-    if ($fields.fingerprint -notmatch '^[0-9a-f]{64}$') { Fail 'The service tool did not report a fingerprint.' }
-    Write-Host "   computer:    $($fields.computer)"
-    Write-Host "   fingerprint: $($fields.display)"
-    Write-Host '   Compare the fingerprint with what "SourceVault.Pack.exe init" printed on that computer.'
-    if ((Read-Host '   Type YES to allow packages signed by this computer') -ne 'YES') { Write-Host 'Nothing was registered.'; return }
-    $target = Join-Path $sendersDir "$($fields.fingerprint).json"
-    Copy-Item -LiteralPath $file -Destination $target -Force
-    Ok "registered $($fields.computer); remove it later by deleting $target"
+    Register-Sender $RegisterSender
     return
 }
 if ($VaultRoot) { Test-VaultLocation $VaultRoot; Ok "vault location $VaultRoot is on a fixed local drive" }
@@ -320,11 +426,7 @@ if (!(Get-LocalGroup -Name $groupName -ErrorAction SilentlyContinue)) {
     New-LocalGroup -Name $groupName -Description 'May use the SourceVault service pipe' | Out-Null
     Ok 'created'
 } else { Ok 'already exists' }
-foreach ($operator in $Operators) {
-    $sid = (New-Object Security.Principal.NTAccount($operator)).Translate([Security.Principal.SecurityIdentifier]).Value
-    if (Get-LocalGroupMember -Group $groupName | Where-Object { $_.SID.Value -eq $sid }) { Ok "$operator is already a member" }
-    else { Add-LocalGroupMember -Group $groupName -Member $operator; Ok "added $operator (takes effect at their next sign-in)" }
-}
+Add-Operators $Operators
 
 Step "Program files ($installRoot)"
 if ($Update) { Stop-BuildService; Stop-VaultService } else { if (Test-Path -LiteralPath $installRoot) { Fail "$installRoot already exists without a registered service. Remove it, then run setup again." }; New-Item -ItemType Directory -Path $installRoot | Out-Null }
@@ -503,6 +605,24 @@ $link.Description = 'SourceVault vault editor'
 $link.Save()
 Ok "'SourceVault Editor' added to the Start menu for all users"
 
+# An installed copy of this script for later checks and changes (without program files: updates come from a package).
+$adminDir = Join-Path $installRoot 'admin'
+if (!(Test-Path -LiteralPath $adminDir)) { New-Item -ItemType Directory -Path $adminDir | Out-Null }
+Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $adminDir 'Setup-SourceVault.ps1') -Force
+$adminLauncher = Join-Path $package 'SourceVault Setup.cmd'
+if (Test-Path -LiteralPath $adminLauncher) { Copy-Item -LiteralPath $adminLauncher -Destination (Join-Path $adminDir 'SourceVault Setup.cmd') -Force }
+Assert-NoUserWrite (@($adminDir) + @(Get-ChildItem -LiteralPath $adminDir | ForEach-Object FullName))
+Write-InstallManifest | Out-Null
+$adminLink = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'SourceVault Administration.lnk'))
+$adminLink.TargetPath = Join-Path $adminDir 'SourceVault Setup.cmd'
+$adminLink.WorkingDirectory = $adminDir
+$adminLink.Description = 'Check SourceVault, add or remove people, allow Pack computers (asks for administrator rights)'
+$adminLink.Save()
+Ok "'SourceVault Administration' added to the Start menu (for administrators)"
+
 Write-Host "`nSetup complete." -ForegroundColor Green
-Write-Host "Operators must SIGN OUT AND BACK IN once before the editor can connect. Then open 'SourceVault Editor' from the Start menu."
+Write-Host 'Next:' -ForegroundColor White
+Write-Host "   1. Everyone added above SIGNS OUT of Windows and back in once (Windows only picks up the group at sign-in)."
+Write-Host "   2. Open 'SourceVault Editor' from the Start menu."
+Write-Host "   3. Later: 'SourceVault Administration' in the Start menu checks SourceVault and adds or removes people."
 Write-Host 'Use synthetic data only until an independent security review says otherwise. Read README.md before first use.'

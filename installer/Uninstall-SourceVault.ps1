@@ -66,6 +66,8 @@ if ($service) {
     Write-Output 'Removed the SourceVault service.'
 }
 if (Test-Path -LiteralPath $shortcut) { Remove-Item -LiteralPath $shortcut -Force; Write-Output 'Removed the Start menu shortcut.' }
+$adminShortcut = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'SourceVault Administration.lnk'
+if (Test-Path -LiteralPath $adminShortcut) { Remove-Item -LiteralPath $adminShortcut -Force; Write-Output 'Removed the SourceVault Administration shortcut.' }
 if (Test-Path -LiteralPath $installRoot) {
     if (!(Test-Path -LiteralPath (Join-Path $installRoot 'install-manifest.sha256'))) { throw "$installRoot does not look like a SourceVault installation; not removed." }
     Remove-Item -LiteralPath $installRoot -Recurse -Force
