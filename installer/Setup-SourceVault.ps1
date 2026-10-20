@@ -246,6 +246,22 @@ function Show-Status {
         $disk = Get-Partition -DriveLetter $where[0] -ErrorAction SilentlyContinue | Get-Disk -ErrorAction SilentlyContinue
         Ok "vault drive $($where.Substring(0, 2)): $($volume.DriveType), $($volume.FileSystem), $($disk.BusType) disk"
     }
+    # Secure Boot and BitLocker (whitepaper section 4.5): without them, someone with the whole PC could change Windows
+    # offline and run code as an administrator, who can use the vault key. Reported, never changed.
+    try { $secureBoot = Confirm-SecureBootUEFI -ErrorAction Stop } catch { $secureBoot = $null }
+    if ($secureBoot -eq $true) { Ok 'Secure Boot is on' }
+    elseif ($secureBoot -eq $false) { Warn 'Secure Boot is off. Turn it on in the UEFI settings: with it off, a stolen PC can be started with tampered boot code.' }
+    else { Warn 'Secure Boot state could not be read (legacy BIOS boot, or not supported)' }
+    $windowsDrive = $env:SystemDrive
+    $drives = @($windowsDrive) + @(if ($where -match '^[A-Za-z]:' -and $where.Substring(0, 2) -ne $windowsDrive) { $where.Substring(0, 2) })
+    foreach ($drive in $drives) {
+        $what = if ($drive -eq $windowsDrive) { "the Windows drive $drive" } else { "the vault drive $drive" }
+        try {
+            $volume = Get-BitLockerVolume -MountPoint $drive -ErrorAction Stop
+            if ([string]$volume.ProtectionStatus -eq 'On') { Ok "BitLocker protects $what ($($volume.VolumeStatus))" }
+            else { Warn "BitLocker is not protecting $what ($($volume.VolumeStatus), protection $($volume.ProtectionStatus)). Turn it on, with a startup PIN if you can: otherwise a stolen PC's disk can be changed offline to run code as an administrator, who can use the vault key." }
+        } catch { Warn "BitLocker state of $what could not be read (the BitLocker feature may not be available on this Windows edition)" }
+    }
     $vaultStatus = Join-Path $statusDir 'vault.json'
     if (Test-Path -LiteralPath $vaultStatus) {
         try {

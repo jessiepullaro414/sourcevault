@@ -37,6 +37,8 @@ Done on 2026-10-18 (in-process tests only; design and decisions in [hardening-de
 
 All five findings of this review are fixed. Their lab checks are in the checklist.
 
+**The whitepaper's open finding (stolen whole PC):** the owner reports that the vault PC has BitLocker and Secure Boot on (2026-10-20), and `-Status` now reports and warns about both. A lab row confirms it there. A BitLocker startup PIN is still recommended.
+
 Still open:
 
 1. **Editor native validation (T06).** The interactive items are in the lab checklist. Still for development: anything those runs turn up. Pagefile and hibernation persistence remain out of scope and documented.
