@@ -8,6 +8,8 @@ internal sealed record ServiceConfiguration(string KeyName)
     internal const string FileName = "sourcevault.service.json";
     /// <summary>The package import key (docs/package-import-design.md, D1): a separate TPM key named after the vault key.</summary>
     internal string ImportKeyName => KeyName + ".Import";
+    /// <summary>The disc signing key (docs/disc-export-design.md, section 4): sign-only, named after the vault key.</summary>
+    internal string DiscKeyName => KeyName + ".Disc";
     /// <summary>Schema 1: the default root. Schema 2: the administrator-chosen <c>vaultRoot</c> (see <see cref="VaultRoot.IsAcceptablePath"/>).</summary>
     internal string VaultRootPath { get; private init; } = VaultRoot.DefaultPath;
     internal static ServiceConfiguration LoadFromApplicationDirectory()

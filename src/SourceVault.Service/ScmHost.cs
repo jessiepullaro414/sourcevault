@@ -48,6 +48,7 @@ internal sealed class ScmHost
             {
                 case StartMode.ProvisionKey: Provision(importKey: false); return;
                 case StartMode.ProvisionImportKey: Provision(importKey: true); return;
+                case StartMode.ProvisionDiscKey: ProvisionDiscKey(); return;
                 case StartMode.CreateSyntheticProject: CreateSyntheticProject(); return;
                 case StartMode.Invalid: Report(new(ServiceState.Stopped, 0, 87, 0, 0)); return; // ERROR_INVALID_PARAMETER
             }
@@ -60,7 +61,7 @@ internal sealed class ScmHost
         catch { failure = 3; }
         finally { lifecycle = null; }
     }
-    internal enum StartMode { Run, ProvisionKey, ProvisionImportKey, CreateSyntheticProject, Invalid }
+    internal enum StartMode { Run, ProvisionKey, ProvisionImportKey, ProvisionDiscKey, CreateSyntheticProject, Invalid }
 
     // SCM passes the service name as argv[0], then any `sc start SourceVault <args>` start parameters.
     // Only the fixed lab parameters are accepted; everything else is refused.
@@ -69,6 +70,7 @@ internal sealed class ScmHost
         1 => StartMode.Run,
         2 when args[1] == "provision-key" => StartMode.ProvisionKey,
         2 when args[1] == "provision-import-key" => StartMode.ProvisionImportKey,
+        2 when args[1] == "provision-disc-key" => StartMode.ProvisionDiscKey,
         2 when args[1] == "create-synthetic-project" => StartMode.CreateSyntheticProject,
         _ => StartMode.Invalid,
     };
@@ -80,15 +82,24 @@ internal sealed class ScmHost
     {
         var (key, catalog, check) = OpenVerifiedVault();
         var importKey = OpenImportKey();
+        var discKey = OpenDiscKey();
         try
         {
             SecurityIdentifier operators;
             try { operators = (SecurityIdentifier)new NTAccount(OperatorsGroupName).Translate(typeof(SecurityIdentifier)); }
             catch (IdentityNotMappedException) { throw new StartupRefusedException(StartupRefusedException.OperatorsGroupMissing); }
+            // Disc burning (docs/disc-export-design.md): only with the signing key and the burners group; approvers need their group too.
+            var burners = OptionalGroup(DiscBurns.BurnersGroupName);
+            var approvers = OptionalGroup(DiscBurns.ApproversGroupName);
+            var passwords = new OperatorPasswords(catalog, OperatorPasswords.DefaultResetsFolder);
+            var discs = discKey is null || burners is null ? null
+                : new DiscBurns(catalog, new ImapiDiscWriter(), new TpmDiscSigner(discKey), new AuthzAccounts(), passwords, operators, approvers, PackageImports.ComputerName);
             using var self = WindowsIdentity.GetCurrent();
             var pipeServer = new VaultPipeServer(VaultPipe.ProductionName, self.User!,
-                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])), new VaultProtocol(catalog, check.Projects, builds: new BuildCoordinator(catalog, BuildServiceClient()), offline: check.Offline, status: VaultStatus.Write, passwords: new OperatorPasswords(catalog, OperatorPasswords.DefaultResetsFolder),
-                    packages: importKey is null ? null : new PackageImports(importKey, importKey.ExportSubjectPublicKeyInfo(), PackageImports.ComputerName, PackageImports.DefaultSendersFolder)));
+                new PipePeerPolicy(operators, InstalledClients(), new ClientPins(InstallRoot, ["client", "editor"])) { DiscBurnersGroup = burners },
+                new VaultProtocol(catalog, check.Projects, builds: new BuildCoordinator(catalog, BuildServiceClient()), offline: check.Offline, status: VaultStatus.Write, passwords: passwords,
+                    packages: importKey is null ? null : new PackageImports(importKey, importKey.ExportSubjectPublicKeyInfo(), PackageImports.ComputerName, PackageImports.DefaultSendersFolder),
+                    discs: discs));
             try { pipeServer.Start(); }
             catch (Exception e) when (e is IOException or System.ComponentModel.Win32Exception or UnauthorizedAccessException)
             {
@@ -96,9 +107,9 @@ internal sealed class ScmHost
                 throw new StartupRefusedException(StartupRefusedException.PipeUnavailable); // e.g. name already taken
             }
             server = pipeServer;
-            return new Owned(() => { server = null; pipeServer.Dispose(); importKey?.Dispose(); key.Dispose(); });
+            return new Owned(() => { server = null; pipeServer.Dispose(); discKey?.Dispose(); importKey?.Dispose(); key.Dispose(); });
         }
-        catch { importKey?.Dispose(); key.Dispose(); throw; }
+        catch { discKey?.Dispose(); importKey?.Dispose(); key.Dispose(); throw; }
     }
 
     // Build role: running as NT SERVICE\SourceVaultBuild, serving the private build pipe to NT SERVICE\SourceVault only.
@@ -224,6 +235,32 @@ internal sealed class ScmHost
     {
         try { return TpmKeyProtector.OpenExisting(ServiceConfiguration.LoadFromApplicationDirectory().ImportKeyName); }
         catch (Exception e) when (e is System.Security.Cryptography.CryptographicException or UnauthorizedAccessException or ArgumentException or InvalidDataException or IOException) { return null; }
+    }
+
+    // The disc signing key, if provisioned (provision-disc-key). Without it disc burning is DiscUnavailable and nothing
+    // else changes.
+    private static TpmSigningKey? OpenDiscKey()
+    {
+        try { return TpmSigningKey.OpenExisting(ServiceConfiguration.LoadFromApplicationDirectory().DiscKeyName); }
+        catch (Exception e) when (e is System.Security.Cryptography.CryptographicException or UnauthorizedAccessException or ArgumentException or InvalidDataException or IOException) { return null; }
+    }
+
+    private static SecurityIdentifier? OptionalGroup(string name)
+    {
+        try { return (SecurityIdentifier)new NTAccount(name).Translate(typeof(SecurityIdentifier)); }
+        catch (IdentityNotMappedException) { return null; }
+    }
+
+    // One-shot creation of the sign-only disc signing key (provision-disc-key), as Provision does for the other keys.
+    private void ProvisionDiscKey()
+    {
+        Report(new(ServiceState.StartPending, 0, 0, 1, 60000));
+        var outcome = ProvisionOutcome.Unavailable;
+        try { outcome = TpmKeyProvisioner.CreateSignOnly(ServiceConfiguration.LoadFromApplicationDirectory().DiscKeyName); }
+        catch { outcome = ProvisionOutcome.Unavailable; }
+        Report(outcome == ProvisionOutcome.Created
+            ? new(ServiceState.Stopped, 0, 0, 0, 0)
+            : new(ServiceState.Stopped, 0, 1066, 0, 0, (uint)outcome)); // ERROR_SERVICE_SPECIFIC_ERROR
     }
 
     // One-shot key creation under the service identity: the vault key (provision-key) or the separate package import

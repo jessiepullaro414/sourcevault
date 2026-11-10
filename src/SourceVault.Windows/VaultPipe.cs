@@ -9,9 +9,10 @@ namespace SourceVault.Windows;
 
 /// <summary>
 /// A connected client as reported by the OS (never by the message): token user, logon session, PID, the process's
-/// creation time (UTC FILETIME, which tells a reused PID apart) and image.
+/// creation time (UTC FILETIME, which tells a reused PID apart) and image. <see cref="DiscBurner"/>: the token holds the
+/// disc burners group (docs/disc-export-design.md), read from the same token, never from a message.
 /// </summary>
-public sealed record PipePeer(SecurityIdentifier User, uint Session, uint ProcessId, long ProcessCreated, string ImagePath);
+public sealed record PipePeer(SecurityIdentifier User, uint Session, uint ProcessId, long ProcessCreated, string ImagePath, bool DiscBurner = false);
 
 /// <summary>
 /// Who may use the vault pipe: interactive members of the operators group, running an installed client executable.
@@ -26,6 +27,10 @@ public sealed class PipePeerPolicy(SecurityIdentifier operatorsGroup, IEnumerabl
     private static readonly SecurityIdentifier Service = new(WellKnownSidType.ServiceSid, null);
     private readonly HashSet<string> images = allowedImagePaths.Select(Path.GetFullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
     public SecurityIdentifier OperatorsGroup { get; } = operatorsGroup;
+    /// <summary>SourceVault Disc Burners, if that group exists: who may write a project to a disc. Null: nobody may.</summary>
+    public SecurityIdentifier? DiscBurnersGroup { get; init; }
+
+    internal bool IsDiscBurner(WindowsIdentity client) => DiscBurnersGroup is { } group && new WindowsPrincipal(client).IsInRole(group);
 
     /// <summary>Checks the impersonated client token. Throws <see cref="UnauthorizedAccessException"/> on any mismatch.</summary>
     internal void ValidateToken(WindowsIdentity client)
@@ -116,13 +121,14 @@ public static class VaultPipe
     public static PipePeer ValidateClient(NamedPipeServerStream pipe, PipePeerPolicy policy, DateTime connectedUtc)
     {
         Check(GetNamedPipeClientProcessId(pipe.SafePipeHandle, out uint pid));
-        SecurityIdentifier? user = null; uint session = 0;
+        SecurityIdentifier? user = null; uint session = 0; bool burner = false;
         pipe.RunAsClient(() =>
         {
             using var identity = WindowsIdentity.GetCurrent(true) ?? throw new UnauthorizedAccessException();
             policy.ValidateToken(identity);
             Check(GetTokenInformation(identity.AccessToken, 12, out session, sizeof(uint), out _)); // TokenSessionId
             user = identity.User;
+            burner = policy.IsDiscBurner(identity);
         });
         if (user is null) throw new UnauthorizedAccessException();
         using var process = OpenProcess(ProcessQueryLimited, false, pid);
@@ -130,7 +136,7 @@ public static class VaultPipe
         long created = CheckProcessLifetime(process, connectedUtc);
         var image = ImagePath(process);
         policy.ValidateImage(image);
-        return new PipePeer(user, session, pid, created, image);
+        return new PipePeer(user, session, pid, created, image, burner);
     }
 
     /// <summary>The process's creation time; throws unless it is still running and was created by <paramref name="connectedUtc"/>.</summary>

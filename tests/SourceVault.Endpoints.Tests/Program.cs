@@ -921,6 +921,187 @@ Test("controller: the editor unlocks with a password, sets the first one, and ch
     }
 });
 
+// ---- discs: write a project to a finalized disc with two approvers (docs/disc-export-design.md) ----
+var discApprovers = new SecurityIdentifier("S-1-5-21-1000000001-1000000002-1000000003-9001");
+var discOperators = new SecurityIdentifier("S-1-5-21-1000000001-1000000002-1000000003-9002");
+SecurityIdentifier Person(int rid) => new($"S-1-5-21-1000000001-1000000002-1000000003-{rid}");
+const string MyPhrase = "my synthetic phrase", AlicePhrase = "alice synthetic phrase", BobPhrase = "bob synthetic phrase", CarolPhrase = "carol synthetic phrase";
+(VaultPipeServer Server, string Pipe, string Vault, ProjectCatalog Catalog, FakeDiscWriter Writer, RSA SigningKey, ManualClock Clock) StartDiscServer(bool burner)
+{
+    var clock = new ManualClock();
+    var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
+    var resets = Path.Combine(workspace, "resets-" + Guid.NewGuid().ToString("N"));
+    var disc = Path.Combine(workspace, "disc-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(vault); Directory.CreateDirectory(resets);
+    var catalog = new ProjectCatalog(vault, key);
+    var passwords = new SourceVault.Service.OperatorPasswords(catalog, resets, clock);
+    var accounts = new FakeAccounts();
+    accounts.Add(@"TEST\me", me, discApprovers, discOperators); // an approver too, so SameAsBurner is what refuses
+    accounts.Add(@"TEST\alice", Person(1001), discApprovers, discOperators);
+    accounts.Add(@"TEST\bob", Person(1002), discApprovers, discOperators);
+    accounts.Add(@"TEST\carol", Person(1003), discOperators); // an operator, not an approver
+    accounts.Add(@"TEST\dave", Person(1004), discApprovers, discOperators); // an approver who never set a password
+    foreach (var (sid, phrase) in new[] { (me, MyPhrase), (Person(1001), AlicePhrase), (Person(1002), BobPhrase), (Person(1003), CarolPhrase) })
+        Assert(passwords.BeginSession(sid, null, phrase) == "Ok", "test passwords");
+    var writer = new FakeDiscWriter(disc);
+    var signing = RSA.Create(2048);
+    var discs = new DiscBurns(catalog, writer, new SoftwareDiscSigner(signing), accounts, passwords, discOperators, discApprovers, "TESTPC", clock);
+    var name = "SourceVault.test." + Guid.NewGuid().ToString("N");
+    var server = new VaultPipeServer(name, me, new PipePeerPolicy(authenticatedUsers, [self]) { DiscBurnersGroup = burner ? authenticatedUsers : nobodyGroup },
+        new VaultProtocol(catalog, catalog.Verify().Projects, clock, passwords: passwords, discs: discs));
+    server.Start();
+    return (server, name, vault, catalog, writer, signing, clock);
+}
+Client DiscClient(string pipe)
+{
+    var c = new Client(pipe, me);
+    using var doc = JsonDocument.Parse(c.Raw("BeginSession", ("password", MyPhrase)));
+    c.Begin2(doc);
+    return c;
+}
+JsonElement WaitForBurn(Client c, string burnId)
+{
+    for (int i = 0; i < 500; i++)
+    {
+        var s = c.Ok("DiscBurnStatus", ("burnId", burnId));
+        if (s.GetProperty("state").GetString() is "done" or "failed") return s;
+        Thread.Sleep(20);
+    }
+    throw new Exception("the burn did not finish");
+}
+
+Test("discs: only disc burners see drives or start a burn; everyone else gets the reason, nothing more", () =>
+{
+    var (server, pipe, _, _, writer, _, _) = StartDiscServer(burner: false);
+    using (server)
+    using (var c = DiscClient(pipe))
+    {
+        var listed = c.Ok("ListDiscDrives");
+        Assert(!listed.GetProperty("allowed").GetBoolean() && listed.GetProperty("drives").GetArrayLength() == 0, "not a burner: no drives");
+        var project = c.Ok("CreateProject", ("name", "Disc demo")).GetProperty("projectId").GetString()!;
+        Assert(c.Code("BeginDiscBurn", ("projectId", project), ("driveId", "drive-1")) == "NotDiscBurner", "refused before touching the drive");
+        Assert(writer.Writes == 0, "nothing written");
+    }
+});
+
+Test("discs: two different approvers sign in; wrong ones are refused for fixed reasons; the disc is signed, closed and verified", () =>
+{
+    var (server, pipe, vault, catalog, writer, signing, clock) = StartDiscServer(burner: true);
+    using (server)
+    using (var c = DiscClient(pipe))
+    {
+        var created = c.Ok("CreateProject", ("name", "Disc demo"));
+        var project = created.GetProperty("projectId").GetString()!;
+        var s1 = c.Ok("CreateFile", ("projectId", project), ("name", "src/main.cs"), ("expectedSnapshotId", created.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("class Main { } // fictional\n"))).GetProperty("snapshotId").GetString()!;
+        c.Ok("CreateFile", ("projectId", project), ("name", "README.md"), ("expectedSnapshotId", s1), ("contentBase64", B64("# fictional disc demo\n")));
+
+        var listed = c.Ok("ListDiscDrives");
+        var expectedCode = PublicKeyFile.Display(SHA256.HashData(signing.ExportSubjectPublicKeyInfo()));
+        Assert(listed.GetProperty("allowed").GetBoolean() && listed.GetProperty("checkCode").GetString() == expectedCode, "allowed, with the signing key's check code");
+        Assert(listed.GetProperty("drives")[0].GetProperty("media").GetProperty("type").GetString() == "CD-R", "the drive and its disc");
+
+        string Begin() => c.Raw("BeginDiscBurn", ("projectId", project), ("driveId", "drive-1"));
+        string BeginCode() { using var d = JsonDocument.Parse(Begin()); return d.RootElement.GetProperty("code").GetString()!; }
+        writer.Media = new DiscMedia("DVD+RW", false, true, 4L << 30);
+        Assert(BeginCode() == "MediaNotWriteOnce", "rewritable media refused");
+        writer.Media = new DiscMedia("CD-R", true, false, 700L << 20);
+        Assert(BeginCode() == "MediaNotBlank", "a used disc refused");
+        writer.Media = new DiscMedia("CD-R", true, true, 1L << 20);
+        Assert(BeginCode() == "MediaTooSmall", "too small refused");
+        writer.Media = null;
+        Assert(BeginCode() == "NoMedia", "no disc");
+        writer.Media = new DiscMedia("CD-R", true, true, 700L << 20);
+
+        var begun = c.Ok("BeginDiscBurn", ("projectId", project), ("driveId", "drive-1"));
+        var burnId = begun.GetProperty("burnId").GetString()!;
+        Assert(begun.GetProperty("fileCount").GetInt32() == 2, "the saved snapshot's files");
+        Assert(BeginCode() == "DiscBusy", "one burn at a time");
+        Assert(c.Code("StartDiscBurn", ("burnId", burnId)) == "ApprovalsMissing", "no approvals yet");
+        string Approve(string account, string password) => c.Code("ApproveDiscBurn", ("burnId", burnId), ("account", account), ("password", password));
+        Assert(Approve(@"TEST\nobody", "whatever whatever") == "NotDiscApprover", "unknown account");
+        Assert(Approve(@"TEST\me", MyPhrase) == "SameAsBurner", "the burner can't approve");
+        Assert(Approve(@"TEST\carol", "not carol's phrase") == "WrongPassword", "wrong password");
+        Assert(Approve(@"TEST\carol", CarolPhrase) == "NotDiscApprover", "right password, not an approver");
+        Assert(Approve(@"TEST\dave", "anything at all") == "PasswordNotSet", "an approver without a SourceVault password");
+        Assert(c.Ok("ApproveDiscBurn", ("burnId", burnId), ("account", @"TEST\alice"), ("password", AlicePhrase)).GetProperty("approvals").GetInt32() == 1, "first approval");
+        Assert(Approve(@"TEST\alice", AlicePhrase) == "AlreadyApproved", "the same approver twice");
+
+        // The project changes after Prepare: the approvals were for the old snapshot, so the burn fails without writing.
+        var files = c.Ok("ListFiles", ("projectId", project));
+        c.Ok("CreateFile", ("projectId", project), ("name", "late.txt"), ("expectedSnapshotId", files.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("added later\n")));
+        Assert(c.Ok("ApproveDiscBurn", ("burnId", burnId), ("account", @"TEST\bob"), ("password", BobPhrase)).GetProperty("approvals").GetInt32() == 2, "second approval");
+        Assert(Approve(@"TEST\carol", CarolPhrase) == "AlreadyApproved", "no third approval");
+        Assert(c.Code("StartDiscBurn", ("burnId", burnId)) == "ProjectChanged" && writer.Writes == 0, "changed since Prepare: nothing written");
+
+        // Approvals expire after 15 minutes.
+        burnId = c.Ok("BeginDiscBurn", ("projectId", project), ("driveId", "drive-1")).GetProperty("burnId").GetString()!;
+        Assert(Approve(@"TEST\alice", AlicePhrase) == "Ok" && Approve(@"TEST\bob", BobPhrase) == "Ok", "two approvals");
+        clock.Advance(TimeSpan.FromMinutes(16));
+        // The burner's own session expired too (5 minutes idle): they sign in again, and the burn is still theirs.
+        using var again = DiscClient(pipe);
+        string Approve2(string account, string password) => again.Code("ApproveDiscBurn", ("burnId", burnId), ("account", account), ("password", password));
+        var stale = again.Code("StartDiscBurn", ("burnId", burnId)); Assert(stale == "ApprovalExpired", "stale approvals refused: " + stale);
+        Assert(again.Ok("DiscBurnStatus", ("burnId", burnId)).GetProperty("approvals").GetInt32() == 0, "and cleared");
+
+        // Fresh approvals: written, closed, read back and verified.
+        Assert(Approve2(@"TEST\alice", AlicePhrase) == "Ok" && Approve2(@"TEST\bob", BobPhrase) == "Ok", "approved again");
+        Assert(again.Code("StartDiscBurn", ("burnId", burnId)) == "Ok", "started");
+        var done = WaitForBurn(again, burnId);
+        Assert(done.GetProperty("state").GetString() == "done" && done.GetProperty("verified").GetBoolean(), "done and verified: " + done);
+        Assert(writer.Writes == 1 && writer.Label!.StartsWith("SV ") && writer.Label.EndsWith(" alice+bob"), "the label carries both approvers: " + writer.Label);
+        Assert(File.ReadAllText(Path.Combine(writer.Root, "source", "src", "main.cs")) == "class Main { } // fictional\n", "the files as plain files");
+        var verified = DiscRecords.Verify(writer.Root, expectedCode);
+        Assert(verified.Record.Approvers.Select(a => a.Account).SequenceEqual([@"TEST\alice", @"TEST\bob"]) && verified.Record.Burner.Account == @"TEST\me", "the record names the burner and both approvers");
+        Assert(verified.Record.Files.Count == 3 && verified.Record.ProjectName == "Disc demo", "every saved file is listed");
+        Assert(File.ReadAllText(Path.Combine(writer.Root, DiscRecords.ReadmeFile)).Contains(@"TEST\alice and TEST\bob"), "the plain-words file names them");
+
+        // The burn log: encrypted in the vault, with the failed attempt and the burn.
+        var log = catalog.ReadExports()!;
+        using (var doc = JsonDocument.Parse(log))
+        {
+            var burns = doc.RootElement.GetProperty("burns").EnumerateArray().ToList();
+            Assert(burns.Count == 2 && burns[0].GetProperty("reason").GetString() == "ProjectChanged" && burns[1].GetProperty("result").GetString() == "done", "both attempts logged");
+        }
+        foreach (var f in Directory.EnumerateFiles(vault, "*", SearchOption.AllDirectories))
+            Assert(File.ReadAllBytes(f).AsSpan().IndexOf("TEST\\alice"u8) < 0, "approver names are not in the vault in the clear: " + Path.GetFileName(f));
+        Assert(catalog.Verify().Projects.Count == 1, "the exports store passes the vault check");
+    }
+});
+
+Test("discs: verify-disc refuses a changed file, an extra file, a changed record and the wrong check code", () =>
+{
+    var (server, pipe, _, _, writer, signing, _) = StartDiscServer(burner: true);
+    using (server)
+    using (var c = DiscClient(pipe))
+    {
+        var created = c.Ok("CreateProject", ("name", "Disc demo"));
+        var project = created.GetProperty("projectId").GetString()!;
+        c.Ok("CreateFile", ("projectId", project), ("name", "a.txt"), ("expectedSnapshotId", created.GetProperty("snapshotId").GetString()!), ("contentBase64", B64("fictional\n")));
+        var burnId = c.Ok("BeginDiscBurn", ("projectId", project), ("driveId", "drive-1")).GetProperty("burnId").GetString()!;
+        c.Ok("ApproveDiscBurn", ("burnId", burnId), ("account", @"TEST\alice"), ("password", AlicePhrase));
+        c.Ok("ApproveDiscBurn", ("burnId", burnId), ("account", @"TEST\bob"), ("password", BobPhrase));
+        c.Ok("StartDiscBurn", ("burnId", burnId));
+        Assert(WaitForBurn(c, burnId).GetProperty("verified").GetBoolean(), "burned");
+    }
+    var code = PublicKeyFile.Display(SHA256.HashData(signing.ExportSubjectPublicKeyInfo()));
+    void Refused(string why, Action change, Action undo)
+    {
+        change();
+        try { DiscRecords.Verify(writer.Root, code); throw new Exception("accepted: " + why); }
+        catch (DiscRecordException) { }
+        finally { undo(); }
+    }
+    var a = Path.Combine(writer.Root, "source", "a.txt");
+    var record = Path.Combine(writer.Root, DiscRecords.RecordFile);
+    var original = File.ReadAllBytes(record);
+    Refused("changed file", () => File.WriteAllText(a, "FICTIONAL\n"), () => File.WriteAllText(a, "fictional\n"));
+    Refused("extra file", () => File.WriteAllText(Path.Combine(writer.Root, "source", "b.txt"), "x"), () => File.Delete(Path.Combine(writer.Root, "source", "b.txt")));
+    Refused("missing file", () => File.Move(a, a + ".moved"), () => File.Move(a + ".moved", a));
+    Refused("changed record", () => { var b = (byte[])original.Clone(); b[^3] ^= 1; File.WriteAllBytes(record, b); }, () => File.WriteAllBytes(record, original));
+    try { DiscRecords.Verify(writer.Root, "AAAA-AAAA-AAAA-AAAA-AAAA-AAAA"); throw new Exception("wrong check code accepted"); } catch (DiscRecordException) { }
+    Assert(DiscRecords.Verify(writer.Root, code.ToLowerInvariant().Replace("-", " ")).Record.Files.Count == 1, "the check code is case- and separator-insensitive");
+});
+
 Test("controller: unlock failures are reported as fixed, explainable codes", () =>
 {
     foreach (var (failure, expected) in new (Exception, string)[]
@@ -1641,6 +1822,48 @@ sealed class RsaTestKey(RSA rsa) : IKeyProtector
 {
     public byte[] WrapKey(ReadOnlySpan<byte> k) => rsa.Encrypt(k.ToArray(), RSAEncryptionPadding.OaepSHA256);
     public byte[] UnwrapKey(ReadOnlySpan<byte> k) => rsa.Decrypt(k.ToArray(), RSAEncryptionPadding.OaepSHA256);
+}
+
+// Test-only: a disc drive that "burns" into a folder.
+sealed class FakeDiscWriter(string root) : SourceVault.Service.IDiscWriter
+{
+    public string Root { get; } = root;
+    public DiscMedia? Media = new("CD-R", true, true, 700L << 20);
+    public int Writes;
+    public string? Label;
+    public IReadOnlyList<DiscDrive> Drives() => [new("drive-1", "Fake drive (E:)", Media)];
+    public void WriteAndClose(string driveId, string volumeLabel, IReadOnlyList<DiscImageFile> files, Action<string, int> progress, CancellationToken ct)
+    {
+        foreach (var f in files)
+        {
+            var path = Path.Combine(Root, f.Path.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            using var output = File.Create(path);
+            foreach (var segment in f.Read()) output.Write(segment);
+        }
+        Label = volumeLabel; Writes++;
+        Media = Media! with { Blank = false };
+        progress("closing", 100);
+    }
+    public string? MountedRoot(string driveId) => Writes > 0 ? Root : null;
+}
+
+// Test-only: Windows accounts with fixed SIDs and groups, standing in for AuthZ.
+sealed class FakeAccounts : SourceVault.Service.IAccountDirectory
+{
+    private readonly Dictionary<string, SecurityIdentifier> byName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<SecurityIdentifier, (string Name, HashSet<SecurityIdentifier> Groups)> bySid = [];
+    public void Add(string name, SecurityIdentifier sid, params SecurityIdentifier[] groups) { byName[name] = sid; bySid[sid] = (name, groups.ToHashSet()); }
+    public SecurityIdentifier? Resolve(string account) => byName.GetValueOrDefault(account);
+    public string AccountName(SecurityIdentifier user) => bySid.TryGetValue(user, out var a) ? a.Name : user.Value;
+    public bool? IsMember(SecurityIdentifier user, SecurityIdentifier group) => bySid.TryGetValue(user, out var a) ? a.Groups.Contains(group) : false;
+}
+
+// Test-only: a software RSA key standing in for the service's sign-only TPM disc key.
+sealed class SoftwareDiscSigner(RSA rsa) : SourceVault.Service.IDiscSigner
+{
+    public byte[] SubjectPublicKeyInfo() => rsa.ExportSubjectPublicKeyInfo();
+    public byte[] SignHash(byte[] hash) => rsa.SignHash(hash, HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
 }
 
 sealed class ManualClock : TimeProvider

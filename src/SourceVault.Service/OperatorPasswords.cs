@@ -59,6 +59,22 @@ internal sealed class OperatorPasswords(ProjectCatalog catalog, string resetsFol
         }
     }
 
+    /// <summary>
+    /// Checks another operator's password, for a disc approval (docs/disc-export-design.md, section 3): Ok, WrongPassword,
+    /// PasswordLocked or PasswordNotSet. Wrong tries count toward that operator's lockout. Never sets a password: an
+    /// operator with none, or with a pending reset, must start a session first.
+    /// </summary>
+    internal string VerifyOther(SecurityIdentifier user, string password)
+    {
+        lock (gate)
+        {
+            var account = Load().FirstOrDefault(a => a.Sid == user.Value);
+            var reset = PendingReset(user);
+            if (account is null || (reset is not null && reset != account.ResetId)) return "PasswordNotSet";
+            return Verify(user, account, password);
+        }
+    }
+
     /// <summary>Changes the caller's password: the current one must match (wrong ones count toward the lockout).</summary>
     internal string ChangePassword(SecurityIdentifier user, string password, string newPassword)
     {
