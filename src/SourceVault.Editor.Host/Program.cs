@@ -427,6 +427,34 @@ internal sealed class EditorWindow : Window
                 VaultOperation.UnlockWithPassword => await UnlockAsync(request, controller, request.Password),
                 VaultOperation.SetPassword => await UnlockAsync(request, controller, newPassword: request.NewPassword),
                 VaultOperation.ChangePassword => Respond(request, await controller.ChangePasswordAsync(request.Password!, request.NewPassword!), (w, _) => { }),
+                VaultOperation.ListDiscDrives => Respond(request, await controller.ListDiscDrivesAsync(), (w, list) =>
+                {
+                    w.WriteBoolean("allowed", list.Allowed);
+                    w.WriteString("checkCode", list.CheckCode);
+                    w.WriteStartArray("drives");
+                    foreach (var d in list.Drives)
+                    {
+                        w.WriteStartObject();
+                        w.WriteString("driveId", d.DriveId); w.WriteString("name", d.Name);
+                        if (d.MediaType is null) w.WriteNull("mediaType"); else w.WriteString("mediaType", d.MediaType);
+                        w.WriteBoolean("writeOnce", d.WriteOnce); w.WriteBoolean("blank", d.Blank); w.WriteNumber("freeBytes", d.FreeBytes);
+                        w.WriteEndObject();
+                    }
+                    w.WriteEndArray();
+                }),
+                VaultOperation.BeginDiscBurn => Respond(request, await controller.BeginDiscBurnAsync(request.ProjectId, request.DriveId!), (w, b) =>
+                    { w.WriteString("burnId", b.BurnId.ToString("D")); w.WriteNumber("fileCount", b.FileCount); w.WriteNumber("totalBytes", b.TotalBytes); }),
+                VaultOperation.ApproveDiscBurn => Respond(request, await controller.ApproveDiscBurnAsync(request.BurnId, request.Account!, request.Password!), (w, a) =>
+                    { w.WriteString("approver", a.Approver); w.WriteNumber("approvals", a.Approvals); }),
+                VaultOperation.StartDiscBurn => Respond(request, await controller.StartDiscBurnAsync(request.BurnId), (w, _) => { }),
+                VaultOperation.CancelDiscBurn => Respond(request, await controller.CancelDiscBurnAsync(request.BurnId), (w, _) => { }),
+                VaultOperation.DiscBurnStatus => Respond(request, await controller.DiscBurnStatusAsync(request.BurnId), (w, s) =>
+                {
+                    w.WriteString("state", s.State); w.WriteNumber("progress", s.Progress); w.WriteNumber("approvals", s.Approvals);
+                    if (s.Reason is null) w.WriteNull("reason"); else w.WriteString("reason", s.Reason);
+                    if (s.DiscId is null) w.WriteNull("discId"); else w.WriteString("discId", s.DiscId.Value.ToString("D"));
+                    w.WriteBoolean("verified", s.Verified);
+                }),
                 _ => BridgePolicy.BuildResponse(request.RequestId, "UnsupportedOperation", null),
             };
         }

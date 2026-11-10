@@ -298,3 +298,45 @@ test('responses for other requests are ignored; metadata never carries text and 
   assert.equal(session.metadata.revisionCount, 1000000);
   assert.equal(languageFor('x.unknown'), 'plaintext'); assert.equal(languageFor('A.TS'), 'typescript');
 });
+
+// ---- writing a project to a finalized disc (docs/disc-export-design.md), on the demo vault's simulation ----
+test('disc: a burner prepares, two other people approve with their passwords, then the disc is written and checked', async () => {
+  const { host, session } = await opened();
+  host.discMs = 40;
+  const listed = await session.listDiscDrives();
+  assert.equal(listed.allowed, true); assert.equal(listed.drives[0].mediaType, 'CD-R');
+  const burn = await session.beginDiscBurn('demo-drive');
+  assert.ok(burn.fileCount > 0);
+  await rejectsWith(session.beginDiscBurn('demo-drive'), 'DiscBusy');
+  await rejectsWith(session.startDiscBurn(burn.burnId), 'ApprovalsMissing');
+  await rejectsWith(session.approveDiscBurn(burn.burnId, 'DEMO\\carol', 'carol demo phrase'), 'NotDiscApprover');
+  await rejectsWith(session.approveDiscBurn(burn.burnId, 'DEMO\\alice', 'not her phrase'), 'WrongPassword');
+  await rejectsWith(session.approveDiscBurn(burn.burnId, host.actor, 'anything at all'), 'SameAsBurner');
+  assert.equal((await session.approveDiscBurn(burn.burnId, 'DEMO\\alice', 'alice demo phrase')).approvals, 1);
+  await rejectsWith(session.approveDiscBurn(burn.burnId, 'demo\\ALICE', 'alice demo phrase'), 'AlreadyApproved');
+  assert.equal((await session.approveDiscBurn(burn.burnId, 'DEMO\\bob', 'bob demo phrase')).approvals, 2);
+  await session.startDiscBurn(burn.burnId);
+  let status;
+  for (let i = 0; i < 50; i++) { status = await session.discBurnStatus(burn.burnId); if (status.state === 'done') break; await new Promise(r => setTimeout(r, 10)); }
+  assert.equal(status.state, 'done'); assert.equal(status.verified, true);
+  assert.equal((await session.listDiscDrives()).drives[0].blank, false, 'the disc is no longer blank');
+  await rejectsWith(session.beginDiscBurn('demo-drive'), 'MediaNotBlank');
+});
+
+test('disc: not a disc burner sees no drives and can\'t start; rewritable discs are refused; offline sends nothing', async () => {
+  const { host, session } = await opened();
+  host.discBurner = false;
+  const listed = await session.listDiscDrives();
+  assert.equal(listed.allowed, false); assert.deepEqual(listed.drives, []);
+  await rejectsWith(session.beginDiscBurn('demo-drive'), 'NotDiscBurner');
+  host.discBurner = true;
+  host.discMedia = { mediaType: 'DVD+RW', writeOnce: false, blank: true, freeBytes: 1 << 30 };
+  await rejectsWith(session.beginDiscBurn('demo-drive'), 'MediaNotWriteOnce');
+  host.simulateLock('closed'); await new Promise(r => setTimeout(r, 10));
+  host.failNextUnlock = 'ServiceNotRunning';
+  await rejectsWith(session.unlock(), 'ServiceNotRunning');
+  session.goOffline();
+  const sent = host.requests.length;
+  await rejectsWith(session.listDiscDrives(), 'Offline');
+  assert.equal(host.requests.length, sent, 'nothing was sent while offline');
+});

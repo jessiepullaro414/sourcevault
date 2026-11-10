@@ -10,6 +10,12 @@ public enum LockReason { User, Closed, Expired }
 public sealed record ProjectSummary(Guid ProjectId, string Name, int FileCount, bool Available = true);
 /// <summary>A build target: its name and platform ("windows", "linux", or "" from an older service).</summary>
 public sealed record BuildTargetSummary(string Name, string Platform);
+/// <summary>Disc writing (docs/disc-export-design.md): whether the caller may, the signing key's check code, and the drives.</summary>
+public sealed record DiscDriveList(bool Allowed, string CheckCode, IReadOnlyList<DiscDriveSummary> Drives);
+public sealed record DiscDriveSummary(string DriveId, string Name, string? MediaType, bool WriteOnce, bool Blank, long FreeBytes);
+public sealed record DiscBurnStarted(Guid BurnId, int FileCount, long TotalBytes);
+public sealed record DiscApproval(string Approver, int Approvals);
+public sealed record DiscBurnState(string State, int Progress, int Approvals, string? Reason, Guid? DiscId, bool Verified);
 /// <summary>A live file. <c>Kind</c> is "text" or "binary"; <c>Sha256</c> (hex) is null for a legacy text record.</summary>
 public sealed record FileSummary(Guid FileId, string Name, Guid RevisionId, long ByteLength, string Kind = "text", string? Sha256 = null)
 {
@@ -343,6 +349,53 @@ public sealed class EditorVaultController : IDisposable
     });
 
     /// <summary>Queues a build of the project's current saved files. Returns the build number.</summary>
+    // ---- discs (docs/disc-export-design.md) ---------------------------------------------------------------------------
+    public Task<VaultResult<DiscDriveList>> ListDiscDrivesAsync(CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("ListDiscDrives", null, null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<DiscDriveList>(r.Code);
+        var drives = r.Body.GetProperty("drives").EnumerateArray().Select(d =>
+        {
+            var m = d.GetProperty("media");
+            return m.ValueKind == JsonValueKind.Object
+                ? new DiscDriveSummary(d.GetProperty("driveId").GetString()!, d.GetProperty("name").GetString()!, m.GetProperty("type").GetString(), m.GetProperty("writeOnce").GetBoolean(), m.GetProperty("blank").GetBoolean(), m.GetProperty("freeBytes").GetInt64())
+                : new DiscDriveSummary(d.GetProperty("driveId").GetString()!, d.GetProperty("name").GetString()!, null, false, false, 0);
+        }).ToList();
+        return new VaultResult<DiscDriveList>("Ok", new(r.Body.GetProperty("allowed").GetBoolean(), r.Body.GetProperty("checkCode").GetString()!, drives));
+    });
+
+    public Task<VaultResult<DiscBurnStarted>> BeginDiscBurnAsync(Guid projectId, string driveId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("BeginDiscBurn", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteString("driveId", driveId); }, null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<DiscBurnStarted>("Ok", new(Guid.Parse(r.Body.GetProperty("burnId").GetString()!), r.Body.GetProperty("fileCount").GetInt32(), r.Body.GetProperty("totalBytes").GetInt64())) : Fail<DiscBurnStarted>(r.Code);
+    });
+
+    /// <summary>An approver signs in on this PC with their account and SourceVault password (never stored or logged here).</summary>
+    public Task<VaultResult<DiscApproval>> ApproveDiscBurnAsync(Guid burnId, string account, string password, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("ApproveDiscBurn", w => { w.WriteString("burnId", burnId.ToString("D")); w.WriteString("account", account); w.WriteString("password", password); }, null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<DiscApproval>("Ok", new(r.Body.GetProperty("approver").GetString()!, r.Body.GetProperty("approvals").GetInt32())) : Fail<DiscApproval>(r.Code);
+    });
+
+    public Task<VaultResult<bool>> StartDiscBurnAsync(Guid burnId, CancellationToken ct = default) => DiscCall("StartDiscBurn", burnId, ct);
+    public Task<VaultResult<bool>> CancelDiscBurnAsync(Guid burnId, CancellationToken ct = default) => DiscCall("CancelDiscBurn", burnId, ct);
+
+    public Task<VaultResult<DiscBurnState>> DiscBurnStatusAsync(Guid burnId, CancellationToken ct = default) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync("DiscBurnStatus", w => w.WriteString("burnId", burnId.ToString("D")), null, ct).ConfigureAwait(false);
+        if (!r.Ok) return Fail<DiscBurnState>(r.Code);
+        var b = r.Body;
+        return new VaultResult<DiscBurnState>("Ok", new(b.GetProperty("state").GetString()!, b.GetProperty("progress").GetInt32(), b.GetProperty("approvals").GetInt32(),
+            b.GetProperty("reason").ValueKind == JsonValueKind.String ? b.GetProperty("reason").GetString() : null,
+            b.GetProperty("discId").ValueKind == JsonValueKind.String ? Guid.Parse(b.GetProperty("discId").GetString()!) : null, b.GetProperty("verified").GetBoolean()));
+    });
+
+    private Task<VaultResult<bool>> DiscCall(string op, Guid burnId, CancellationToken ct) => Guarded(async () =>
+    {
+        var r = await client!.CallAsync(op, w => w.WriteString("burnId", burnId.ToString("D")), null, ct).ConfigureAwait(false);
+        return r.Ok ? new VaultResult<bool>("Ok", true) : Fail<bool>(r.Code);
+    });
+
     public Task<VaultResult<int>> RequestBuildAsync(Guid projectId, string target, CancellationToken ct = default) => Guarded(async () =>
     {
         var r = await client!.CallAsync("RequestBuild", w => { w.WriteString("projectId", projectId.ToString("D")); w.WriteString("target", target); }, null, ct).ConfigureAwait(false);

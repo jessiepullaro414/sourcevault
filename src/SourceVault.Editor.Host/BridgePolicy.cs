@@ -5,12 +5,13 @@ using System.Text.Json;
 namespace SourceVault.Editor.Host;
 
 internal enum VaultOperation { ListProjects, CreateProject, DeleteProject, RenameProject, ListFiles, RenameFile, RenameFolder, DeleteFile, ListHistory, OpenRevision, ListDeleted, RestoreFile, MergeSources, SaveMerged, ListBuildTargets, RequestBuild, ListBuilds, BuildStatus, OpenBuildLog, OpenDocument, CloseDocument, SaveDocument, CreateFile, Lock, Unlock, SearchProject, GetSettings, SaveSettings,
-    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile, OpenBuildFolder, ChooseImportFolder, ImportFolder, CancelImport, DropFiles, UnlockWithPassword, SetPassword, ChangePassword }
+    FileInfo, ReplaceFromDisk, KeepMine, KeepTheirs, AddFromDisk, RevertFile, OpenBuildFolder, ChooseImportFolder, ImportFolder, CancelImport, DropFiles, UnlockWithPassword, SetPassword, ChangePassword,
+    ListDiscDrives, BeginDiscBurn, ApproveDiscBurn, StartDiscBurn, DiscBurnStatus, CancelDiscBurn }
 
 /// <summary>A fully validated renderer request. Ids are canonical; text is valid UTF-8 within the document limit.</summary>
 internal sealed record VaultBridgeRequest(Guid RequestId, VaultOperation Operation, Guid ProjectId, Guid FileId, string? Name, string? Text, string? NewName = null, Guid RevisionId = default, int Page = 0, int BuildNumber = 0,
     string? Query = null, bool MatchCase = false, bool WholeWord = false, EditorSettings? Settings = null, string? Folder = null,
-    string? Password = null, string? NewPassword = null);
+    string? Password = null, string? NewPassword = null, string? DriveId = null, Guid BurnId = default, string? Account = null);
 
 /// <summary>
 /// Bridge v2 (docs/editor-vault-design.md): pure, UI-free validation of renderer-to-host vault requests and
@@ -83,7 +84,16 @@ internal static class BridgePolicy
         // Files and folders dropped on the explorer. The dropped items travel as WebView2 additional objects, which the
         // host turns into paths; the JSON carries only where they go. Every other operation must carry none.
         ["dropFiles"] = (VaultOperation.DropFiles, ["projectId", "folder"]),
+        // Writing a project to a finalized disc with two approvers (docs/disc-export-design.md). Approvers type their
+        // Windows account and SourceVault password, which the host passes to the service and never stores or logs.
+        ["listDiscDrives"] = (VaultOperation.ListDiscDrives, []),
+        ["beginDiscBurn"] = (VaultOperation.BeginDiscBurn, ["projectId", "driveId"]),
+        ["approveDiscBurn"] = (VaultOperation.ApproveDiscBurn, ["burnId", "account", "password"]),
+        ["startDiscBurn"] = (VaultOperation.StartDiscBurn, ["burnId"]),
+        ["discBurnStatus"] = (VaultOperation.DiscBurnStatus, ["burnId"]),
+        ["cancelDiscBurn"] = (VaultOperation.CancelDiscBurn, ["burnId"]),
     };
+    internal const int MaxDriveIdChars = 512, MaxAccountChars = 256;
 
     /// <summary>Exactly {type, requestId, operation, args} with the operation's exact argument set. Never throws.</summary>
     internal static bool TryParseVaultRequest(string? json, out VaultBridgeRequest request)
@@ -103,7 +113,8 @@ internal static class BridgePolicy
             if (!ExactFields(args, op.Args)) return false;
             Guid projectId = Guid.Empty, fileId = Guid.Empty, revisionId = Guid.Empty;
             int page = 0, buildNumber = 0;
-            string? name = null, text = null, newName = null, query = null, folder = null, password = null, newPassword = null;
+            string? name = null, text = null, newName = null, query = null, folder = null, password = null, newPassword = null, driveId = null, account = null;
+            Guid burnId = Guid.Empty;
             bool matchCase = false, wholeWord = false;
             EditorSettings? settings = null;
             if (op.Args.Contains("projectId") && !TryId(args.GetProperty("projectId"), out projectId)) return false;
@@ -121,7 +132,11 @@ internal static class BridgePolicy
             if (op.Args.Contains("folder") && !TryFolder(args.GetProperty("folder"), out folder)) return false;
             if (op.Args.Contains("password") && !TryPassword(args.GetProperty("password"), out password)) return false;
             if (op.Args.Contains("newPassword") && !TryPassword(args.GetProperty("newPassword"), out newPassword)) return false;
-            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber, query, matchCase, wholeWord, settings, folder, password, newPassword);
+            if (op.Args.Contains("driveId") && !TryPlain(args.GetProperty("driveId"), MaxDriveIdChars, out driveId)) return false;
+            if (op.Args.Contains("burnId") && !TryId(args.GetProperty("burnId"), out burnId)) return false;
+            if (op.Args.Contains("account") && !TryPlain(args.GetProperty("account"), MaxAccountChars, out account)) return false;
+            request = new VaultBridgeRequest(requestId, op.Op, projectId, fileId, name, text, newName, revisionId, page, buildNumber, query, matchCase, wholeWord, settings, folder, password, newPassword,
+                driveId, burnId, account);
             return true;
         }
         catch (Exception e) when (e is JsonException or ArgumentException or InvalidOperationException or FormatException)
@@ -206,6 +221,13 @@ internal static class BridgePolicy
     {
         password = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         return password is { Length: > 0 and <= MaxPasswordChars } && !password.Any(char.IsControl) && IsStrictUtf8(password, out _);
+    }
+
+    // A drive id or a Windows account: a non-empty string, bounded, no control characters, strict UTF-8.
+    private static bool TryPlain(JsonElement value, int max, out string? text)
+    {
+        text = value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        return text is { Length: > 0 } && text.Length <= max && !text.Any(char.IsControl) && IsStrictUtf8(text, out _);
     }
 
     private static bool TryQuery(JsonElement value, out string? query)
