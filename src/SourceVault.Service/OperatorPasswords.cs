@@ -61,8 +61,9 @@ internal sealed class OperatorPasswords(ProjectCatalog catalog, string resetsFol
 
     /// <summary>
     /// Checks another operator's password, for a disc approval (docs/disc-export-design.md, section 3): Ok, WrongPassword,
-    /// PasswordLocked or PasswordNotSet. Wrong tries count toward that operator's lockout. Never sets a password: an
-    /// operator with none, or with a pending reset, must start a session first.
+    /// PasswordLocked or PasswordNotSet. Wrong tries count toward a separate approval lockout for that operator (the same
+    /// 5 tries and 15 minutes), so a burner guessing can't lock the approver out of their own SourceVault. Never sets a
+    /// password: an operator with none, or with a pending reset, must start a session first.
     /// </summary>
     internal string VerifyOther(SecurityIdentifier user, string password)
     {
@@ -71,7 +72,7 @@ internal sealed class OperatorPasswords(ProjectCatalog catalog, string resetsFol
             var account = Load().FirstOrDefault(a => a.Sid == user.Value);
             var reset = PendingReset(user);
             if (account is null || (reset is not null && reset != account.ResetId)) return "PasswordNotSet";
-            return Verify(user, account, password);
+            return Verify(user, account, password, "approval:" + user.Value);
         }
     }
 
@@ -96,26 +97,28 @@ internal sealed class OperatorPasswords(ProjectCatalog catalog, string resetsFol
     // 12-256 characters, no control characters. Length is what matters; no composition rules (NIST SP 800-63B).
     internal static bool Strong(string password) => password.Length is >= MinLength and <= MaxLength && !password.Any(char.IsControl);
 
-    private string Verify(SecurityIdentifier user, Account account, string password)
+    // counter: whose lockout the tries count toward (the operator's SID, or "approval:" + it for disc approvals).
+    private string Verify(SecurityIdentifier user, Account account, string password, string? counter = null)
     {
+        counter ??= user.Value;
         long now = time.GetTimestamp();
-        var state = attempts.GetValueOrDefault(user.Value);
+        var state = attempts.GetValueOrDefault(counter);
         if (state.Failures >= MaxFailures && now < state.LockedUntil) return "PasswordLocked";
-        if (password.Length > MaxLength) return Failed(user, state, now);
+        if (password.Length > MaxLength) return Failed(counter, state, now);
         var candidate = Derive(password, account.Salt, account.Iterations);
         try
         {
-            if (CryptographicOperations.FixedTimeEquals(candidate, account.Hash)) { attempts.TryRemove(user.Value, out _); return "Ok"; }
+            if (CryptographicOperations.FixedTimeEquals(candidate, account.Hash)) { attempts.TryRemove(counter, out _); return "Ok"; }
         }
         finally { CryptographicOperations.ZeroMemory(candidate); }
-        return Failed(user, state, now);
+        return Failed(counter, state, now);
     }
 
-    private string Failed(SecurityIdentifier user, (int Failures, long LockedUntil, string? ResetSeen) state, long now)
+    private string Failed(string counter, (int Failures, long LockedUntil, string? ResetSeen) state, long now)
     {
         int failures = state.Failures + 1;
         long lockedUntil = failures >= MaxFailures ? now + (long)(Lockout.TotalSeconds * time.TimestampFrequency) : 0;
-        attempts[user.Value] = (failures, lockedUntil, state.ResetSeen);
+        attempts[counter] = (failures, lockedUntil, state.ResetSeen);
         return failures >= MaxFailures ? "PasswordLocked" : "WrongPassword";
     }
 

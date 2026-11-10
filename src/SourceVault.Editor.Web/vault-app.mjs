@@ -118,8 +118,8 @@ const DISC_FAILURES = {
   MediaTooSmall: 'The project doesn’t fit on that disc.',
   BurnFailed: 'Writing the disc failed. The disc may be unusable; use a new one.',
   VerifyFailed: 'The disc was written, but reading it back didn’t match its record. Don’t use it.',
-  WrongPassword: 'Wrong password for that approver. Five wrong tries lock their SourceVault password for 15 minutes.',
-  PasswordLocked: 'That approver’s SourceVault password is locked for 15 minutes after wrong tries.',
+  WrongPassword: 'Wrong password for that approver. Five wrong tries stop approvals by that person for 15 minutes.',
+  PasswordLocked: 'Approvals by that person are locked for 15 minutes after wrong tries. They can still use SourceVault themselves.',
   PasswordNotSet: 'That approver has no SourceVault password yet: they must open SourceVault once and choose one.',
 };
 const DISC_STATES = { waiting: 'Waiting for approvals', writing: 'Writing the disc…', closing: 'Finalizing the disc…', verifying: 'Reading the disc back to check it…', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };

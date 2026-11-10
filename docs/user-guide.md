@@ -471,6 +471,49 @@ Code that lives on another computer can come in **encrypted**. **SourceVault Pac
 **Be aware:**
 - On the other computer the code is still ordinary, unencrypted files. Pack doesn't protect or delete them.
 - Anyone who has the recipient file can encrypt *to* this PC, but only registered computers' packages are accepted.
+### Write a project to a disc
+
+**Builds** are one way out of the vault; **Write to disc…**, in the explorer, is the other. It writes the project's **saved** files to a blank, write-once disc (CD-R, DVD±R or BD-R) and **finalizes** it, so nothing can be added or erased afterwards.
+
+**You must be approved.** The screen says so first:
+- you must be in **SourceVault Disc Burners**;
+- **two people from SourceVault Disc Approvers** must approve, on your computer, each with their own Windows account and SourceVault password. Neither can be you.
+
+**Steps:**
+1. **Write to disc…**, then read the message.
+2. Pick the drive with a blank write-once disc, then **Prepare this disc**.
+3. The first approver types their Windows account (for example `PC\alice`) and their SourceVault password, then **Approve**. Then the second one does the same.
+4. **Write and finalize disc.** Leave the disc in the drive until the screen says it's written, finalized and checked.
+
+**What's on the disc:**
+- the files, in the folder `source`;
+- `SOURCEVAULT-DISC.json`: every file's SHA-256, the project, you, both approvers and the time, signed by this PC's disc signing key;
+- a plain `README-SOURCEVAULT.txt`.
+
+The disc's label carries both approvers' names.
+
+**Checking a disc on any computer:**
+```
+SourceVault.Pack.exe verify-disc E:\ --check-code <code>
+```
+Get the code from this PC's administrator (`-Status` shows it, and so does the bottom of the *Write to disc* screen). Don't take it from the disc itself.
+
+**Be aware:**
+- **The disc holds readable source.** SourceVault can't protect it once it leaves the PC.
+- **Approvals expire,** and they're only for the files you prepared. If anyone saves a change first, prepare again.
+- **Rewritable and used discs are refused.**
+
+**For administrators:**
+```powershell
+.\Setup-SourceVault.ps1 -AddDiscBurner PC\carol
+.\Setup-SourceVault.ps1 -AddDiscApprover PC\alice,PC\bob
+```
+Or use *SourceVault Administration*, option 8.
+- **Burners** sign out and back in once.
+- **Approvers** must also be operators, and must have chosen their SourceVault password.
+- **Domain users:** Windows can't check an OU directly, so add the AD group that holds the OU's people to these local groups.
+- **The disc signing key** is created by setup. `-Status` shows its check code, which you give to whoever checks discs.
+
 ### Build a project
 
 **Builds** in the Explorer opens the build view (only if your administrator set up builds).

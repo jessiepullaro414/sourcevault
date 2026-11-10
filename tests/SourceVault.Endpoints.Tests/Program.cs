@@ -926,7 +926,7 @@ var discApprovers = new SecurityIdentifier("S-1-5-21-1000000001-1000000002-10000
 var discOperators = new SecurityIdentifier("S-1-5-21-1000000001-1000000002-1000000003-9002");
 SecurityIdentifier Person(int rid) => new($"S-1-5-21-1000000001-1000000002-1000000003-{rid}");
 const string MyPhrase = "my synthetic phrase", AlicePhrase = "alice synthetic phrase", BobPhrase = "bob synthetic phrase", CarolPhrase = "carol synthetic phrase";
-(VaultPipeServer Server, string Pipe, string Vault, ProjectCatalog Catalog, FakeDiscWriter Writer, RSA SigningKey, ManualClock Clock) StartDiscServer(bool burner)
+(VaultPipeServer Server, string Pipe, string Vault, ProjectCatalog Catalog, FakeDiscWriter Writer, RSA SigningKey, ManualClock Clock, SourceVault.Service.OperatorPasswords Passwords) StartDiscServer(bool burner)
 {
     var clock = new ManualClock();
     var vault = Path.Combine(workspace, "vault-" + Guid.NewGuid().ToString("N"));
@@ -950,7 +950,7 @@ const string MyPhrase = "my synthetic phrase", AlicePhrase = "alice synthetic ph
     var server = new VaultPipeServer(name, me, new PipePeerPolicy(authenticatedUsers, [self]) { DiscBurnersGroup = burner ? authenticatedUsers : nobodyGroup },
         new VaultProtocol(catalog, catalog.Verify().Projects, clock, passwords: passwords, discs: discs));
     server.Start();
-    return (server, name, vault, catalog, writer, signing, clock);
+    return (server, name, vault, catalog, writer, signing, clock, passwords);
 }
 Client DiscClient(string pipe)
 {
@@ -972,7 +972,7 @@ JsonElement WaitForBurn(Client c, string burnId)
 
 Test("discs: only disc burners see drives or start a burn; everyone else gets the reason, nothing more", () =>
 {
-    var (server, pipe, _, _, writer, _, _) = StartDiscServer(burner: false);
+    var (server, pipe, _, _, writer, _, _, _) = StartDiscServer(burner: false);
     using (server)
     using (var c = DiscClient(pipe))
     {
@@ -986,7 +986,7 @@ Test("discs: only disc burners see drives or start a burn; everyone else gets th
 
 Test("discs: two different approvers sign in; wrong ones are refused for fixed reasons; the disc is signed, closed and verified", () =>
 {
-    var (server, pipe, vault, catalog, writer, signing, clock) = StartDiscServer(burner: true);
+    var (server, pipe, vault, catalog, writer, signing, clock, _) = StartDiscServer(burner: true);
     using (server)
     using (var c = DiscClient(pipe))
     {
@@ -1068,9 +1068,28 @@ Test("discs: two different approvers sign in; wrong ones are refused for fixed r
     }
 });
 
+Test("discs: wrong approval passwords lock approvals for that person, not their own SourceVault; cancelled burns are logged", () =>
+{
+    var (server, pipe, _, catalog, _, _, _, passwords) = StartDiscServer(burner: true);
+    using (server)
+    using (var c = DiscClient(pipe))
+    {
+        var project = c.Ok("CreateProject", ("name", "Disc demo")).GetProperty("projectId").GetString()!;
+        var burnId = c.Ok("BeginDiscBurn", ("projectId", project), ("driveId", "drive-1")).GetProperty("burnId").GetString()!;
+        string Approve(string account, string password) => c.Code("ApproveDiscBurn", ("burnId", burnId), ("account", account), ("password", password));
+        for (int i = 1; i <= 4; i++) Assert(Approve(@"TEST\alice", "a wrong guess " + i) == "WrongPassword", "wrong " + i);
+        Assert(Approve(@"TEST\alice", "a wrong guess 5") == "PasswordLocked", "the fifth locks approvals for alice");
+        Assert(Approve(@"TEST\alice", AlicePhrase) == "PasswordLocked", "even with her right password, while locked");
+        Assert(passwords.BeginSession(Person(1001), AlicePhrase, null) == "Ok", "but alice can still unlock her own SourceVault");
+        Assert(c.Code("CancelDiscBurn", ("burnId", burnId)) == "Ok" && c.Ok("DiscBurnStatus", ("burnId", burnId)).GetProperty("state").GetString() == "cancelled", "cancelled");
+        using var doc = JsonDocument.Parse(catalog.ReadExports()!);
+        Assert(doc.RootElement.GetProperty("burns").EnumerateArray().Single().GetProperty("result").GetString() == "cancelled", "the cancelled attempt is in the burn log");
+    }
+});
+
 Test("discs: verify-disc refuses a changed file, an extra file, a changed record and the wrong check code", () =>
 {
-    var (server, pipe, _, _, writer, signing, _) = StartDiscServer(burner: true);
+    var (server, pipe, _, _, writer, signing, _, _) = StartDiscServer(burner: true);
     using (server)
     using (var c = DiscClient(pipe))
     {

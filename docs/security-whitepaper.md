@@ -1,6 +1,6 @@
 # SourceVault security whitepaper
 
-**Version 1.0, 2026-10-20.** Supersedes draft 0.1 (same day).
+**Version 1.0, 2026-10-20; revised 2026-11-10** to add writing a project to a finalized disc with two approvers (section 9.4). Supersedes draft 0.1.
 
 This version is complete for review: it describes the whole design, every control, and every limit the owner has accepted. It is **not a certification**. Read it with three things in mind:
 - **No independent audit yet.** SourceVault has had no independent security review. Section 14 says what that review must cover, and real source code or a public release must wait for it.
@@ -22,7 +22,9 @@ SourceVault keeps a team's source code encrypted on one Windows PC. The code is 
 
   Sessions expire.
 - **An editor designed against accidental export.** The editor receives decrypted text only for files that are opened. What's copied in it stays in it: nothing reaches the Windows clipboard. It blocks drags out, printing and developer tools, has no route to the network, and asks Windows to exclude its window from screen capture.
-- **Controlled ways in and out.** Code comes in through a verifying importer, or as an encrypted, signed package from a registered computer. It goes out only as build output. Builds run in containers with no network, under a second service identity, and their output goes to a folder the administrator chooses and locks down.
+- **Controlled ways in and out.** Code comes in through a verifying importer, or as an encrypted, signed package from a registered computer. It goes out in only two ways:
+  - **build output:** builds run in containers with no network, under a second service identity, and their output goes to a folder the administrator chooses and locks down;
+  - **a finalized disc:** written by a member of *SourceVault Disc Burners* only after two other people from *SourceVault Disc Approvers* sign in and approve, and carrying a record signed by this PC that names all three.
 
 **What it does not do.** SourceVault does not protect against:
 - the PC's own administrators;
@@ -39,10 +41,10 @@ It does not guarantee that screen capture is blocked, and it does not process so
 |---|---|---|
 | **Owner-run lab, real TPM** (2026-10-17 and 2026-10-18; Windows 11 Pro 25H2, Intel firmware TPM 2.0) | Service installed under its virtual account; TPM key provisioning (decrypt-only, export refused); vault-root ACL gate; startup authentication of every project; tamper drill (stray file and flipped manifest bit refused, vault restored byte-for-byte); pipe DACL refusing a non-operator; the installed lab client's end-to-end check, including a refused forged capability and a refused byte-identical copy outside Program Files; hash pins and the PID-reuse check accepting an untouched client | **Verified** |
 | **Owner-run lab, real Docker engines** (2026-10-20, same PC) | The installed editor against the installed service: a folder import, then builds of the fictional `dotnet-hello` sample on the **Windows target** (Microsoft's standalone engine, process isolation, the copy check passed) and the **Linux target** (Docker in a WSL distro of its own, reached over loopback TLS with a client certificate). Both builds published the expected files and left out `Hello.pdb`. `-Status` reported Secure Boot on, BitLocker off on this development PC (owner's choice; the vault PC is a different machine), and every project's integrity check passed. Five setup-script bugs were found and fixed in this run (section 10) | **Verified** |
-| **In-process tests** (`scripts/Verify.ps1`, 2026-10-20) | Record codec 76, revision store 79, endpoints over real local pipes 56, builds against a fake Docker engine 19, packaging 12, editor host policy 70 and editor web 88 checks, service 123 assertions, and Windows storage-root validation 38 (1 skipped: no symlink privilege), plus contract and IPC tests. Software stand-ins replace the TPM keys in these tests | **Verified** (passing) |
+| **In-process tests** (`scripts/Verify.ps1`, 2026-11-10) | Record codec 76, revision store 79, endpoints over real local pipes 60 (4 for discs), builds against a fake Docker engine 19, packaging 12, editor host policy 71 and editor web 90 checks (3 more for discs), service 123 assertions, and Windows storage-root validation 38 (1 skipped: no symlink privilege), plus contract and IPC tests. Software stand-ins replace the TPM keys and the disc drive in these tests | **Verified** (passing) |
 | **Native probe** (2026-10-19) | The editor's browser layer: from a deliberately unrestricted test page, 0 TCP connections and 0 UDP packets reached loopback listeners | **Verified** |
 | **Scheduled owner lab run** (2026-10-21) | The rows still open in [lab-checklist.md](lab-checklist.md), among them: guided "Set up Docker builds" on a clean PC; own build images (Java/Ant); `docker load` of the drive's archives on Docker 29; SourceVault passwords (lockout, reset); offline mode; the clipboard and drop rules natively; capture exclusion against real tools; `-Status` on the vault PC (BitLocker and Secure Boot) | **Scheduled.** Each becomes evidence only when its result is recorded |
-| **Not yet scheduled** | Reboot persistence and power loss; package import between two real TPMs; the full offline deployment drive; the any-file vault at 25,000 files and several GiB | **Open** |
+| **Not yet scheduled** | Reboot persistence and power loss; package import between two real TPMs; the full offline deployment drive; the any-file vault at 25,000 files and several GiB; disc writing on a real drive (setup, refusals, a real burn and read-back, `verify-disc` on another PC) | **Open** |
 
 When a scheduled check is run, its row in `lab-checklist.md` and the matching sentence here are updated together. A failed check becomes an open finding in section 13.
 
@@ -91,6 +93,7 @@ The components:
 - **Setup.** `SourceVault Setup.cmd` is a guided administrator tool, also on the Start menu as *SourceVault Administration*.
   - It installs, updates, adds and removes operators, resets passwords, registers Pack computers, and reports status.
   - Its option 6 sets up the build engines and targets (section 10).
+- **Disc writing.** The vault service itself writes approved discs, with Windows' built-in IMAPI2, and signs each disc's record with a sign-only TPM key (section 9.4).
 - **Demo mode.** `SourceVault.Editor.exe --demo` runs the editor on an in-page simulated vault, for presentations.
   - **Nothing in demo mode is encrypted.** It never connects to the service, and it says so in red throughout.
 
@@ -127,6 +130,8 @@ The components:
 | A fake Docker engine (a pipe squatted while Docker is down) or a tampered output folder | The build is refused before any source is sent (section 9.3) |
 | Accidental export by an operator: copy and paste, dragging out, printing, screenshots, or the editor reaching a website | Made harder by the editor's lockdown (section 8) |
 | A process crash during a save | The project always reopens at a complete snapshot |
+| An operator writing a disc without approval, or approving their own | Refused: the burner group comes from their token, and two different approvers, neither the burner, must sign in with their own passwords |
+| A disc whose files or record were changed after it was written | `verify-disc` refuses it: the record is signed, and every file is checked against it |
 
 ### 4.4 Out of scope
 
@@ -137,6 +142,8 @@ The components:
 - **Rollback of a whole valid old vault.** Restoring an entire earlier copy of a project folder isn't detected (storage contract v1).
 - **Side channels, cameras, and capture tools that ignore window display affinity.**
 - **Availability.** Losing the TPM loses the vault, by design. The Linux build target is unavailable while the account that owns its WSL distro is signed out.
+- **A disc once written.** It holds readable source, and SourceVault can't control copies of it, or who holds it.
+- **Approvers who are pressured or deceived.** The service checks who approves, not why.
 
 ### 4.5 A stolen whole PC (not just its disk)
 
@@ -163,6 +170,7 @@ A thief with the **whole PC** can't read the vault from the disk alone, because 
 | **Package key** | Wrapped to the import key, in the package header | Encrypting one package | One package |
 | **Session capability** | Service memory and the client | Authorising requests on one connection | 256 random bits; expires after 5 minutes idle or 30 minutes in total |
 | **SourceVault password hash** | The encrypted accounts store in the vault | Checking an operator's password at session start (section 7.5) | Until the operator changes it or an administrator resets it |
+| **Disc signing key** | TPM, RSA-2048, **sign-only** (`PCP_KEY_USAGE_POLICY` = signature), non-exportable, under `NT SERVICE\SourceVault` | Signing the record on every disc written (RSA-PSS-SHA256) | Created once by setup (`provision-disc-key`). Its check code is published by the administrator |
 | **Build TLS keys** | Server key: root-only, inside the WSL distro. Client key: the machine certificate store, non-exportable, readable only by `NT SERVICE\SourceVaultBuild` and administrators | Mutual TLS between the build service and the Linux engine | 825 days; `-ReconnectTls` replaces them |
 
 **No recovery, by design.** The owner decided (2026-10-18) that there is no recovery envelope, escrow or key export. Clearing the TPM, replacing the motherboard or deleting the service profile makes the vault permanently unreadable.
@@ -241,6 +249,7 @@ A package (`.svpkg`) carries a project from another computer. It has:
 | Package signature | RSA-2048 PSS with SHA-256 | Windows CNG (TPM) to sign; .NET BCL to verify |
 | Password hashing | PBKDF2-HMAC-SHA256, 600,000 iterations, 16-byte salt, 32-byte hash, constant-time comparison | .NET BCL |
 | Build engine link | TLS with client certificates, from the administrator's own CA (RSA-3072, SHA-256) | OpenSSL in the distro to issue; .NET BCL and Docker to use |
+| Disc record signature | RSA-2048 PSS with SHA-256, over SHA-256 of the record's exact bytes | Windows CNG (TPM) to sign; .NET BCL to verify |
 | Hashes | SHA-256 | .NET BCL |
 | Randomness | OS CSPRNG | .NET `RandomNumberGenerator` |
 
@@ -341,7 +350,7 @@ Anything malformed is ignored, without a reply.
 ### 8.2 What the operator sees, and what never reaches the renderer
 
 - **Decrypted text only for opened files.** The renderer receives text only for files the operator opens, and closing a tab drops it. Search and builds decrypt inside the service; only matching lines (search) or build output leave it.
-- **Binary files and large text never reach the renderer.** The editor shows text up to 1 MiB. Anything else gets a details panel: kind, size, last change and SHA-256. No protocol operation returns binary content to any client; it leaves the service only through a build.
+- **Binary files and large text never reach the renderer.** The editor shows text up to 1 MiB. Anything else gets a details panel: kind, size, last change and SHA-256. No protocol operation returns binary content to any client; it leaves the service only through a build, or on an approved disc that the service writes itself.
 - **Files from disk** (*Add from disk*, *Replace from disk*, *Import a folder…*, and dropping on the explorer): the host shows the native dialog, or receives the dropped files unread, then reads and streams them to the service. The renderer never sees the path or the bytes. Windows may remember the last folder used in the dialog.
 - **Passwords:** the renderer passes them to the host, which passes them to the service and never stores or logs them. The page clears the fields after each try.
 
@@ -444,6 +453,44 @@ Builds are the one way vault content becomes plaintext files, and they are desig
 
 ---
 
+### 9.4 Discs: the second export path (owner request, 2026-11-10)
+
+A project's **saved** files can be written to a finalized, write-once disc. The design is `docs/disc-export-design.md`, and the record format is `contracts/disc-record-v1.md`.
+
+**Who may, checked by the service:**
+- **The burner** must be in *SourceVault Disc Burners*, read from the pipe's client token, never from a message.
+- **Two approvers** sign in on the burner's PC, each with their own Windows account and SourceVault password. The service checks each password. Wrong tries have their own lockout, 5 tries then 15 minutes, so a burner guessing can't lock an approver out of their own SourceVault. It then works out the account's groups with Windows' AuthZ API: the approver must be in *SourceVault Disc Approvers* and *SourceVault Operators*. They must be two different people, neither the burner.
+- **Limits:**
+  - approvals expire after 15 minutes;
+  - they cover only the snapshot that was prepared: a save to the project voids them;
+  - only one burn runs at a time;
+  - rewritable and used discs are refused.
+- **The approval message** is shown first: what's needed, and that the disc will hold readable source.
+
+**The disc:**
+- **Contents:** the files as plain files, plus `SOURCEVAULT-DISC.json`, which lists every file's SHA-256, the project, the burner, both approvers and the time.
+- **Signature:** the record is signed with RSA-PSS SHA-256 by the **disc signing key**, a sign-only TPM key kept apart from the decrypt-only vault and import keys.
+- **Writing:** the service writes the disc with IMAPI2 and closes it (`ForceMediaToBeClosed`).
+- **Read-back:** the service reads the disc back and checks it against the record before reporting success.
+- **Label:** the volume label carries both approvers' names.
+- **Checking elsewhere:** `SourceVault.Pack.exe verify-disc` checks a disc anywhere against the check code the administrator publishes. It refuses a changed or extra file, a changed record, and a key with the wrong code.
+
+**Plaintext on this PC:** each file streams from the vault snapshot into IMAPI, so the design doesn't stage plaintext as files. Whether IMAPI spools the image is a lab check.
+
+**The burn log:** every attempt is recorded, with who, what, and the result, in an encrypted `exports` store in the vault, checked at startup.
+
+**Be aware:**
+- **The disc is plaintext, and leaves SourceVault's control.** Finalizing stops changes to that disc, not copying it.
+- **The signature has limits.** It proves this PC's service made the record and that two approvers signed in. It doesn't prove who holds the disc. Without comparing the check code, it doesn't stop a look-alike disc signed by someone else's key.
+- **Approvers type their SourceVault password on the burner's PC.** Malware running as the burner could capture it (section 4.4).
+- **Not yet verified on a real drive:**
+  - IMAPI2 from the service's account;
+  - AuthZ resolution of domain accounts;
+  - the TPM disc key;
+  - a real burn and read-back.
+
+  These are lab rows.
+
 ## 10. Deployment and supply chain
 
 **Installation.** There are two routes:
@@ -492,7 +539,9 @@ SourceVault does **not** claim:
 - protection against rollback of a whole valid old vault;
 - recovery of a vault after a TPM clear or hardware loss;
 - that the SourceVault password resists malware running as the operator;
-- that demo mode protects anything: it is unencrypted by design.
+- that demo mode protects anything: it is unencrypted by design;
+- that a disc is protected once written, or that its signature identifies whoever holds it;
+- that approvals reflect an approver's intent: the service checks identities and passwords, not motives.
 
 ---
 
@@ -524,6 +573,9 @@ SourceVault does **not** claim:
 | TPM loss | None, by design (no recovery) | Accepted (owner, 2026-10-18) |
 | Every operator can read every project | Group membership, plus each operator's own password | Accepted (owner, 2026-10-18) |
 | The lockout counter resets when the service restarts | Only administrators can restart the service | Accepted; documented |
+| A finalized disc is readable source that leaves the PC | Burner group, two approvers with their own passwords, signed record naming all three, encrypted burn log | Accepted export path (owner request, 2026-11-10); lab rows pending |
+| Approvers' passwords are typed on the burner's PC | The password field is cleared after every try; nothing is stored or logged | Accepted; same limit as every SourceVault password |
+| IMAPI might spool the disc image to disk | Files are streamed from the snapshot; the lab row searches Temp for plaintext | Open: lab check |
 
 ---
 
@@ -562,6 +614,7 @@ This paper is then revised to version 1.1, with the audit's findings and their r
 | Editor lockdown, capture exclusion, offline work, passwords | `docs/editor-host.md`, `docs/editor-vault-design.md` |
 | Packages and Pack | `docs/package-import-design.md` |
 | Builds, engines, own images | `docs/files-history-builds-design.md`, `docs/cpp-build-design.md`, `docs/user-guide.md` |
+| Discs: approvals, signed record, verify-disc | `docs/disc-export-design.md`, `contracts/disc-record-v1.md` |
 | Offline deployment, build setup | `docs/deployment-kit-design.md`, `installer/Setup-Builds.ps1` |
 | Evidence and open items | `docs/status.md`, `docs/lab-checklist.md`, `docs/next-tasks.md` |
 

@@ -92,6 +92,7 @@ internal sealed class ScmHost
             var burners = OptionalGroup(DiscBurns.BurnersGroupName);
             var approvers = OptionalGroup(DiscBurns.ApproversGroupName);
             var passwords = new OperatorPasswords(catalog, OperatorPasswords.DefaultResetsFolder);
+            if (discKey is not null) VaultStatus.WriteDiscKey(discKey.ExportSubjectPublicKeyInfo());
             var discs = discKey is null || burners is null ? null
                 : new DiscBurns(catalog, new ImapiDiscWriter(), new TpmDiscSigner(discKey), new AuthzAccounts(), passwords, operators, approvers, PackageImports.ComputerName);
             using var self = WindowsIdentity.GetCurrent();

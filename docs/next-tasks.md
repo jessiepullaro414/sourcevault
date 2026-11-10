@@ -8,6 +8,12 @@ Updated 2026-10-18. The vault service, encrypted store, editor vault mode, impor
 
 ## Development work
 
+- **Write a project to a finalized disc (owner request, 2026-11-10):** built ([disc-export-design.md](disc-export-design.md), [disc-record-v1.md](../contracts/disc-record-v1.md)).
+  - **The rules:** one burner in *SourceVault Disc Burners*, and two approvers in *SourceVault Disc Approvers* who sign in with their own SourceVault passwords.
+  - **What's written:** plain files plus a record signed by a new sign-only TPM key, then the disc is closed, read back and checked. `verify-disc` in Pack checks it anywhere.
+  - **Status:** tested in process only. IMAPI2 from the service account, AuthZ and the TPM disc key are lab rows.
+  - **This is a second export path,** next to builds. The whitepaper records it.
+
 - **Set up builds in guided setup (2026-10-20):** option 6 runs the package's `Setup-Builds.ps1`. It covers engines, containers, TLS, `build.json` and access, with checked downloads instead of the drive. Docker's two static archives now have their SHA-256 recorded in `kit-sources.json` (trust on first use, from the dev PC's downloads). Not run yet: lab row in the checklist.
 - **Own build images (2026-10-20):** `-OwnerImageId` in both container scripts ([cpp-build-design.md](cpp-build-design.md), section 1); lab row in the checklist. **Containerd image store (2026-10-20):** done, unverified on a real `docker load`. Docker 29's containerd store gives an image its manifest digest as its ID. So the `-ImageArchive` check now accepts the pinned configuration digest or the pinned manifest digest (Linux: also the index digest), and nothing else. `Save-RegistryImage.ps1` now writes an OCI `index.json` with the registry's exact manifest next to `manifest.json`, so the containerd store keeps that digest (drives built earlier must be rebuilt). See [cpp-build-design.md](cpp-build-design.md), section 1; lab row in the checklist. The kit half for owner images is still to build. Its archive check must read `index.json` for a containerd-store ID.
 

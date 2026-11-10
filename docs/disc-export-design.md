@@ -30,9 +30,9 @@
    - checks the disc: write-once media only (CD-R, DVD±R, DVD±R DL, BD-R), blank, and big enough;
    - fixes the project's **current saved snapshot**. The disc gets exactly that, and nothing else.
 
-   The service returns a burn id, the number of files, the size, and the volume label it will use.
+   The service returns a burn id, the number of files and the size. The volume label is made at write time, from the approvers' names.
 3. **Two approvals.** On the same screen, each approver types their Windows account (for example `PC\alice`) and their own SourceVault password. For each one, the service checks:
-   - the password, against that account's stored hash. Wrong tries count towards that account's normal lockout (5 tries, 15 minutes);
+   - the password, against that account's stored hash. Wrong tries count toward a **separate approval lockout** for that account: 5 tries, then 15 minutes. A burner guessing can lock approvals by that person, but never their own SourceVault unlock;
    - membership of *SourceVault Disc Approvers* and *SourceVault Operators*, resolved for that account (section 3);
    - that it is not the burner, and not the first approver.
 
@@ -76,7 +76,7 @@ The approver isn't the Windows user running the editor, so there is no token for
 
 ## 4. The signed record on the disc
 
-Files written at the disc's root, next to the project's files, which go in a folder named after the project:
+Files written at the disc's root, next to the project's files, which go in the folder `source\` at their vault paths (a fixed name, so a project name never has to fit a disc file system's rules):
 
 | File | Content |
 |---|---|
@@ -146,7 +146,7 @@ If the burner isn't a disc burner, the screen shows the message with *You are no
 | Operation | Request body | Success body |
 |---|---|---|
 | ListDiscDrives | `capability` | `allowed` (caller is a disc burner), `checkCode`, `drives[]`: `driveId`, `name`, `media` (`type`, `writeOnce`, `blank`, `freeBytes`) |
-| BeginDiscBurn | `capability`, `projectId`, `driveId` | `burnId`, `fileCount`, `totalBytes`, `volumeLabel` |
+| BeginDiscBurn | `capability`, `projectId`, `driveId` | `burnId`, `fileCount`, `totalBytes` |
 | ApproveDiscBurn | `capability`, `burnId`, `account`, `password` | `approver` (account name), `approvals` (0–2) |
 | StartDiscBurn | `capability`, `burnId` | `{}`, then poll |
 | DiscBurnStatus | `capability`, `burnId` | `state` (`waiting`, `writing`, `closing`, `verifying`, `done`, `failed`), `progress` (0–100), `reason`, `discId`, `verified` |
@@ -205,3 +205,19 @@ The password codes are reused for approvers: `WrongPassword`, `PasswordLocked`, 
 5. Pack `verify-disc`.
 6. Setup: groups, `-AddDiscBurner` and `-AddDiscApprover`, provisioning the disc key, and `-Status` lines.
 7. Docs: user guide, protocol, whitepaper (a new export path, non-claims), lab rows.
+
+## 11. Status (2026-11-10)
+
+**Built, in process:**
+- the service flow, with a fake drive, a software signing key and fake accounts in tests;
+- the record format and `verify-disc`;
+- the editor screen and the demo simulation;
+- setup: groups, people, the disc key, and `-Status`.
+
+**Tests:** endpoints 60 (4 for discs), web 90 (2 for discs), editor host 71 (1 for discs). The editor screen was also checked in the demo editor.
+
+**Not yet verified,** and needing the lab run with a disc drive:
+- IMAPI2 from the service account;
+- AuthZ group resolution;
+- the TPM disc key;
+- a real burn and read-back.

@@ -106,7 +106,11 @@ internal sealed class DiscBurns(ProjectCatalog catalog, IDiscWriter writer, IDis
         if (!isBurner) throw new DiscBurnException("NotDiscBurner");
         lock (gate)
         {
-            if (current is { Finished: false } busy && !Expired(busy)) throw new DiscBurnException("DiscBusy");
+            if (current is { Finished: false } busy)
+            {
+                if (!Expired(busy)) throw new DiscBurnException("DiscBusy");
+                busy.State = "failed"; busy.Reason = "ApprovalExpired"; Log(busy, null); // a stale burn, never started
+            }
             var drive = Drives().FirstOrDefault(d => d.DriveId == driveId) ?? throw new DiscBurnException("NoMedia");
             var media = drive.Media ?? throw new DiscBurnException("NoMedia");
             if (!media.WriteOnce) throw new DiscBurnException("MediaNotWriteOnce");
@@ -174,6 +178,7 @@ internal sealed class DiscBurns(ProjectCatalog catalog, IDiscWriter writer, IDis
             var burn = Owned(caller, burnId);
             if (burn.State != "waiting") throw new DiscBurnException("InvalidRequest"); // a write that has started can't be stopped safely
             burn.State = "cancelled";
+            Log(burn, null);
         }
     }
 
@@ -190,7 +195,7 @@ internal sealed class DiscBurns(ProjectCatalog catalog, IDiscWriter writer, IDis
     {
         var burn = current;
         if (burn is null || burn.BurnId != burnId || !burn.Burner.Equals(caller)) throw new KeyNotFoundException();
-        if (!burn.Finished && burn.State == "waiting" && Expired(burn)) { burn.State = "failed"; burn.Reason = "ApprovalExpired"; }
+        if (!burn.Finished && burn.State == "waiting" && Expired(burn)) { burn.State = "failed"; burn.Reason = "ApprovalExpired"; Log(burn, null); }
         return burn;
     }
 
@@ -255,7 +260,7 @@ internal sealed class DiscBurns(ProjectCatalog catalog, IDiscWriter writer, IDis
         return false;
     }
 
-    // Every attempt that reached the writer or was refused at Start is recorded, encrypted, with who and what.
+    // Every attempt is recorded, encrypted, with who and what: written, failed, refused at Start, cancelled or expired.
     private void Log(Burn burn, DiscRecord? record)
     {
         lock (logGate)
