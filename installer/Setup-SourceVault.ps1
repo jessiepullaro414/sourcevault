@@ -12,6 +12,8 @@
 #   Setup-SourceVault.ps1 -AddOperator PC\alice       let people use SourceVault (they sign out and back in once)
 #   Setup-SourceVault.ps1 -RemoveOperator PC\alice    take that away (it applies when they next sign out)
 #   Setup-SourceVault.ps1 -ResetPassword PC\alice     forgotten SourceVault password: they choose a new one at their next unlock
+#   Setup-SourceVault.ps1 -AddDiscBurner PC\carol      may write projects to finalized discs (with two approvers; signs out once)
+#   Setup-SourceVault.ps1 -AddDiscApprover PC\alice    may approve discs (must also be an operator); -RemoveDiscBurner / -RemoveDiscApprover
 #   Setup-SourceVault.ps1 -VaultRoot K:\SourceVault\vault   new install with the vault on another local drive
 #                                                     (chosen at install only; -Update keeps the configured location)
 #
@@ -28,7 +30,11 @@ param(
     [string]$VaultRoot,
     [string[]]$AddOperator,
     [string[]]$RemoveOperator,
-    [string[]]$ResetPassword
+    [string[]]$ResetPassword,
+    [string[]]$AddDiscBurner,
+    [string[]]$RemoveDiscBurner,
+    [string[]]$AddDiscApprover,
+    [string[]]$RemoveDiscApprover
 )
 # No options at all: the guided mode (a menu), as from "SourceVault Setup.cmd".
 $guided = $PSBoundParameters.Count -eq 0
@@ -39,6 +45,9 @@ $installRoot = Join-Path $env:ProgramFiles 'SourceVault'
 $serviceName = 'SourceVault'
 $serviceAccount = 'NT SERVICE\SourceVault'
 $groupName = 'SourceVault Operators'
+# Writing projects to finalized discs (docs/disc-export-design.md): who may burn, and who may approve.
+$burnersGroup = 'SourceVault Disc Burners'
+$approversGroup = 'SourceVault Disc Approvers'
 $keyName = 'SourceVault.Lab.Service01'
 $dataDir = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'SourceVault'
 $defaultVaultRoot = Join-Path $dataDir 'vault'
@@ -240,6 +249,19 @@ function Show-Status {
         $members = @(Get-LocalGroupMember -Group $groupName | ForEach-Object Name)
         Ok "operators: $(if ($members) { $members -join ', ' } else { '(none)' })"
     } else { Warn "local group '$groupName' is missing" }
+    $burners = @(Get-LocalGroupMember -Group $burnersGroup -ErrorAction SilentlyContinue | ForEach-Object Name)
+    $approvers = @(Get-LocalGroupMember -Group $approversGroup -ErrorAction SilentlyContinue | ForEach-Object Name)
+    $discKey = Join-Path $statusDir 'disc-key.der'
+    if (!(Get-LocalGroup -Name $burnersGroup -ErrorAction SilentlyContinue)) { Ok 'disc writing: not set up (run setup -Update)' }
+    elseif (!$burners) { Ok 'disc writing: nobody may write discs (add burners with -AddDiscBurner)' }
+    else {
+        Ok "disc burners: $($burners -join ', '); disc approvers: $(if ($approvers) { $approvers -join ', ' } else { '(none)' })"
+        if ($approvers.Count -lt 2) { Warn 'discs need two approvers, and fewer than two people can approve: add them with -AddDiscApprover' }
+        if (Test-Path -LiteralPath $discKey) {
+            $hex = -join ([Security.Cryptography.SHA256]::Create().ComputeHash([IO.File]::ReadAllBytes($discKey))[0..11] | ForEach-Object { $_.ToString('X2') })
+            Ok "disc signing key check code: $(($hex -split '(.{4})' | Where-Object { $_ }) -join '-') (publish it to whoever checks discs: SourceVault.Pack.exe verify-disc)"
+        } else { Warn 'no disc signing key yet: run setup -Update (it creates one), then start the service' }
+    }
     $check = Invoke-ServiceTool 'vault-root-check'
     $where = [string](($check.Output -split "`r?`n" | Where-Object { $_ -like 'vaultRoot=*' }) -replace '^vaultRoot=(.*); trusted=.*$', '$1')
     if ($check.Exit -eq 0) { Ok "vault folder $where; permissions trusted" }
@@ -345,6 +367,33 @@ function Remove-Operators([string[]]$names) {
     }
 }
 
+# ---- disc writing (docs/disc-export-design.md) ----------------------------------------------------------------------
+# Burners are checked from their Windows sign-in token, so they sign out and back in once; approvers are looked up by
+# the service when they approve, so no sign-out is needed. An Active Directory OU can't be a member: add the AD group
+# that holds the OU's people instead.
+function Add-DiscPeople([string]$group, [string[]]$names, [string]$role) {
+    if (!(Get-LocalGroup -Name $group -ErrorAction SilentlyContinue)) { Fail "The local group '$group' is missing. Run setup -Update first." }
+    $added = @()
+    foreach ($name in $names | Where-Object { $_ }) {
+        try { $sid = (New-Object Security.Principal.NTAccount($name.Trim())).Translate([Security.Principal.SecurityIdentifier]).Value }
+        catch { Warn "'$name' is not a Windows account or group on this computer or its domain (use COMPUTER\name or DOMAIN\name)"; continue }
+        if (Get-LocalGroupMember -Group $group | Where-Object { $_.SID.Value -eq $sid }) { Ok "$name is already a disc $role"; continue }
+        Add-LocalGroupMember -Group $group -Member $name.Trim(); $added += $name.Trim(); Ok "$name is now a disc $role"
+    }
+    if ($added -and $group -eq $burnersGroup) {
+        Write-Host ''
+        Write-Host "   >>> SIGN OUT AND BACK IN: $($added -join ', ') must sign out of Windows and back in once before Write to disc allows them." -ForegroundColor Yellow
+    }
+    if ($added -and $group -eq $approversGroup) { Write-Host '   Approvers must also be SourceVault operators, and must have chosen their SourceVault password (open the editor once).' }
+}
+function Remove-DiscPeople([string]$group, [string[]]$names, [string]$role) {
+    foreach ($name in $names | Where-Object { $_ }) {
+        $member = Get-LocalGroupMember -Group $group -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $name.Trim() }
+        if (!$member) { Warn "'$name' is not a disc $role"; continue }
+        Remove-LocalGroupMember -Group $group -Member $member; Ok "$name is no longer a disc $role"
+    }
+}
+
 # ---- SourceVault passwords ------------------------------------------------------------------------------------------
 # The service keeps the hashes inside the encrypted vault; an administrator can't read or set a password, only reset it:
 # the person then chooses a new one at their next unlock. A reset also lifts a lockout after wrong tries.
@@ -413,6 +462,7 @@ function Start-Guided {
         Write-Host '   3  Stop people using SourceVault'
         Write-Host '   4  Allow packages from another computer (SourceVault Pack)'
         Write-Host '   7  Reset someone''s SourceVault password (forgotten, or locked out)'
+        Write-Host '   8  Disc writing: add or remove burners and approvers'
         if ($hasPayload) { Write-Host '   5  Update SourceVault from this setup package'; Write-Host '   6  Set up Docker builds (engines, build containers, targets)' }
         Write-Host '   Q  Quit'
         switch (Read-Choice '   Choose') {
@@ -421,6 +471,13 @@ function Start-Guided {
             '3' { Step 'Stop people using SourceVault'; Remove-Operators ((Read-Choice '   Windows accounts, comma-separated') -split ',') }
             '4' { Step 'Allow packages from another computer'; $f = Read-Choice '   Path of its SourceVault-sender-<computer>.json file'; if ($f) { Register-Sender $f.Trim('"') } }
             '7' { Step 'Reset a SourceVault password'; Reset-Passwords ((Read-Choice '   Windows accounts, comma-separated (e.g. PC\alice)') -split ',') }
+            '8' {
+                Step 'Disc writing: burners and approvers'
+                Write-Host '   Burners may write a project to a finalized disc; two approvers (operators, never the burner) must approve each disc.'
+                $what = Read-Choice '   Add a burner (b), add an approver (a), remove a burner (rb), remove an approver (ra)'
+                $who = (Read-Choice '   Windows accounts or groups, comma-separated (e.g. PC\alice, DOMAIN\Disc Burners)') -split ','
+                switch ($what) { 'b' { Add-DiscPeople $burnersGroup $who 'burner' } 'a' { Add-DiscPeople $approversGroup $who 'approver' } 'rb' { Remove-DiscPeople $burnersGroup $who 'burner' } 'ra' { Remove-DiscPeople $approversGroup $who 'approver' } default { Write-Host '   Nothing changed.' } }
+            }
             '5' { if ($hasPayload) { $script:Update = [switch]$true; return } }
             '6' { if ($hasPayload) { Step 'Set up Docker builds'; Invoke-BuildSetup } }
             { $_ -in 'q', 'Q', '' } { exit 0 }
@@ -438,6 +495,15 @@ if ($Status) {
 if ($ResetPassword) {
     if (!(Test-Admin)) { Fail 'Run -ResetPassword from an elevated PowerShell (Run as administrator).' }
     Step 'Reset SourceVault passwords'; Reset-Passwords $ResetPassword; return
+}
+if ($AddDiscBurner -or $RemoveDiscBurner -or $AddDiscApprover -or $RemoveDiscApprover) {
+    if (!(Test-Admin)) { Fail 'Run the disc options from an elevated PowerShell (Run as administrator).' }
+    Step 'Disc writing: burners and approvers'
+    if ($AddDiscBurner) { Add-DiscPeople $burnersGroup $AddDiscBurner 'burner' }
+    if ($RemoveDiscBurner) { Remove-DiscPeople $burnersGroup $RemoveDiscBurner 'burner' }
+    if ($AddDiscApprover) { Add-DiscPeople $approversGroup $AddDiscApprover 'approver' }
+    if ($RemoveDiscApprover) { Remove-DiscPeople $approversGroup $RemoveDiscApprover 'approver' }
+    return
 }
 if ($AddOperator -or $RemoveOperator) {
     if (!(Test-Admin)) { Fail 'Run -AddOperator / -RemoveOperator from an elevated PowerShell (Run as administrator).' }
@@ -477,6 +543,13 @@ if (!(Get-LocalGroup -Name $groupName -ErrorAction SilentlyContinue)) {
 } else { Ok 'already exists' }
 Add-Operators $Operators
 
+Step 'Disc writing groups'
+# Empty until an administrator adds people (-AddDiscBurner, -AddDiscApprover); without burners nobody can write a disc.
+foreach ($g in @(@($burnersGroup, 'May write SourceVault projects to disc'), @($approversGroup, 'May approve SourceVault discs'))) {
+    if (!(Get-LocalGroup -Name $g[0] -ErrorAction SilentlyContinue)) { New-LocalGroup -Name $g[0] -Description $g[1] | Out-Null; Ok "created '$($g[0])' (empty)" }
+    else { Ok "'$($g[0])' already exists" }
+}
+
 Step "Program files ($installRoot)"
 if ($Update) { Stop-BuildService; Stop-VaultService } else { if (Test-Path -LiteralPath $installRoot) { Fail "$installRoot already exists without a registered service. Remove it, then run setup again." }; New-Item -ItemType Directory -Path $installRoot | Out-Null }
 Copy-Payload -keepConfig ([bool]$Update)
@@ -513,6 +586,14 @@ $result = Invoke-ServiceOnce 'provision-import-key'
 if ($result.Win32 -eq 0) { Ok "created decrypt-only import key $keyName.Import under $serviceAccount (export refused, test round trip passed)" }
 elseif ($result.Win32 -eq 1066 -and $result.Specific -eq 1) { Ok 'import key already exists (kept)' }
 else { Warn "the package import key could not be created (Win32 $($result.Win32), code $($result.Specific)); package import stays unavailable" }
+
+Step 'TPM key for disc signing'
+# A separate sign-only key that signs the record on every disc written (docs/disc-export-design.md, section 4).
+# Optional: without it, writing discs is unavailable and everything else works.
+$result = Invoke-ServiceOnce 'provision-disc-key'
+if ($result.Win32 -eq 0) { Ok "created sign-only disc signing key $keyName.Disc under $serviceAccount (export refused, test signature verified)" }
+elseif ($result.Win32 -eq 1066 -and $result.Specific -eq 1) { Ok 'disc signing key already exists (kept)' }
+else { Warn "the disc signing key could not be created (Win32 $($result.Win32), code $($result.Specific)); writing discs stays unavailable" }
 
 Step "Vault folder ($VaultRoot)"
 $serviceSid = ([Security.Principal.NTAccount]$serviceAccount).Translate([Security.Principal.SecurityIdentifier]).Value

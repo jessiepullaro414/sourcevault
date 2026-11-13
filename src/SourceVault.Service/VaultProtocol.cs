@@ -17,6 +17,7 @@ internal sealed class ConnectionState
     internal uint WindowsSession;
     internal string? Actor; // the operator's account name, recorded in encrypted file history
     internal System.Security.Principal.SecurityIdentifier? User; // the operator, from the pipe's client token (never the message)
+    internal bool DiscBurner; // the same token holds SourceVault Disc Burners (docs/disc-export-design.md)
     // A package being uploaded, at most one per connection: spooled to staging\ as it arrives (ciphertext), hashed on the way.
     internal FileStream? PackageSpool;
     internal string? PackageFolder;
@@ -71,6 +72,7 @@ internal sealed class VaultProtocol
     private readonly ProjectCatalog catalog;
     private readonly BuildCoordinator? builds; // null: no build service configured, so build operations are Unavailable
     private readonly PackageImports? packages; // null: no import key provisioned, so package import is Unavailable
+    private readonly DiscBurns? discs; // null: no disc signing key, so disc burning is DiscUnavailable
     private readonly TimeProvider clock;
     // Projects created or verified in this process. Only the service creates projects, so this is authoritative.
     private readonly ConcurrentDictionary<Guid, bool> projects = new();
@@ -81,9 +83,11 @@ internal sealed class VaultProtocol
     private readonly OperatorPasswords? passwords; // null: in-process tests that don't exercise passwords
 
     internal VaultProtocol(ProjectCatalog catalog, IEnumerable<ProjectInfo> verified, TimeProvider? clock = null, BuildCoordinator? builds = null, PackageImports? packages = null,
-        IEnumerable<(Guid ProjectId, string Name)>? offline = null, Action<int, IEnumerable<Guid>>? status = null, OperatorPasswords? passwords = null)
+        IEnumerable<(Guid ProjectId, string Name)>? offline = null, Action<int, IEnumerable<Guid>>? status = null, OperatorPasswords? passwords = null,
+        DiscBurns? discs = null)
     {
         this.passwords = passwords;
+        this.discs = discs;
         this.catalog = catalog;
         this.builds = builds;
         this.packages = packages;
@@ -178,6 +182,13 @@ internal sealed class VaultProtocol
                 "GetBuildStatus" => GetBuildStatus(request),
                 "ListBuilds" => ListBuilds(request),
                 "OpenBuildLog" => OpenBuildLog(request),
+                "ListDiscDrives" or "BeginDiscBurn" or "ApproveDiscBurn" or "StartDiscBurn" or "DiscBurnStatus" or "CancelDiscBurn" when discs is null => Error(request, "DiscUnavailable"),
+                "ListDiscDrives" => ListDiscDrives(request, state, discs!),
+                "BeginDiscBurn" => BeginDiscBurn(request, state, discs!),
+                "ApproveDiscBurn" => ApproveDiscBurn(request, state, discs!),
+                "StartDiscBurn" => StartDiscBurn(request, state, discs!),
+                "DiscBurnStatus" => DiscBurnStatus(request, state, discs!),
+                "CancelDiscBurn" => CancelDiscBurn(request, state, discs!),
                 _ => Error(request, "UnsupportedOperation"),
             };
         }
@@ -187,6 +198,7 @@ internal sealed class VaultProtocol
         catch (StoreLimitException) { return Error(request, "LimitExceeded"); } // count, size or free space (any-file design)
         catch (NotTextException) { return Error(request, "NotText"); }
         catch (RequestException e) { return Error(request, e.Code); }
+        catch (DiscBurnException e) { return Error(request, e.Code); }
         catch (SourceVault.Build.BuildServiceUnavailableException) { return Error(request, "Unavailable"); }
         // Input is validated before the store is called, so anything the store or catalog rejects here is an
         // integrity, availability or key failure of the vault itself.
@@ -423,6 +435,89 @@ internal sealed class VaultProtocol
     }
 
     // ---- builds (docs/files-history-builds-design.md, section 4) -----------------------------------------------------
+    // ---- discs (docs/disc-export-design.md): a finalized disc of a project, with two approvers ---------------------------
+    private ProtocolResponse ListDiscDrives(ParsedRequest request, ConnectionState state, DiscBurns discs)
+    {
+        Require(request.Body, "capability");
+        // A caller who isn't a disc burner learns only that, and nothing about the drives.
+        var drives = state.DiscBurner ? discs.Drives() : [];
+        var checkCode = discs.CheckCode;
+        return Ok(request, w =>
+        {
+            w.WriteBoolean("allowed", state.DiscBurner);
+            w.WriteString("checkCode", checkCode);
+            w.WriteStartArray("drives");
+            foreach (var d in drives)
+            {
+                w.WriteStartObject();
+                w.WriteString("driveId", d.DriveId);
+                w.WriteString("name", d.Name);
+                if (d.Media is { } m)
+                {
+                    w.WriteStartObject("media");
+                    w.WriteString("type", m.Type); w.WriteBoolean("writeOnce", m.WriteOnce); w.WriteBoolean("blank", m.Blank); w.WriteNumber("freeBytes", m.FreeBytes);
+                    w.WriteEndObject();
+                }
+                else w.WriteNull("media");
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+        });
+    }
+
+    private ProtocolResponse BeginDiscBurn(ParsedRequest request, ConnectionState state, DiscBurns discs)
+    {
+        Require(request.Body, "capability", "projectId", "driveId");
+        var id = Id(request.Body, "projectId");
+        var driveId = Text(request.Body, "driveId");
+        if (driveId.Length is 0 or > 512 || driveId.Any(char.IsControl)) throw new RequestException("InvalidRequest");
+        if (!state.DiscBurner) throw new DiscBurnException("NotDiscBurner"); // before anything touches the project or a drive
+        if (!projects.ContainsKey(id) || failed.ContainsKey(id)) throw new KeyNotFoundException();
+        var name = catalog.Verify().Projects.FirstOrDefault(p => p.ProjectId == id)?.Name ?? throw new KeyNotFoundException();
+        var (burnId, fileCount, totalBytes) = discs.Begin(state.User!, state.DiscBurner, id, name, driveId);
+        return Ok(request, w => { w.WriteString("burnId", burnId.ToString("D")); w.WriteNumber("fileCount", fileCount); w.WriteNumber("totalBytes", totalBytes); });
+    }
+
+    private ProtocolResponse ApproveDiscBurn(ParsedRequest request, ConnectionState state, DiscBurns discs)
+    {
+        Require(request.Body, "capability", "burnId", "account", "password");
+        var burnId = Id(request.Body, "burnId");
+        var account = Text(request.Body, "account");
+        if (account.Length is 0 or > 256 || account.Any(char.IsControl)) throw new RequestException("InvalidRequest");
+        var password = PasswordText(request.Body, "password") ?? throw new RequestException("InvalidRequest");
+        var (approver, approvals) = discs.Approve(state.User!, burnId, account, password);
+        return Ok(request, w => { w.WriteString("approver", approver); w.WriteNumber("approvals", approvals); });
+    }
+
+    private ProtocolResponse StartDiscBurn(ParsedRequest request, ConnectionState state, DiscBurns discs)
+    {
+        Require(request.Body, "capability", "burnId");
+        discs.Start(state.User!, state.DiscBurner, Id(request.Body, "burnId"));
+        return Ok(request, _ => { });
+    }
+
+    private ProtocolResponse DiscBurnStatus(ParsedRequest request, ConnectionState state, DiscBurns discs)
+    {
+        Require(request.Body, "capability", "burnId");
+        var s = discs.Status(state.User!, Id(request.Body, "burnId"));
+        return Ok(request, w =>
+        {
+            w.WriteString("state", s.State);
+            w.WriteNumber("progress", s.Progress);
+            w.WriteNumber("approvals", s.Approvals);
+            if (s.Reason is null) w.WriteNull("reason"); else w.WriteString("reason", s.Reason);
+            if (s.DiscId is null) w.WriteNull("discId"); else w.WriteString("discId", s.DiscId.Value.ToString("D"));
+            w.WriteBoolean("verified", s.Verified);
+        });
+    }
+
+    private ProtocolResponse CancelDiscBurn(ParsedRequest request, ConnectionState state, DiscBurns discs)
+    {
+        Require(request.Body, "capability", "burnId");
+        discs.Cancel(state.User!, Id(request.Body, "burnId"));
+        return Ok(request, _ => { });
+    }
+
     private ProtocolResponse ListBuildTargets(ParsedRequest request)
     {
         Require(request.Body, "capability");

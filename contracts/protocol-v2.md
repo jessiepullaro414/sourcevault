@@ -261,3 +261,31 @@ The service checks it against the operator taken from the pipe's client token, b
 **Lockout:** the counter is kept in service memory per operator, across connections.
 
 **Reset:** an administrator writes `%ProgramData%\SourceVault\password-resets\<SID>.json` (`{"resetId": "<uuid>"}`, administrators only; the service reads it). Each reset id is honoured once, and it also lifts a lockout.
+
+## Addition: writing a project to a finalized disc (owner request, 2026-11-10)
+
+Design: [disc-export-design.md](../docs/disc-export-design.md). Record format: [disc-record-v1.md](disc-record-v1.md).
+
+**Who may:**
+- **The burner** must be in *SourceVault Disc Burners*, read from the pipe's client token.
+- **Two different approvers**, neither the burner, each sign in with `account` and their SourceVault `password`. Each must be in *SourceVault Disc Approvers* and *SourceVault Operators*, resolved with AuthZ.
+
+| Operation | Request body | Success body |
+|---|---|---|
+| ListDiscDrives | `capability` | `allowed`, `checkCode`, `drives[]`: `driveId`, `name`, `media` (`type`, `writeOnce`, `blank`, `freeBytes`) or null. A non-burner gets `allowed: false` and no drives |
+| BeginDiscBurn | `capability`, `projectId`, `driveId` (at most 512 characters) | `burnId`, `fileCount`, `totalBytes` |
+| ApproveDiscBurn | `capability`, `burnId`, `account` (at most 256), `password` | `approver`, `approvals` (1 or 2) |
+| StartDiscBurn | `capability`, `burnId` | `{}`; poll DiscBurnStatus |
+| DiscBurnStatus | `capability`, `burnId` | `state` (`waiting`, `writing`, `closing`, `verifying`, `done`, `failed`, `cancelled`), `progress`, `approvals`, `reason`, `discId`, `verified` |
+| CancelDiscBurn | `capability`, `burnId` | `{}` (only while waiting) |
+
+**New codes:**
+- `NotDiscBurner`, `NotDiscApprover`, `SameAsBurner`, `AlreadyApproved`;
+- `ApprovalsMissing`, `ApprovalExpired` (approvals last 15 minutes), `ProjectChanged`;
+- `DiscUnavailable`, `DiscBusy` (one burn at a time per PC);
+- `NoMedia`, `MediaNotWriteOnce`, `MediaNotBlank`, `MediaTooSmall`;
+- `BurnFailed`, `VerifyFailed` (as a `reason`).
+
+`WrongPassword`, `PasswordLocked` and `PasswordNotSet` are reused for approvers. Wrong tries count toward a separate approval lockout for that approver (5 tries, 15 minutes), never toward their own session lockout.
+
+**A burn belongs to the burner's SID,** so the burner can reconnect to it. A waiting burn expires after 30 minutes. Every attempt is recorded in the encrypted `exports\` store, which is checked at startup like `accounts\`.

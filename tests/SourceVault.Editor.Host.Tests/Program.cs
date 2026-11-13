@@ -753,6 +753,22 @@ Check("bridge: import a folder and dropped files carry names only; the dropped i
     Assert(BridgePolicy.BuildProgress(Guid.Parse(Guid1), 5, 10) == $"{{\"type\":\"sourcevault.vault.progress\",\"requestId\":\"{Guid1}\",\"done\":5,\"total\":10}}", "progress carries bytes only");
 });
 
+Check("bridge: discs: exact operations; approvers' accounts and passwords bounded, no control characters", () =>
+{
+    var burn = Guid.NewGuid().ToString("D");
+    Assert(Parsed(Req("listDiscDrives", "{}")) is { Operation: VaultOperation.ListDiscDrives }, "list");
+    Assert(Parsed(Req("beginDiscBurn", "{\"projectId\":\"" + Guid.NewGuid().ToString("D") + "\",\"driveId\":\"\\\\\\\\?\\\\scsi#cdrom&ven_x\"}")) is { Operation: VaultOperation.BeginDiscBurn, DriveId: @"\\?\scsi#cdrom&ven_x" }, "begin, with an IMAPI drive id");
+    Assert(Parsed(Req("approveDiscBurn", "{\"burnId\":\"" + burn + "\",\"account\":\"PC\\\\alice\",\"password\":\"a long synthetic phrase\"}")) is { Operation: VaultOperation.ApproveDiscBurn, Account: @"PC\alice", Password: "a long synthetic phrase" }, "approve");
+    foreach (var op in new[] { "startDiscBurn", "discBurnStatus", "cancelDiscBurn" })
+        Assert(Parsed(Req(op, "{\"burnId\":\"" + burn + "\"}")) is { BurnId: var b } && b == Guid.Parse(burn), op);
+    Rejects(Vault, Req("approveDiscBurn", "{\"burnId\":\"" + burn + "\",\"account\":\"\",\"password\":\"x\"}"),
+        Req("approveDiscBurn", "{\"burnId\":\"" + burn + "\",\"account\":\"PC\\\\al\\u0000ice\",\"password\":\"x\"}"),
+        Req("approveDiscBurn", "{\"burnId\":\"" + burn + "\",\"account\":\"" + new string('a', BridgePolicy.MaxAccountChars + 1) + "\",\"password\":\"x\"}"),
+        Req("approveDiscBurn", "{\"burnId\":\"" + burn + "\",\"account\":\"PC\\\\alice\"}"),
+        Req("beginDiscBurn", "{\"projectId\":\"" + Guid.NewGuid().ToString("D") + "\",\"driveId\":\"" + new string('d', BridgePolicy.MaxDriveIdChars + 1) + "\"}"),
+        Req("startDiscBurn", "{\"burnId\":\"not-an-id\"}"), Req("startDiscBurn", "{}"));
+});
+
 Check("bridge: the SourceVault password: exact operations, 1-256 characters, no control characters", () =>
 {
     Assert(Parsed(Req("unlockWithPassword", "{\"password\":\"a long synthetic phrase\"}")) is { Operation: VaultOperation.UnlockWithPassword, Password: "a long synthetic phrase" }, "unlock");

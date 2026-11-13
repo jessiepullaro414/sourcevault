@@ -4,17 +4,20 @@ using SourceVault.Pack;
 // SourceVault Pack (command line): on the computer where the code lives, encrypts a project folder for one vault PC.
 //   SourceVault.Pack.exe init [--out <sender file>]
 //   SourceVault.Pack.exe <folder> --to <recipient file> --out <file.svpkg> [--name "<suggested project name>"] [--exclude <folder name>]... [--dry-run] [--yes]
+//   SourceVault.Pack.exe verify-disc <drive or folder> --check-code <code>   checks a disc written by a SourceVault PC
 // "SourceVault Pack.exe" is the same, in a window. Prints paths, counts and fingerprints only, never file content.
 // The folder is only read; nothing is deleted.
 try
 {
     if (args.Length >= 1 && args[0] == "init") return Commands.Init(args[1..], Console.Out);
+    if (args.Length >= 1 && args[0] == "verify-disc") return Commands.VerifyDisc(args[1..], Console.Out);
     return Commands.Pack(args, Console.Out, Console.ReadLine);
 }
 catch (SenderKeyException e) { Console.Error.WriteLine(e.Message); return 3; }
 catch (KeyFileException e) { Console.Error.WriteLine("The recipient file is not usable: " + e.Message); return 2; }
 catch (PackException e) { Console.Error.WriteLine(e.Message); return 1; }
 catch (DirectoryNotFoundException) { Console.Error.WriteLine("Folder not found."); return 2; }
+catch (DiscRecordException e) { Console.Error.WriteLine("NOT VERIFIED: " + e.Message); return 4; }
 
 namespace SourceVault.Pack
 {
@@ -22,7 +25,27 @@ namespace SourceVault.Pack
     {
         internal const string Usage =
             "usage: SourceVault.Pack.exe init [--out <sender file>]\n" +
-            "       SourceVault.Pack.exe <folder> --to <recipient file> --out <file.svpkg> [--name \"<project name>\"] [--exclude <folder name>]... [--dry-run] [--yes]";
+            "       SourceVault.Pack.exe <folder> --to <recipient file> --out <file.svpkg> [--name \"<project name>\"] [--exclude <folder name>]... [--dry-run] [--yes]\n" +
+            "       SourceVault.Pack.exe verify-disc <drive or folder> --check-code <code>";
+
+        /// <summary>
+        /// Checks a disc written by a SourceVault PC (docs/disc-export-design.md, section 4): the key's check code, the
+        /// signature, and every file against the signed record. Then prints who wrote and approved it. No TPM needed.
+        /// </summary>
+        internal static int VerifyDisc(string[] args, TextWriter output)
+        {
+            if (args is not [var root, "--check-code", var code]) throw new PackException(Usage);
+            if (!Directory.Exists(root)) throw new DirectoryNotFoundException();
+            var verified = DiscRecords.Verify(Path.GetFullPath(root), code);
+            var r = verified.Record;
+            output.WriteLine("VERIFIED: the record's signature is valid, its key has the check code you gave, and every file matches.");
+            output.WriteLine($"Project:     {r.ProjectName} ({r.Files.Count} files)");
+            output.WriteLine($"Written on:  {r.Computer} at {r.CreatedUtc.UtcDateTime:yyyy-MM-dd HH:mm} UTC by {r.Burner.Account}");
+            output.WriteLine($"Approved by: {r.Approvers[0].Account} and {r.Approvers[1].Account}");
+            output.WriteLine($"Disc id:     {r.DiscId:D}");
+            output.WriteLine($"Check code:  {verified.CheckCode}");
+            return 0;
+        }
 
         /// <summary>Creates this computer's TPM sender key (once) and writes its public sender file for the vault PC's administrator.</summary>
         internal static int Init(string[] args, TextWriter output)

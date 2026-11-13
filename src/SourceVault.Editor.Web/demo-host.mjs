@@ -24,7 +24,13 @@ const ARGS = {
   addFromDisk: ['projectId', 'folder'], revertFile: ['projectId', 'fileId', 'revisionId'],
   chooseImportFolder: [], importFolder: ['name'], cancelImport: [], dropFiles: ['projectId', 'folder'],
   unlockWithPassword: ['password'], setPassword: ['newPassword'], changePassword: ['password', 'newPassword'],
+  listDiscDrives: [], beginDiscBurn: ['projectId', 'driveId'], approveDiscBurn: ['burnId', 'account', 'password'],
+  startDiscBurn: ['burnId'], discBurnStatus: ['burnId'], cancelDiscBurn: ['burnId'],
 };
+// Demo disc writing: a made-up drive and three made-up accounts. Nothing is written anywhere.
+export const DEMO_APPROVERS = [['DEMO\\alice', 'alice demo phrase'], ['DEMO\\bob', 'bob demo phrase']];
+const DEMO_ACCOUNTS = new Map([['demo\\alice', { approver: true, password: 'alice demo phrase' }], ['demo\\bob', { approver: true, password: 'bob demo phrase' }],
+  ['demo\\carol', { approver: false, password: 'carol demo phrase' }]]);
 const isQuery = q => typeof q === 'string' && q.length > 0 && q.length <= 200 && ![...q].some(c => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127);
 const MAX_TEXT_BYTES = 1024 * 1024; // the editor's text limit
 const encoder = new TextEncoder();
@@ -80,6 +86,10 @@ export class DemoVaultHost {
   buildTargets = ['linux', 'windows']; // [] rehearses 'builds not set up'
   buildMs = 1500;          // how long a demo build runs
   buildFails = false;
+  discBurner = true; // the demo operator is in SourceVault Disc Burners (a demo control turns it off)
+  discMedia = { mediaType: 'CD-R', writeOnce: true, blank: true, freeBytes: 700 * 1024 * 1024 };
+  discMs = 1500;
+  #burn = null;
   #builds = new Map();     // projectId -> [build], newest last
   settings = { ...DEFAULT_SETTINGS }; // the host's editor-settings.json
 
@@ -335,6 +345,48 @@ export class DemoVaultHost {
         this.#save(file, args.text, 'edited'); this.#opened.set(key, file.rev);
         return reply('Ok', { byteLength: bytes(args.text) });
       }
+      case 'listDiscDrives':
+        return reply('Ok', { allowed: this.discBurner, checkCode: 'DEMO-0000-0000-0000-0000-0000',
+          drives: this.discBurner ? [{ driveId: 'demo-drive', name: 'Demo DVD writer (E:)', ...(this.discMedia ?? { mediaType: null, writeOnce: false, blank: false, freeBytes: 0 }) }] : [] });
+      case 'beginDiscBurn': {
+        if (!this.discBurner) return reply('NotDiscBurner');
+        if (this.#burn && !['done', 'failed', 'cancelled'].includes(this.#burn.state)) return reply('DiscBusy');
+        if (args.driveId !== 'demo-drive' || !this.discMedia) return reply('NoMedia');
+        if (!this.discMedia.writeOnce) return reply('MediaNotWriteOnce');
+        if (!this.discMedia.blank) return reply('MediaNotBlank');
+        const files = [...project.files.values()];
+        this.#burn = { burnId: crypto.randomUUID(), state: 'waiting', progress: 0, approvers: [], reason: null, discId: null, verified: false };
+        return reply('Ok', { burnId: this.#burn.burnId, fileCount: files.length, totalBytes: files.reduce((n, f) => n + f.length, 0) });
+      }
+      case 'approveDiscBurn':
+      case 'startDiscBurn':
+      case 'discBurnStatus':
+      case 'cancelDiscBurn': {
+        const burn = this.#burn;
+        if (!burn || burn.burnId !== args.burnId) return reply('NotFound');
+        if (operation === 'discBurnStatus') return reply('Ok', { state: burn.state, progress: burn.progress, approvals: burn.approvers.length, reason: burn.reason, discId: burn.discId, verified: burn.verified });
+        if (operation === 'cancelDiscBurn') { if (burn.state !== 'waiting') return reply('InvalidRequest'); burn.state = 'cancelled'; return reply('Ok', {}); }
+        if (burn.state !== 'waiting') return reply('InvalidRequest');
+        if (operation === 'approveDiscBurn') {
+          const name = String(args.account).trim().toLowerCase(), account = DEMO_ACCOUNTS.get(name);
+          if (name === this.actor.toLowerCase()) return reply('SameAsBurner');
+          if (!account) return reply('NotDiscApprover');
+          if (burn.approvers.includes(name)) return reply('AlreadyApproved');
+          if (burn.approvers.length >= 2) return reply('AlreadyApproved');
+          if (args.password !== account.password) return reply('WrongPassword');
+          if (!account.approver) return reply('NotDiscApprover');
+          burn.approvers.push(name);
+          return reply('Ok', { approver: 'DEMO\\' + name.slice(5), approvals: burn.approvers.length });
+        }
+        if (burn.approvers.length < 2) return reply('ApprovalsMissing');
+        burn.state = 'writing'; burn.discId = crypto.randomUUID();
+        const step = this.discMs / 4;
+        setTimeout(() => { burn.progress = 50; }, step);
+        setTimeout(() => { burn.state = 'closing'; burn.progress = 100; }, step * 2);
+        setTimeout(() => { burn.state = 'verifying'; burn.progress = 0; }, step * 3);
+        setTimeout(() => { burn.state = 'done'; burn.progress = 100; burn.verified = true; this.discMedia = { ...this.discMedia, blank: false }; }, step * 4);
+        return reply('Ok', {});
+      }
       case 'listBuildTargets':
         return this.buildTargets.length ? reply('Ok', { targets: this.buildTargets, platforms: this.buildTargets.map(t => (t === 'windows' ? 'windows' : 'linux')) }) : reply('Unavailable');
       case 'requestBuild': {
@@ -497,6 +549,9 @@ export function installDemoPanel(demo, getActive) {
     ['Session expiry', () => { demo.simulateLock('expired'); return 'Simulated the 30-minute expiry.'; }],
     ['Next unlock fails', () => { demo.failNextUnlock = 'ServiceNotRunning'; return 'The next unlock reports the service as not running.'; }],
     ['Next build fails', () => { demo.buildFails = !demo.buildFails; return demo.buildFails ? 'Builds now fail (click again to undo).' : 'Builds succeed again.'; }],
+    ['I am not a disc burner', () => { demo.discBurner = !demo.discBurner; return demo.discBurner ? 'You are in SourceVault Disc Burners again.' : 'You are no longer in SourceVault Disc Burners: Write to disc explains and stops.'; }],
+    ['Put a blank disc in', () => { demo.discMedia = { mediaType: 'CD-R', writeOnce: true, blank: true, freeBytes: 700 * 1024 * 1024 }; return 'A blank CD-R is in the demo drive.'; }],
+    ['Put a rewritable disc in', () => { demo.discMedia = { mediaType: 'DVD+RW', writeOnce: false, blank: true, freeBytes: 4700 * 1024 * 1024 }; return 'A DVD+RW is in the demo drive: Write to disc refuses it.'; }],
     ['Administrator resets my password', () => { demo.resetPassword(); return 'Reset: lock, then unlock and choose a new SourceVault password.'; }],
     ['A project fails its integrity check', () => { const id = demo.projectIdByName('Synthetic C# demo'); return id && demo.takeOffline(id) ? '"Synthetic C# demo" is offline. Switch project to see it; it can only be deleted.' : 'Already offline or deleted.'; }],
   ];

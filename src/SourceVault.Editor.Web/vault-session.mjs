@@ -588,6 +588,14 @@ export class VaultSession {
   /** The project's builds, newest first: { buildNumber, target, state, reason, exitCode, requestedBy, requestedAt, finishedAt, artifactFolder, artifactFiles, artifactBytes, artifactsDropped, logAvailable, logTruncated }. */
   async listBuilds() { return (await this.#call('listBuilds', { projectId: this.project.projectId })).builds ?? []; }
 
+  // ---- discs (docs/disc-export-design.md): the service writes and signs; approvers' passwords go straight to it ----
+  async listDiscDrives() { return this.#call('listDiscDrives', {}); }
+  async beginDiscBurn(driveId) { return this.#call('beginDiscBurn', { projectId: this.project.projectId, driveId }); }
+  async approveDiscBurn(burnId, account, password) { return this.#call('approveDiscBurn', { burnId, account, password }); }
+  async startDiscBurn(burnId) { await this.#call('startDiscBurn', { burnId }); }
+  async discBurnStatus(burnId) { return this.#call('discBurnStatus', { burnId }); }
+  async cancelDiscBurn(burnId) { await this.#call('cancelDiscBurn', { burnId }); }
+
   async buildStatus(buildNumber) { return this.#call('buildStatus', { projectId: this.project.projectId, buildNumber }); }
 
   /** A finished build's output text. It can contain source, so it is shown only in the editor, like files. */

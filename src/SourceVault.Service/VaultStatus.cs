@@ -15,6 +15,22 @@ internal static class VaultStatus
 
     internal static void Write(int available, IEnumerable<Guid> offline) => WriteTo(Folder, available, offline, DateTimeOffset.UtcNow);
 
+    /// <summary>
+    /// The disc signing key's public half (SubjectPublicKeyInfo) as <c>status\disc-key.der</c>, so <c>-Status</c> can show
+    /// its check code for administrators to publish (docs/disc-export-design.md, section 4). Public data; best effort.
+    /// </summary>
+    internal static void WriteDiscKey(byte[] subjectPublicKeyInfo)
+    {
+        try
+        {
+            if (!Directory.Exists(Folder) || (File.GetAttributes(Folder) & FileAttributes.ReparsePoint) != 0) return;
+            var path = Path.Combine(Folder, "disc-key.der");
+            File.WriteAllBytes(path + ".tmp", subjectPublicKeyInfo);
+            File.Move(path + ".tmp", path, overwrite: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* best effort: the editor shows the check code too */ }
+    }
+
     internal static void WriteTo(string folder, int available, IEnumerable<Guid> offline, DateTimeOffset now)
     {
         try

@@ -84,4 +84,56 @@ public static class TpmKeyProvisioner
             }
         }
     }
+
+    private const uint PcpSignatureKey = 0x1; // NCRYPT_PCP_SIGNATURE_KEY
+
+    /// <summary>
+    /// One-time creation of the service's sign-only disc signing key (docs/disc-export-design.md, section 4), under
+    /// <c>NT SERVICE\SourceVault</c>. Same rules as <see cref="CreateDecryptOnly"/>: never overwrites, export must be refused,
+    /// then opened through the runtime checks and proven with a synthetic sign-and-verify.
+    /// </summary>
+    public static ProvisionOutcome CreateSignOnly(string keyName)
+    {
+        TpmKeyProtector.ValidateKeyName(keyName);
+        try
+        {
+            TpmKeyProtector.RequireServiceIdentity(); // Must precede hardware/provider/key operations.
+            TpmKeyProtector.ProbeHardwareProvider();
+        }
+        catch (Exception e) when (e is CryptographicException or UnauthorizedAccessException or PlatformNotSupportedException
+            or System.Security.Principal.IdentityNotMappedException)
+        {
+            return ProvisionOutcome.Unavailable;
+        }
+        var provider = new CngProvider(TpmKeyProtector.ProviderName);
+        if (CngKey.Exists(keyName, provider)) return ProvisionOutcome.AlreadyExists;
+
+        var parameters = new CngKeyCreationParameters
+        {
+            Provider = provider,
+            ExportPolicy = CngExportPolicies.None,
+            KeyUsage = CngKeyUsages.Signing,
+            KeyCreationOptions = CngKeyCreationOptions.None, // never OverwriteExistingKey, never MachineKey
+        };
+        parameters.Parameters.Add(new CngProperty("Length", BitConverter.GetBytes(2048), CngPropertyOptions.None));
+        parameters.Parameters.Add(new CngProperty(PcpKeyUsagePolicyProperty, BitConverter.GetBytes(PcpSignatureKey), CngPropertyOptions.None));
+        try { CngKey.Create(CngAlgorithm.Rsa, keyName, parameters).Dispose(); }
+        catch (CryptographicException) { return ProvisionOutcome.Unavailable; }
+
+        TpmSigningKey opened;
+        try { opened = TpmSigningKey.OpenExisting(keyName); } // the runtime checks, including that export is refused
+        catch (Exception e) when (e is CryptographicException or UnauthorizedAccessException) { return ProvisionOutcome.PolicyRejected; }
+        using (opened)
+        {
+            try
+            {
+                var digest = SHA256.HashData(RandomNumberGenerator.GetBytes(32));
+                var signature = opened.SignHash(digest);
+                using var check = RSA.Create();
+                check.ImportSubjectPublicKeyInfo(opened.ExportSubjectPublicKeyInfo(), out _);
+                return check.VerifyHash(digest, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pss) ? ProvisionOutcome.Created : ProvisionOutcome.RoundtripFailed;
+            }
+            catch (CryptographicException) { return ProvisionOutcome.RoundtripFailed; }
+        }
+    }
 }

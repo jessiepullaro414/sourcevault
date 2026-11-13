@@ -101,6 +101,28 @@ const BUILD_REASONS = {
 };
 const duration = (from, to) => { const s = Math.max(0, (new Date(to) - new Date(from)) / 1000); return s < 60 ? `${s.toFixed(1)} s` : `${Math.floor(s / 60)} min ${Math.round(s % 60)} s`; };
 const formatBytes = n => n < 1024 ? `${n} bytes` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : n < 1073741824 ? `${(n / 1048576).toFixed(1)} MiB` : `${(n / 1073741824).toFixed(2)} GiB`;
+// Writing a project to a finalized disc (docs/disc-export-design.md): what each refusal means, in plain words.
+const DISC_FAILURES = {
+  NotDiscBurner: 'You are not in SourceVault Disc Burners. Ask an administrator.',
+  NotDiscApprover: 'That account can’t approve: it must be in SourceVault Disc Approvers and SourceVault Operators.',
+  SameAsBurner: 'You can’t approve your own disc. Two other people must approve it.',
+  AlreadyApproved: 'That person has already approved, or two people already have.',
+  ApprovalsMissing: 'Two approvals are needed first.',
+  ApprovalExpired: 'The approvals are more than 15 minutes old. Both approvers must sign in again.',
+  ProjectChanged: 'The project changed since you prepared the disc. Prepare it again: the approvals were for the earlier files.',
+  DiscUnavailable: 'Disc writing isn’t set up on this computer (no disc signing key, or Windows’ disc writing isn’t available). Ask an administrator.',
+  DiscBusy: 'Another disc is being prepared or written on this computer. Try again when it has finished.',
+  NoMedia: 'There’s no disc in that drive, or the drive is gone.',
+  MediaNotWriteOnce: 'That disc is rewritable (RW, RE or RAM). Use a write-once disc: CD-R, DVD±R or BD-R.',
+  MediaNotBlank: 'That disc isn’t blank. Use a new, blank write-once disc.',
+  MediaTooSmall: 'The project doesn’t fit on that disc.',
+  BurnFailed: 'Writing the disc failed. The disc may be unusable; use a new one.',
+  VerifyFailed: 'The disc was written, but reading it back didn’t match its record. Don’t use it.',
+  WrongPassword: 'Wrong password for that approver. Five wrong tries stop approvals by that person for 15 minutes.',
+  PasswordLocked: 'Approvals by that person are locked for 15 minutes after wrong tries. They can still use SourceVault themselves.',
+  PasswordNotSet: 'That approver has no SourceVault password yet: they must open SourceVault once and choose one.',
+};
+const DISC_STATES = { waiting: 'Waiting for approvals', writing: 'Writing the disc…', closing: 'Finalizing the disc…', verifying: 'Reading the disc back to check it…', done: 'Done', failed: 'Failed', cancelled: 'Cancelled' };
 const FAILURES = {
   NotFound: 'That item no longer exists in the vault.',
   LimitExceeded: 'Over a vault limit: the editor opens and saves text up to 1 MiB; files can be up to 1 GiB, 25,000 files and 8 GiB per project, and the vault keeps 4 GiB of disk free.',
@@ -133,6 +155,7 @@ export async function startVault(transport, metadata, onSession) {
   let renaming = null; // { projectId, value } while a project rename is open in the picker
   let history = null, diffEditor = null; // the open history view: { fileId, path, language, deleted, revisions, more, page, selected, latestText, models }
   let buildsView = null, buildTimer = null, logViewer = null, logModel = null; // the open builds view
+  let discView = null, discTimer = null; // the open "Write to disc" view: { allowed, checkCode, drives, burn, approvers, status }
   let merging = null; // the open merge view: { id, path, segments, conflicts, choices, theirsRevisionId }
   let showDeleted = false, deletedFiles = [], restoring = null; // the deleted-files view; restoring: { fileId, value } when the old path is taken
   let fileMenu = null; // { id, mode: menu | rename | folder | delete, value } for the explorer row whose ⋯ panel is open
@@ -263,7 +286,7 @@ export async function startVault(transport, metadata, onSession) {
     $('files-detail').textContent = hasProject ? `${session.files.size} in project` : '—';
     $('language-detail').textContent = $('language-status').textContent = f ? languageLabel(f.language) : '—';
     document.body.classList.toggle('locked', locked || !!passwordPrompt);
-    renderHistory(); renderDeleted(); renderMerge(); renderBuilds(); renderCompare(); renderInfo(); updateStatusDetails();
+    renderHistory(); renderDeleted(); renderMerge(); renderBuilds(); renderDisc(); renderCompare(); renderInfo(); updateStatusDetails();
     const choice = !!f && notMergeable.has(f.id);
     $('conflict-text').textContent = choice
       ? 'Someone else changed this file, and one of the versions is binary or over 1 MiB, so they can\u2019t be merged as text. Keep mine saves your text over theirs; keep theirs discards your edits. The other version stays in History either way.'
@@ -791,6 +814,125 @@ export async function startVault(transport, metadata, onSession) {
     });
   };
 
+  // ---- write to disc: the approval message first; the service decides who may, and writes and signs the disc ----
+  function closeDisc() { clearTimeout(discTimer); discTimer = null; discView = null; $('disc-password').value = ''; $('disc-account').value = ''; }
+  function openDisc() {
+    act(async () => {
+      closeHistory(); closeBuilds(); closeCompare(); showDeleted = false; merging = null;
+      try { discView = { ...(await session.listDiscDrives()), burn: null, approvers: [], status: null }; }
+      catch (e) { if (e?.code === 'DiscUnavailable') discView = { allowed: false, unavailable: true, checkCode: '', drives: [], burn: null, approvers: [], status: null }; else throw e; }
+    }, () => renderDisc());
+  }
+  function selectedDrive() { return discView?.drives.find(d => d.driveId === $('disc-drive').value) ?? discView?.drives[0] ?? null; }
+  function mediaText(d) {
+    if (!d) return 'No disc drive that can write was found.';
+    if (!d.mediaType) return 'No disc in this drive.';
+    const state = !d.writeOnce ? 'rewritable: not accepted' : !d.blank ? 'not blank: not accepted' : `blank, ${formatBytes(d.freeBytes)} free`;
+    return `${d.mediaType}, ${state}`;
+  }
+  function renderDisc() {
+    const open = !!discView && !session.locked && !picking && !!session.project;
+    $('disc-view').hidden = !open;
+    if (!open) return;
+    const v = discView, burn = v.burn, status = v.status;
+    $('disc-title').textContent = `Write ${session.project.name} to disc`;
+    $('disc-caption').textContent = demo ? 'Demo: nothing is written; the drive and the approvers are made up. Approvers: DEMO\\alice (alice demo phrase) and DEMO\\bob (bob demo phrase).' : 'The disc gets the project’s saved files, not unsaved edits.';
+    $('disc-checkcode').textContent = v.checkCode || '—';
+    const denied = $('disc-denied');
+    denied.hidden = v.allowed;
+    denied.textContent = v.unavailable ? DISC_FAILURES.DiscUnavailable : DISC_FAILURES.NotDiscBurner;
+    const writing = status && status.state !== 'waiting';
+    $('disc-prepare').hidden = !v.allowed || !!burn;
+    if (v.allowed && !burn) {
+      const select = $('disc-drive');
+      if (select.options.length !== v.drives.length) select.replaceChildren(...v.drives.map(d => { const o = document.createElement('option'); o.value = d.driveId; o.textContent = d.name; return o; }));
+      const d = selectedDrive();
+      $('disc-media').textContent = mediaText(d);
+      $('disc-begin').disabled = busy || !d || !d.mediaType || !d.writeOnce || !d.blank;
+      $('disc-refresh').disabled = select.disabled = busy;
+    }
+    $('disc-approvals').hidden = !burn || writing;
+    if (burn && !writing) {
+      $('disc-summary').textContent = `${burn.fileCount} file${burn.fileCount === 1 ? '' : 's'}, ${formatBytes(burn.totalBytes)}, ready for ${v.driveName}. Two approvers now sign in, one after the other, on this computer.`;
+      $('disc-approvers').replaceChildren(...[0, 1].map(i => { const li = document.createElement('li'); li.textContent = v.approvers[i] ? `Approved by ${v.approvers[i]}` : 'Waiting for an approver'; return li; }));
+      const full = v.approvers.length >= 2;
+      $('disc-approve-form').hidden = full;
+      for (const id of ['disc-account', 'disc-password']) $(id).disabled = busy;
+      $('disc-start').disabled = busy || !full;
+      $('disc-cancel').disabled = busy;
+      $('disc-hint').hidden = !demo;
+      $('disc-hint').textContent = 'Demo approvers: DEMO\\alice with “alice demo phrase”, and DEMO\\bob with “bob demo phrase”. DEMO\\carol isn’t an approver.';
+    }
+    $('disc-progress').hidden = !writing || ['done', 'failed', 'cancelled'].includes(status?.state);
+    if (writing) { $('disc-state').textContent = DISC_STATES[status.state] ?? status.state; $('disc-bar').value = status.progress ?? 0; }
+    const result = $('disc-result');
+    const finished = status && ['done', 'failed'].includes(status.state);
+    result.hidden = !finished;
+    if (finished) {
+      const ok = status.state === 'done' && status.verified;
+      result.className = `disc-result${ok ? '' : ' failed'}`;
+      result.textContent = ok
+        ? `The disc is written, finalized and checked. Disc id ${status.discId}. Its record names you and ${v.approvers.join(' and ')}. Anyone can check it with SourceVault Pack: verify-disc, with the check code below.`
+        : DISC_FAILURES[status.reason] ?? `The disc wasn’t finished (${status.reason ?? status.state}).`;
+    }
+  }
+  function pollDisc() {
+    clearTimeout(discTimer);
+    if (!discView?.burn || !discView.status || ['done', 'failed', 'cancelled'].includes(discView.status.state)) return;
+    discTimer = setTimeout(async () => {
+      if (!discView?.burn || session.locked) return;
+      try { discView.status = await session.discBurnStatus(discView.burn.burnId); } catch { /* the next poll, or an action, reports */ }
+      if (discView?.status && ['done', 'failed'].includes(discView.status.state)) announce(discView.status.state === 'done' && discView.status.verified ? 'The disc is written, finalized and checked.' : 'The disc wasn’t finished.');
+      renderDisc(); pollDisc();
+    }, 1000);
+  }
+  const discFailure = e => { const message = DISC_FAILURES[e?.code]; if (message) return message; throw e; };
+  $('write-disc').onclick = openDisc;
+  $('disc-close').onclick = () => {
+    if (discView?.status && ['writing', 'closing', 'verifying'].includes(discView.status.state)) { announce('The disc is being written. Leave this open until it has finished.'); return; }
+    closeDisc(); render();
+  };
+  $('disc-drive').onchange = () => renderDisc();
+  $('disc-refresh').onclick = () => act(async () => { Object.assign(discView, await session.listDiscDrives()); }, () => renderDisc());
+  $('disc-begin').onclick = () => {
+    const d = selectedDrive();
+    if (!d) return;
+    act(async () => {
+      try { discView.burn = await session.beginDiscBurn(d.driveId); } catch (e) { return discFailure(e); }
+      discView.driveName = d.name; discView.approvers = []; discView.status = { state: 'waiting', progress: 0 };
+      return 'Ready. Two approvers now sign in here, one after the other.';
+    }, () => { renderDisc(); $('disc-account').focus(); });
+  };
+  $('disc-approve-form').onsubmit = event => {
+    event.preventDefault();
+    const account = $('disc-account').value.trim(), password = $('disc-password').value;
+    $('disc-password').value = ''; // never kept, whatever happens
+    if (!account || !password || !discView?.burn) return;
+    act(async () => {
+      let approved;
+      try { approved = await session.approveDiscBurn(discView.burn.burnId, account, password); } catch (e) { return discFailure(e); }
+      discView.approvers.push(approved.approver);
+      $('disc-account').value = '';
+      return approved.approvals >= 2 ? `Approved by ${approved.approver}. Both approvals are in: you can write the disc.` : `Approved by ${approved.approver}. One more approver.`;
+    }, () => { renderDisc(); if (discView?.approvers.length < 2) $('disc-account').focus(); });
+  };
+  $('disc-start').onclick = () => act(async () => {
+    try { await session.startDiscBurn(discView.burn.burnId); }
+    catch (e) {
+      if (e?.code === 'ApprovalExpired') discView.approvers = [];
+      if (e?.code === 'ProjectChanged') { discView.burn = null; discView.status = null; discView.approvers = []; }
+      return discFailure(e);
+    }
+    discView.status = { state: 'writing', progress: 0 };
+    pollDisc();
+    return 'Writing the disc. Leave it in the drive until this says it has finished.';
+  }, () => renderDisc());
+  $('disc-cancel').onclick = () => act(async () => {
+    try { await session.cancelDiscBurn(discView.burn.burnId); } catch (e) { if (e?.code !== 'NotFound') return discFailure(e); }
+    discView.burn = null; discView.status = null; discView.approvers = [];
+    return 'Cancelled. Nothing was written.';
+  }, () => renderDisc());
+
   $('builds').onclick = openBuilds;
   $('builds-close').onclick = () => { closeBuilds(); render(); };
   $('build-start').onclick = () => {
@@ -849,7 +991,7 @@ export async function startVault(transport, metadata, onSession) {
       return `Restored ${name}.`;
     });
   }
-  $('deleted-files').onclick = () => act(async () => { deletedFiles = await session.listDeleted(); closeHistory(); closeBuilds(); closeCompare(); showDeleted = true; restoring = null; });
+  $('deleted-files').onclick = () => act(async () => { deletedFiles = await session.listDeleted(); closeHistory(); closeBuilds(); closeDisc(); closeCompare(); showDeleted = true; restoring = null; });
   $('deleted-close').onclick = () => { showDeleted = false; restoring = null; render(); };
 
   // A rename keeps the model (and its undo history); only the language follows the new extension.
@@ -1003,7 +1145,7 @@ export async function startVault(transport, metadata, onSession) {
     if (!session.files.has(id)) { announce('That file is no longer in the project.'); return; }
     const file = session.files.get(id);
     if (!file.loaded && !isOpenable(file)) { openInfo(id); return; }
-    closeHistory(); closeBuilds(); closeCompare(); showDeleted = false; fileMenu = null;
+    closeHistory(); closeBuilds(); closeDisc(); closeCompare(); showDeleted = false; fileMenu = null;
     act(async () => { await closeInfo(); await session.open(id); }, () => {
       const ed = focusedEditor();
       if (!match || !ed?.getModel()) return;
@@ -1014,7 +1156,7 @@ export async function startVault(transport, metadata, onSession) {
   // ---- info panel: files the editor doesn't show (binary, or text over 1 MiB) --------------------------------------
   // Name, kind, size, last change and SHA-256; rename, delete, history, replace from disk. Never the content.
   function openInfo(id) {
-    closeHistory(); closeBuilds(); closeCompare(); showDeleted = false; merging = null; fileMenu = null;
+    closeHistory(); closeBuilds(); closeDisc(); closeCompare(); showDeleted = false; merging = null; fileMenu = null;
     act(async () => {
       if (info?.id !== id) await closeInfo();
       info = { id, details: await session.info(id) };
@@ -1112,7 +1254,7 @@ export async function startVault(transport, metadata, onSession) {
     if (!available() || !f) return;
     if (!session.dirty(f.id)) { announce(`${f.path} has no unsaved edits.`); return; }
     if (merging) { announce('Finish or cancel the merge first.'); return; }
-    closeHistory(); closeBuilds(); closeCompare(); showDeleted = false;
+    closeHistory(); closeBuilds(); closeDisc(); closeCompare(); showDeleted = false;
     compareDiff ??= createDiffEditor($('compare-diff'), 'Saved version (left) compared with your unsaved edits (right)');
     // TypeScript/JavaScript copies would join the language worker's project (duplicate declarations); show them as text.
     const language = /^(typescript|javascript)$/.test(f.language) ? 'plaintext' : f.language;
@@ -1325,7 +1467,7 @@ export async function startVault(transport, metadata, onSession) {
   $('conflict-keep').onclick = () => { const f = active(); if (f) { keepEditing.add(f.id); render(); announce('Keeping your edits. Saving will still conflict; reload to take their version.'); } };
   $('switch-project').onclick = () => {
     if (session.dirtyIds.length) { announce(FAILURES.UnsavedChanges); return; }
-    act(async () => { await session.refreshProjects(); await closeInfo(); closeHistory(); closeBuilds(); showDeleted = false; merging = null; picking = true; });
+    act(async () => { await session.refreshProjects(); await closeInfo(); closeHistory(); closeBuilds(); closeDisc(); showDeleted = false; merging = null; picking = true; });
   };
   $('new-file').onclick = () => { $('new-file-form').hidden = false; $('new-file-name').value = ''; $('new-file-name').focus(); };
   $('new-file-form').onsubmit = event => {
@@ -1342,7 +1484,7 @@ export async function startVault(transport, metadata, onSession) {
   };
   session.onChange(() => {
     syncModel(); render();
-    if (session.locked) { notConnected = null; closeHistory(); closeBuilds(); closeCompare(); wb.onLock(); clearInternalClipboard(); showDeleted = false; merging = null; notMergeable.clear(); render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
+    if (session.locked) { notConnected = null; closeHistory(); closeBuilds(); closeDisc(); closeCompare(); wb.onLock(); clearInternalClipboard(); showDeleted = false; merging = null; notMergeable.clear(); render(); announce(`Vault locked (${session.lockReason}). Unsaved edits are kept.`); $('unlock').focus(); }
   });
   wireChrome(focusedEditor, { onSave: save, isLocked: () => session.locked, skipKey: event => chordKeys.has(event) });
   // In vault mode the rail's search button searches all files (Ctrl+F still finds in the open file).
